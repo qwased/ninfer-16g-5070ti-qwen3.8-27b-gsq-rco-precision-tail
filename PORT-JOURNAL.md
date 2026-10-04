@@ -1003,3 +1003,10 @@ three debug `printf`s (`DBGBODY`/`DBGTAIL`/`DBGRED`) may still be present; they 
 
 **Test discipline:** every process started this session was checked and stopped; the one orphaned
 debug build was killed by PID; no build or GPU run was started while the agent held `build-port`.
+
+**At pause (addendum):** the tree was clean and fully committed at `96043f9a`, and the background fix
+agent was **alive and compiling** (an `nvcc.exe` was running at 05:54). So a compiler may be live when
+this session pauses: before any new build, check `tasklist | grep -iE "ninja|nvcc"` and, if the agent
+is gone, stop any orphan (`taskkill //F //T //PID <ninja-pid>`, then stray `nvcc`) so nothing is left
+filling CPU/RAM/VRAM. Do not `git clean`/`reset` -- the agent's later edits, if any, land on top of
+`96043f9a` in the working tree.
