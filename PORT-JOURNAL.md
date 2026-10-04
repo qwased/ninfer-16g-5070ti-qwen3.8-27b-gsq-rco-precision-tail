@@ -926,3 +926,14 @@ grid hypothesis -- `launch_tail` already uses the same `splits` grid (`small_t_i
   compare `win`/`sc`/`ws`/`bw`/`ba`/`ta` between the body and tail prints for one launch, and the
   `DBGRED` per-split `(m, l)` against which splits the reducer actually merges. That comparison
   distinguishes a partition mismatch from a wrong ring offset without needing a hypothesis.
+
+## Step 27h - the fix subagent is alive; its model excludes the batched case
+
+The background fix agent is not stalled (a 0-byte task transcript is only stdout buffering): it wrote
+`.deps/part-model.py` (05:51), a host replication of `active_splits` / `tail_partition` /
+`split_capacity` / the body and tail split ranges, with coverage assertions (body union ends at
+`body_window`, `ba + ta == total`, neither partial empty, reducer total matches). That is the right
+instrument for the INT8 failures and it is the agent's work, so this session does not re-run or
+duplicate it. **Gap to note:** the model returns `cap` unchanged for `batch > 1` with `# not analysed
+here`, so the batched BF16 ring mismatch (Symptom B) is *outside* the model's coverage -- whichever
+session finishes this must root-cause the batched `cache-k/v` mismatch (`index 197376`) separately.
