@@ -515,3 +515,68 @@ Worktree `.worktrees/wp2`, branch `port/wp9-docs`. Docs + the self-contained cal
   config calculator" (4 files: `docs/config-calculator.html`, its two test harnesses,
   `PORT-JOURNAL.md`). The hash is recorded here in a following journal-only commit, because a commit
   cannot contain its own hash.
+
+---
+
+## 2026-10-05 — Step 24: WP10 — exact-tail oracle coverage in the causal-cache attention test
+
+Worktree `.worktrees/wp3`, branch `port/wp10-oracle`. Only
+`tests/ops/softmax_attention/causal_cache.cpp` and the port memory docs changed; no `src/`,
+`include/` or `apps/` file touched (the CUDA attention agent works in another worktree), no ninja
+build, no GPU run. Compile-verified with the per-TU harness (below).
+
+**Harness — all in `tests/ops/softmax_attention/causal_cache.cpp`**
+- `AttentionCase::kv_tail_tokens` and `BatchAttentionCase::kv_tail_tokens`, default `0`
+  (`:225-229`, `:3146-3150`). `0` leaves the pre-tail path byte-for-byte unchanged.
+- Ring helpers `tail_page_count` / `tail_ring_elements` / `tail_ring_index` (`:383-406`) resolve the
+  `(p/64) % page_count`, page-64, HeadMajor addressing to the append kernel's
+  `paged_kv_element_offset<D, kv_heads>` (`src/ops/kv_cache/append/kernel.cuh:99-103`,
+  `launch.cu:22-37`).
+- `HostCache` gains `tail_retention` / `tail_page_count` / `tail_k_bf16` / `tail_v_bf16` (`:656-664`).
+- `populate_tail` fills the ring from the same BF16 k/v rows `append_cache` consumes; `tail_covers`
+  + `cache_value_with_tail` (`:1557-1600`) make `ideal_attention` read exact newest rows and the
+  stored representation for older ones. With the tail off this is exactly `cache_value`, so every
+  untailed case keeps its prior oracle.
+- `DeviceCache` / `BatchDeviceCache` allocate a BF16 ring `[D, 64, kv_heads, page_count]`, set
+  `PagedKVExactTailView` on `view()` / `batch_view()`, and expose `upload_tail` / `verify_tail`
+  (`:1857-1905`, `:2143-2158`).
+- `run_a1_case` (both overloads) populates the ring with one `ops::kv_cache_append(tk, tv, tp,
+  cache.view(), …)` — the existing shadow write — and checks it via `verify_tail` (`:2785-2791`,
+  `:2888-2891`). `run_a3_case` (cached, read-only) uploads the generated ring (`:2994-3008`).
+  `run_batch_case` uploads the one shared ring and requires a single writer sequence
+  (`batch_tail_writer`, `:3311-3328`). `case_label` appends `tail=N`.
+- `run_a1_case` gained an optional captured-output pointer; the storage overload also gained
+  `assert_oracle` so the rotated-oracle plans can be measured against the exact oracle.
+
+**Cases (`run_tail_cases`, wired into `run_softmax_attention_causal_cache_tests`)**
+1. BF16 primary merge against the plain causal FP32 oracle: `{6, base=61, N=2}` (p+1 > N),
+   `{6, 61, N=6}` and `{1, 128, N=1}` (boundary p+1 <= N, body window empty), `{130, 0, N=129}`
+   (multi-64-page ring wrap with a one-key body).
+2. `run_tail_off_regression`: the same case with `kv_tail_tokens` defaulted vs explicitly `0`, BF16
+   outputs asserted bit-for-bit equal.
+3. Quantized hybrid (rk8v4 fused+cached, rk4v4-e8 fused+cached) at N=2 / N=129 / N=65, judged by the
+   existing criterion against the tail-aware oracle.
+4. NVFP4 weaker check `run_quantized_tail_case`: result finite and `rel_l2` vs the exact oracle no
+   worse than the tail-off run.
+5. C>1 masked batched rows with the tail on:
+   `BatchAttentionCase{8, {63,63}, {6,0}, {0,0}, Fragmented, …, tail=2}`.
+
+**Compile evidence.** The shared `.deps/ptcheck.py` rewrites the repo prefix to `.worktrees/wp1`;
+to verify *this* worktree without disturbing the concurrent wp1 CUDA agent, the script was copied to
+`.deps/ptcheck_wp3.py` (same rewrite to wp3, output `.deps/ptcheck_wp3.bat`, scratch
+`.deps/ptcheck-wp3/`). Run from `D:\ninfer\ninfer-precision-tail`:
+- `python .deps/ptcheck_wp3.py tests/ops/softmax_attention/causal_cache.cpp`
+  -> `wrote .deps/ptcheck_wp3.bat with 3 commands`.
+- `cmd /c .deps\ptcheck_wp3.bat`
+  -> `=== tests/ops/softmax_attention/causal_cache.cpp ===` / `causal_cache.cpp` / `DONE`;
+     grep for `SYNTAXFAIL|error|warning` is empty; `.deps/ptcheck-wp3/causal_cache.obj` (2,071,694
+     bytes) is produced. No `cl.exe` left alive; the only `nvcc.exe` seen is the other worktree's
+     concurrent build.
+
+**Not covered / not run.** No GPU run, so no runtime pass is claimed. The fused-path tail merge
+read is being wired by a separate agent and is not present in this worktree (`src/ops/softmax_attention`
+reads no `.tail` here); the cached entry is MTP-only. NVFP4/K8V4 have no complete hybrid oracle —
+the kernel evaluates in a Hadamard-rotated frame the raw tail rows are not expressed in — so they get
+the weaker no-worse-than-tail-off check, documented in `run_quantized_tail_case`.
+
+- Commit: recorded in the following journal-only commit (a commit cannot contain its own hash).
