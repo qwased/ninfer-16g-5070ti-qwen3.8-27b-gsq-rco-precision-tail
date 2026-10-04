@@ -421,3 +421,16 @@ Verified the capacity chain in `port/wp1`:
   `causal_attention_small_t_reduce_output_kernel`. Remaining work is a tail-partial kernel, workspace
   split sizing, and dispatch wiring — route family unchanged (still small-T), so §1.5 holds.
 - Recorded in PORT-MEMORY §5.6; PORT-DOD updated (WP2 PARTIAL/DONE-single-seq, WP3 design proven).
+
+---
+
+## 2026-10-05 — Step 21: port/wp1 merged into main (single authoritative branch)
+
+- `git merge --no-ff port/wp1` -> `964d7be6`, 18 files, +246. `main` now carries the whole increment:
+  WP1 tail pool + views + accounting, WP2 single-sequence shadow write, WP5 `MemorySummary` split,
+  WP6 option/identity across CLI and serve.
+- Rationale: the objective wants the new project under git as one authority, and earlier the code lived
+  on `port/wp1` while memory docs lived on `main`; the merge removes that split. The worktree
+  `.worktrees/wp1` remains for further increments.
+- Verification status unchanged: every changed TU (C++ and CUDA) compiles individually via
+  `.deps/ptcheck.py`; a full-tree ninja build has not yet been observed to complete.
