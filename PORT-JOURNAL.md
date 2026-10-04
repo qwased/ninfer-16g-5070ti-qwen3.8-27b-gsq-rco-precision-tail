@@ -74,3 +74,25 @@ Two read-only subagents were used (main context kept clean). No source files cha
   "continue with defaults". Recorded here so the limitation is not re-litigated.
 
 Next: task #2 get a working configure/build (in-workspace FFMPEG tree); in parallel start WP1/WP3.
+
+---
+
+## 2026-10-05 — Step 2: parallel agents (build unblock + Increment 1)
+
+- Launched background agent **BUILD** (no worktree): resolve the FFMPEG/vcpkg blocker by creating a
+  self-contained triplet tree at `D:\ninfer\ninfer-precision-tail\.deps\vcpkg-root\installed\x64-windows`
+  (prebuilt MSVC-linkable FFmpeg via `lib.exe /def:` if possible, else an in-workspace vcpkg),
+  then configure + build `ninfer_tests` (+`ninfer-perplexity`). Must not touch the shared `D:\ninfer\vcpkg`.
+- Launched background agent **INCR1**: WP1 (tail page pool spec + optional view component + planning),
+  WP6 subset (`--kv-tail-tokens`, EngineOptions field, identity tag, draft tail=0), WP5 accounting
+  (`MemorySummary.kv_exact_history_bytes` / `kv_rollback_reserve_bytes`, `SequenceCapacityCurve` →
+  constant + linear). No kernels; inert when tail=0.
+- **Isolation lesson:** the Agent tool's `isolation: worktree` FAILED with
+  `Failed to resolve base branch "HEAD": git rev-parse failed` because the session's primary working
+  directory (`D:\ninfer`) is not a git repository — the mechanism derives the repo from cwd, not from
+  the target path. Workaround adopted: create the worktree manually and point the agent at it:
+  `git worktree add .worktrees/wp1 -b port/wp1` (from the repo root), then instruct the agent to
+  work in `.worktrees/wp1`. `.worktrees/` added to `.gitignore` (commit `cc77009a`).
+- Commit `cc77009a`: ignore `.worktrees/`.
+
+Next: on agent completion, review INCR1 diff, fold BUILD findings into §3, then compile and iterate.
