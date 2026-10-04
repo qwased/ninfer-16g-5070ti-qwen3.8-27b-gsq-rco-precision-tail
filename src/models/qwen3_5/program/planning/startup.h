@@ -106,6 +106,8 @@ struct SequencePlanningInputs {
     std::uint32_t ngram_min_match           = 12;
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
+    // Exact KV tail retention in tokens; zero disables the tail.
+    std::int32_t kv_tail_tokens             = 0;
     ProposalHead proposal_head              = ProposalHead::Full;
     ops::RopeYarn rope_yarn;
     std::uint32_t mtp_attention_window = 0;
@@ -139,6 +141,7 @@ struct SequencePlanImpl {
     std::uint32_t ngram_min_match           = 12;
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
+    std::int32_t kv_tail_tokens             = 0;
     ProposalHead proposal_head              = ProposalHead::Full;
     ops::RopeYarn rope_yarn;
     std::uint32_t mtp_attention_window = 0;
