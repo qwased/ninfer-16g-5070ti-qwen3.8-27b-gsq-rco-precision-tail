@@ -25,6 +25,13 @@ struct DecoderStateSpec {
     std::int32_t kv_table_rows              = 1;
     std::uint32_t text_physical_page_groups = 0;
     std::uint32_t mtp_physical_page_groups  = 0;
+    // Exact (unquantized) KV tail: the newest `kv_tail_tokens` tokens of every sequence are kept in a
+    // second BF16 pool. Zero disables it. `kv_tail_physical_page_groups` is the whole pool's page-group
+    // extent, i.e. the per-sequence ring times max concurrency.
+    std::int32_t kv_tail_tokens              = 0;
+    std::uint32_t kv_tail_physical_page_groups = 0;
+    // The per-sequence ring length in pages; the pool holds this many for each concurrent sequence.
+    std::uint32_t kv_tail_ring_pages         = 0;
     // The rank holding each full-attention layer's KV planes; empty puts every layer on rank 0. The
     // MTP cache always lives on rank 0.
     std::vector<std::size_t> text_layer_rank;
@@ -91,6 +98,11 @@ public:
 
     [[nodiscard]] PagedKVCacheView execution_view(const KVExecutionRowLease& row) const;
 
+    // Binds the device-only exact tail pool this cache's layer views expose. The pool must outlive
+    // the cache. Without a binding the views carry a disabled tail.
+    void attach_exact_tail(const DeviceKVPagePool& pool, std::int32_t retention,
+                           std::uint32_t ring_pages) noexcept;
+
     [[nodiscard]] PagedKVBatchLayerView batch_layer_view(std::uint32_t layer) const;
     // The rank holding this layer's KV planes, which is also the rank whose block table it reads.
     [[nodiscard]] std::size_t layer_rank(std::uint32_t layer) const;
@@ -107,11 +119,26 @@ private:
     std::int32_t kv_heads_     = 0;
     std::int32_t head_dim_     = 0;
     KvCacheStorage storage_    = KvCacheStorage::BFloat16;
+    const DeviceKVPagePool* exact_tail_ = nullptr;
+    std::int32_t tail_retention_        = 0;
+    std::uint32_t tail_ring_pages_      = 0;
+};
+
+// Exact KV tail: BF16, HeadMajor, two planes (K, V) per full-attention layer, page 64. Device-only,
+// so unlike PagedKVCacheLayout it owns no execution tables; its pages are addressed by position.
+struct ExactTailCacheLayout {
+    DeviceKVPagePoolLayout pages;
+    std::int32_t retention = 0;
+    std::uint32_t layers   = 0;
+    std::uint32_t ring_pages = 0;
+
+    [[nodiscard]] std::size_t payload_bytes() const noexcept { return pages.payload_bytes(); }
 };
 
 struct DecoderStateLayout {
     PagedKVCacheLayout text_kv;
     std::optional<PagedKVCacheLayout> mtp_kv;
+    std::optional<ExactTailCacheLayout> exact_tail;
 
     [[nodiscard]] std::size_t kv_payload_bytes() const noexcept;
 };
@@ -126,12 +153,16 @@ struct DecoderStateLayout {
 struct DecoderState {
     PagedKVCache text_kv;
     std::optional<PagedKVCache> mtp_kv;
+    // Exact tail pool: no execution tables, addressed by position ring, device-only.
+    std::optional<DeviceKVPagePool> exact_tail;
 
     DecoderState(std::span<const DeviceSpan> backings, const DecoderStateLayout& layout);
     DecoderState(DeviceSpan backing, const DecoderStateLayout& layout);
 
     [[nodiscard]] PagedKVCache* mtp_cache() noexcept;
     [[nodiscard]] const PagedKVCache* mtp_cache() const noexcept;
+    [[nodiscard]] DeviceKVPagePool* exact_tail_pool() noexcept;
+    [[nodiscard]] const DeviceKVPagePool* exact_tail_pool() const noexcept;
 };
 
 } // namespace ninfer::models::qwen3_5

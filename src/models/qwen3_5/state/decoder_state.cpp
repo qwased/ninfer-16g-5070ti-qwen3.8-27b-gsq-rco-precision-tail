@@ -115,6 +115,53 @@ DecoderStateLayout plan_decoder_state(std::span<LayoutBuilder* const> builders,
                                    spec.kv_heads, spec.attention_head_dim, spec.kv_storage,
                                    spec.kv_table_rows, spec.mtp_physical_page_groups);
     }
+    if (spec.kv_tail_tokens > 0 && spec.full_attention_layers != 0) {
+        if (spec.kv_tail_physical_page_groups == 0) {
+            throw std::invalid_argument("exact KV tail is enabled with no page groups");
+        }
+        // Same geometry as the body, but unquantized: two planes (K, V) per full-attention layer on
+        // the layer's own rank, page-major order replaced by head-major, and no execution table.
+        const PagedKVStorageLayout tail_storage =
+            paged_kv_storage_layout(KvCacheStorage::BFloat16, spec.attention_head_dim);
+        KVPageGeometry tail_geometry{
+            .page_tokens        = kPagedKVPageSize,
+            .device_plane_order = PagedKVPlaneOrder::HeadMajor,
+            .planes =
+                {
+                    {tail_storage.key.data_dtype, tail_storage.key.data_leading_extent, spec.kv_heads,
+                     256},
+                    {tail_storage.value.data_dtype, tail_storage.value.data_leading_extent,
+                     spec.kv_heads, 256},
+                },
+        };
+        const auto tail_planes = tail_geometry.planes;
+        for (std::uint32_t layer = 1; layer < spec.full_attention_layers; ++layer) {
+            tail_geometry.planes.insert(tail_geometry.planes.end(), tail_planes.begin(),
+                                        tail_planes.end());
+        }
+        std::vector<std::size_t> tail_plane_rank;
+        tail_plane_rank.reserve(tail_geometry.planes.size());
+        for (std::uint32_t layer = 0; layer < spec.full_attention_layers; ++layer) {
+            std::size_t rank = 0;
+            if (!spec.text_layer_rank.empty()) {
+                if (layer >= spec.text_layer_rank.size()) {
+                    throw std::invalid_argument("exact KV tail layer names no rank");
+                }
+                rank = spec.text_layer_rank[layer];
+            }
+            tail_plane_rank.push_back(rank);
+            tail_plane_rank.push_back(rank);
+        }
+        layout.exact_tail = ExactTailCacheLayout{
+            .pages = plan_device_kv_page_pool(
+                builders, tail_plane_rank,
+                DeviceKVPagePoolSpec{.page_group_count = spec.kv_tail_physical_page_groups,
+                                     .geometry         = std::move(tail_geometry)}),
+            .retention = spec.kv_tail_tokens,
+            .layers    = spec.full_attention_layers,
+            .ring_pages = spec.kv_tail_ring_pages,
+        };
+    }
     return layout;
 }
 
@@ -162,6 +209,14 @@ PagedKVLayerView PagedKVCache::layer_view(std::uint32_t layer,
     // another device's memory.
     const Tensor block_table =
         row == nullptr ? Tensor() : execution_tables_.row(*row, layer_rank(layer));
+    PagedKVExactTailView tail;
+    if (exact_tail_ != nullptr && tail_retention_ > 0 && layer < layers_) {
+        const std::size_t tail_base = static_cast<std::size_t>(layer) * 2;
+        tail.k_pages    = exact_tail_->plane(tail_base);
+        tail.v_pages    = exact_tail_->plane(tail_base + 1);
+        tail.page_count = static_cast<std::int32_t>(tail_ring_pages_);
+        tail.retention  = tail_retention_;
+    }
     return PagedKVLayerView{
         .k_pages       = pages_.plane(base),
         .v_pages       = pages_.plane(base + 1),
@@ -171,6 +226,7 @@ PagedKVLayerView PagedKVCache::layer_view(std::uint32_t layer,
         .head_dim      = head_dim_,
         .num_kv_heads  = kv_heads_,
         .storage       = storage_,
+        .tail          = tail,
     };
 }
 
@@ -185,11 +241,13 @@ PagedKVBatchLayerView PagedKVCache::batch_layer_view(std::uint32_t layer) const 
         .head_dim      = direct.head_dim,
         .num_kv_heads  = direct.num_kv_heads,
         .storage       = direct.storage,
+        .tail          = direct.tail,
     };
 }
 
 std::size_t DecoderStateLayout::kv_payload_bytes() const noexcept {
-    return text_kv.payload_bytes() + (mtp_kv ? mtp_kv->payload_bytes() : 0);
+    return text_kv.payload_bytes() + (mtp_kv ? mtp_kv->payload_bytes() : 0) +
+           (exact_tail ? exact_tail->payload_bytes() : 0);
 }
 
 DecoderState::DecoderState(DeviceSpan backing, const DecoderStateLayout& layout)
@@ -198,10 +256,30 @@ DecoderState::DecoderState(DeviceSpan backing, const DecoderStateLayout& layout)
 DecoderState::DecoderState(std::span<const DeviceSpan> backings, const DecoderStateLayout& layout)
     : text_kv(backings, layout.text_kv) {
     if (layout.mtp_kv) { mtp_kv.emplace(backings, *layout.mtp_kv); }
+    if (layout.exact_tail) {
+        exact_tail.emplace(backings, layout.exact_tail->pages);
+        text_kv.attach_exact_tail(*exact_tail, layout.exact_tail->retention,
+                                  layout.exact_tail->ring_pages);
+    }
+}
+
+void PagedKVCache::attach_exact_tail(const DeviceKVPagePool& pool, std::int32_t retention,
+                                     std::uint32_t ring_pages) noexcept {
+    exact_tail_      = &pool;
+    tail_retention_  = retention;
+    tail_ring_pages_ = ring_pages;
 }
 
 PagedKVCache* DecoderState::mtp_cache() noexcept { return mtp_kv ? &*mtp_kv : nullptr; }
 
 const PagedKVCache* DecoderState::mtp_cache() const noexcept { return mtp_kv ? &*mtp_kv : nullptr; }
+
+DeviceKVPagePool* DecoderState::exact_tail_pool() noexcept {
+    return exact_tail ? &*exact_tail : nullptr;
+}
+
+const DeviceKVPagePool* DecoderState::exact_tail_pool() const noexcept {
+    return exact_tail ? &*exact_tail : nullptr;
+}
 
 } // namespace ninfer::models::qwen3_5

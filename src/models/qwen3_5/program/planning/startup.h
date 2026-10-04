@@ -59,6 +59,8 @@ struct PersistentLayout {
     // recurrent state of the layers that stage owns. Empty on one device.
     std::vector<std::size_t> extra_rank_bytes;
     std::size_t kv_payload_bytes = 0;
+    std::size_t kv_exact_history_bytes    = 0;
+    std::size_t kv_rollback_reserve_bytes = 0;
     // Arena offset just past the last page-major KV plane. Everything an overlay Vision window may
     // borrow from free KV lies below it; stores interleaved there are simply never selected.
     std::size_t lendable_kv_end_bytes = 0;
@@ -106,6 +108,8 @@ struct SequencePlanningInputs {
     std::uint32_t ngram_min_match           = 12;
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
+    // Exact KV tail retention in tokens; zero disables the tail.
+    std::int32_t kv_tail_tokens             = 0;
     ProposalHead proposal_head              = ProposalHead::Full;
     ops::RopeYarn rope_yarn;
     std::uint32_t mtp_attention_window = 0;
@@ -139,6 +143,7 @@ struct SequencePlanImpl {
     std::uint32_t ngram_min_match           = 12;
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
+    std::int32_t kv_tail_tokens             = 0;
     ProposalHead proposal_head              = ProposalHead::Full;
     ops::RopeYarn rope_yarn;
     std::uint32_t mtp_attention_window = 0;

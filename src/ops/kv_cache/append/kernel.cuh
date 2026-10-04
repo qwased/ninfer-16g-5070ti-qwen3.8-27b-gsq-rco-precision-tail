@@ -66,6 +66,43 @@ kv_cache_append_full_fp8_row(const __nv_bfloat16* __restrict__ k,
     }
 }
 
+// Exact tail shadow write: the same source K/V values, unquantized, into the sequence's ring pages.
+// One physical page per (position/64) modulo the ring, so the pool must hold one contiguous ring per
+// sequence; the caller passes sequence 0's ring (single-sequence launches, M1).
+template <typename Geometry, typename Metadata>
+__global__ void kv_cache_append_tail_bf16_kernel(const __nv_bfloat16* __restrict__ k,
+                                                 const __nv_bfloat16* __restrict__ v,
+                                                 const std::int32_t* __restrict__ positions,
+                                                 Metadata metadata,
+                                                 __nv_bfloat16* __restrict__ tail_k,
+                                                 __nv_bfloat16* __restrict__ tail_v,
+                                                 std::int32_t ring_pages, std::int32_t width) {
+    constexpr int VecElems = 8;
+    const int tokens       = metadata.valid_tokens(width);
+    const std::int64_t idx = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const std::int64_t n   = static_cast<std::int64_t>(tokens) * Geometry::KVHeads *
+                           (kKVCacheAppendFullHeadDim / VecElems);
+    if (idx >= n || ring_pages <= 0) return;
+
+    const int vec      = static_cast<int>(idx % (kKVCacheAppendFullHeadDim / VecElems));
+    const int tmp      = static_cast<int>(idx / (kKVCacheAppendFullHeadDim / VecElems));
+    const int kv_head  = tmp % Geometry::KVHeads;
+    const int token    = tmp / Geometry::KVHeads;
+    const int d        = vec * VecElems;
+    const int position = positions[0] + token;
+    const int ring     = (position / kPagedKVPageSize) % ring_pages;
+    const std::int64_t src_off =
+        static_cast<std::int64_t>(d) + static_cast<std::int64_t>(kKVCacheAppendFullHeadDim) *
+                                           (kv_head + Geometry::KVHeads * token);
+    const int4 k_value = load_vec<int4>(&k[src_off]);
+    const int4 v_value = load_vec<int4>(&v[src_off]);
+    const std::int64_t tail_off =
+        paged_kv_element_offset<kKVCacheAppendFullHeadDim, Geometry::KVHeads>(
+            ring, kv_head, position & kPagedKVPageMask, d);
+    store_vec(&tail_k[tail_off], k_value);
+    store_vec(&tail_v[tail_off], v_value);
+}
+
 template <typename Geometry, typename Metadata>
 __global__ void kv_cache_append_full_bf16_kernel(const __nv_bfloat16* __restrict__ k,
                                                  const __nv_bfloat16* __restrict__ v,

@@ -420,6 +420,10 @@ struct EngineOptions {
     // prompt-attention waves. Off keeps the default kernel and the requested chunk.
     bool fast_prefill_kernel           = false;
     KvCacheStorage kv_cache            = KvCacheStorage::BFloat16;
+    // Exact KV tail: the newest N tokens per sequence are kept unquantized in a second page pool
+    // so attention can merge a quantized body partial with an exact tail partial. Zero disables
+    // the tail and leaves behavior and memory as they are without it.
+    std::int32_t kv_tail_tokens        = 0;
     SpeculativeOptions speculative;
     std::size_t media_cache_bytes = kDefaultMediaCacheBytes;
     std::size_t media_live_bytes  = kDefaultMediaLiveBytes;
@@ -1316,6 +1320,10 @@ struct MemorySummary {
     // after instantiating, uploading and launching every executable); 0 without CUDA Graphs.
     std::size_t cuda_graph_measured_bytes         = 0;
     std::size_t kv_payload_bytes                  = 0;
+    // Split of the exact KV tail, both zero when `--kv-tail-tokens` is off: the history pages that
+    // hold retained tokens, and the reserved pages the rollback window may consume.
+    std::size_t kv_exact_history_bytes            = 0;
+    std::size_t kv_rollback_reserve_bytes         = 0;
     std::uint32_t host_state_capacity_slots       = 0;
     std::uint32_t host_state_occupied_slots       = 0;
     std::size_t host_kv_capacity_bytes            = 0;

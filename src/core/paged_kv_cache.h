@@ -18,6 +18,21 @@ namespace ninfer {
 
 inline constexpr std::int32_t kPagedKVPageSize = 64;
 
+/** Optional exact (unquantized) KV tail shared by both page views.
+ *
+ * The tail is a ring of `page_count` pages holding the newest `retention` tokens of a sequence in
+ * BF16, so attention can merge a quantized body partial with an exact tail partial. Addressing is
+ * implicit: the page for absolute position `p` is `(p / 64) % page_count`, so no block table is
+ * stored. Disabled (`retention == 0`) leaves every other field meaningless. */
+struct PagedKVExactTailView {
+    Tensor k_pages;
+    Tensor v_pages;
+    std::int32_t page_count = 0;
+    std::int32_t retention  = 0;
+
+    [[nodiscard]] bool enabled() const noexcept { return retention > 0; }
+};
+
 /** Non-owning, single-sequence view consumed by growing-cache Ops. */
 struct PagedKVLayerView {
     Tensor k_pages;
@@ -28,6 +43,7 @@ struct PagedKVLayerView {
     std::int32_t head_dim     = 0;
     std::int32_t num_kv_heads = 0;
     KvCacheStorage storage    = KvCacheStorage::BFloat16;
+    PagedKVExactTailView tail;
 };
 
 /** Non-owning multi-sequence view consumed by batched growing-cache Ops. */
@@ -40,6 +56,7 @@ struct PagedKVBatchLayerView {
     std::int32_t head_dim     = 0;
     std::int32_t num_kv_heads = 0;
     KvCacheStorage storage    = KvCacheStorage::BFloat16;
+    PagedKVExactTailView tail;
 };
 
 /** Rebinds one checked single-sequence table row as a one-row batched view. */

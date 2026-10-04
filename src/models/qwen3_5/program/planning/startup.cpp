@@ -143,6 +143,12 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
     const std::uint32_t mtp_physical_pages = static_cast<std::uint32_t>(
         checked_i32(static_cast<std::uint64_t>(physical_pages) + mtp_extra_pages,
                     "MTP Paged KV physical pages exceed int32"));
+    // Exact KV tail: one per-sequence ring of round_up(N, 64) pages plus a rollback page.
+    const std::uint32_t tail_ring_pages =
+        plan.kv_tail_tokens > 0
+            ? page_count(static_cast<std::uint32_t>(plan.kv_tail_tokens)) + 1U
+            : 0U;
+    const std::uint32_t tail_physical_pages = tail_ring_pages * plan.max_concurrency;
     // One layout per device. A stage's layers keep their KV planes and recurrent state on the
     // stage's device; everything else -- round state, prefill buffers, the head's inputs, MTP and
     // DFlash state -- is rank 0's, so builder 0 carries all of it.
@@ -187,6 +193,9 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
             .kv_table_rows             = static_cast<std::int32_t>(plan.max_concurrency),
             .text_physical_page_groups = physical_pages,
             .mtp_physical_page_groups  = mtp_physical_pages,
+            .kv_tail_tokens            = plan.kv_tail_tokens,
+            .kv_tail_physical_page_groups = tail_physical_pages,
+            .kv_tail_ring_pages        = tail_ring_pages,
             .text_layer_rank           = std::move(attention_layer_rank),
         });
     // The Program binds this pool's own planned geometry, so the Host page cost the RAM budget
@@ -346,6 +355,13 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
     }
     out.kv_payload_bytes =
         out.decoder.kv_payload_bytes() + (out.dflash ? out.dflash->kv_payload_bytes() : 0);
+    const std::size_t tail_payload_bytes =
+        out.decoder.exact_tail ? out.decoder.exact_tail->payload_bytes() : std::size_t{0};
+    out.kv_rollback_reserve_bytes =
+        tail_physical_pages != 0
+            ? (tail_payload_bytes / tail_physical_pages) * plan.max_concurrency
+            : std::size_t{0};
+    out.kv_exact_history_bytes = tail_payload_bytes - out.kv_rollback_reserve_bytes;
     const auto plane_end = [](const qwen3_5::PagedKVCacheLayout& cache) {
         std::size_t end = 0;
         if (cache.pages.spec.geometry.device_plane_order != PagedKVPlaneOrder::PageMajor) {
@@ -1072,6 +1088,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->device              = inputs.device;
     impl->context_cache       = inputs.context_cache;
     impl->kv_storage          = inputs.kv_storage;
+    impl->kv_tail_tokens      = inputs.kv_tail_tokens;
     impl->persistent          = persistent_layout(*impl);
     if (impl->context_cache.enabled && impl->context_cache.mode == ContextCacheMode::Hybrid) {
         // The whole Host budget is the hybrid slab pool that KV blocks and state snapshots share
@@ -1350,6 +1367,7 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .ngram_min_match            = options.speculative.ngram_min_match,
         .speculative_backend        = options.speculative.backend,
         .kv_storage                 = options.kv_cache,
+        .kv_tail_tokens             = options.kv_tail_tokens,
         .proposal_head              = options.speculative.proposal_head,
         .rope_yarn                  = planned_rope_yarn(parameters, options),
         .mtp_attention_window       = options.speculative.mtp_attention_window,
