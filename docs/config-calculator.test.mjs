@@ -15,7 +15,10 @@ import assert from "node:assert/strict";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(join(here, "config-calculator.html"), "utf8");
-const scriptMatch = html.match(/<script>\n([\s\S]*?)<\/script>/);
+// The extractor tolerates CRLF as well as LF: the repository blob is LF, but Git for Windows'
+// default core.autocrlf=true checks the page out with CRLF, and a bare `<script>\n` anchor then
+// fails to match at all.
+const scriptMatch = html.match(/<script>\r?\n([\s\S]*?)<\/script>/);
 assert.ok(scriptMatch, "could not find the <script> block in config-calculator.html");
 const source = scriptMatch[1];
 
@@ -62,9 +65,9 @@ vm.runInContext(source, context, { filename: "config-calculator.html inline scri
 // environment, not as properties of the context object itself -- pull the ones under test out
 // with a second expression evaluated in the same context, where they are still in scope.
 const { DATA, PAGE_TOKENS, MIB, pageRoundUp, perToken, fixedBytes, graphBytes, decodeAtDepth,
-        buildKvTable } =
+        buildKvTable, tailRingPages, tailBytes } =
   vm.runInContext(
-    "({DATA, PAGE_TOKENS, MIB, pageRoundUp, perToken, fixedBytes, graphBytes, decodeAtDepth, buildKvTable})",
+    "({DATA, PAGE_TOKENS, MIB, pageRoundUp, perToken, fixedBytes, graphBytes, decodeAtDepth, buildKvTable, tailRingPages, tailBytes})",
     context);
 
 let failures = 0;
@@ -90,6 +93,83 @@ check("pageRoundUp: one token under the boundary still rounds up to it", () => {
 });
 check("pageRoundUp: below one page rounds up to one page", () => {
   assert.equal(pageRoundUp(1), PAGE_TOKENS);
+});
+
+// --- exact KV tail -----------------------------------------------------------------------------
+// The engine sizes the tail per sequence as a ring of page_count(N) + 1 pages, where
+// page_count(N) = ceil(N / 64) and the extra page is the rollback page
+// (src/models/qwen3_5/program/planning/startup.cpp): `tail_ring_pages = page_count(kv_tail_tokens)
+// + 1`. Pin the +1 and the round-up, because dropping either silently understates the pool.
+check("tailRingPages: 0 tokens disables the tail (no pages, no cost)", () => {
+  assert.equal(tailRingPages(0), 0);
+  assert.equal(tailRingPages(-1), 0);
+});
+check("tailRingPages: round_up(N/64) pages plus the rollback page", () => {
+  const codeRing = (n) => 1 + Math.ceil(n / PAGE_TOKENS); // page_count() + rollback page
+  for (const n of [1, 63, 64, 65, 127, 128, 129, 2048, 4096, 262144]) {
+    assert.equal(tailRingPages(n), codeRing(n), "ring pages wrong for N=" + n);
+  }
+  // Concrete anchors so the shape is visible, not just the formula agreeing with itself.
+  assert.equal(tailRingPages(1), 2);
+  assert.equal(tailRingPages(64), 2);   // exactly one page round-up + rollback
+  assert.equal(tailRingPages(65), 3);
+  assert.equal(tailRingPages(2048), 33);
+});
+check("tailBytes: N = 0 is exactly zero on both models (previous numbers unchanged)", () => {
+  for (const key of Object.keys(DATA.models)) {
+    assert.equal(tailBytes(DATA.models[key], 0), 0);
+  }
+});
+// One page of one head-major BF16 plane is 64 * kv_heads * head_dim * 2 bytes; times two planes
+// (K, V) and the full-attention layer count, that is exactly one 64-token page of the BF16 body
+// cache. model.kv.bf16 is the measured per-token BF16 body cost, so the tail is
+// (ceil(N/64) + 1) * 64 * model.kv.bf16 -- derived from a measured quantity and the layout.
+check("tailBytes: (ceil(N/64)+1) pages of the measured BF16 body cache, per sequence", () => {
+  for (const key of Object.keys(DATA.models)) {
+    const model = DATA.models[key];
+    for (const n of [1, 64, 65, 2048, 40960]) {
+      const ring = Math.ceil(n / PAGE_TOKENS) + 1;
+      assert.equal(tailBytes(model, n), ring * PAGE_TOKENS * model.kv.bf16,
+        `${key} tail for N=${n}`);
+    }
+  }
+  // 27B: one 64-token BF16 cache page is 64 * 65536 = 4 MiB; two of them (one page + rollback)
+  // for N <= 64.
+  assert.equal(tailBytes(DATA.models["27b"], 64), 2 * 64 * 65536);
+  assert.equal(tailBytes(DATA.models["27b"], 64), 8 * MIB);
+  // A per-sequence constant: independent of context, and different per model (the BF16 body cost
+  // differs), which is why it is priced from each model's own measured row.
+  assert.notEqual(tailBytes(DATA.models["27b"], 2048), tailBytes(DATA.models["35b"], 2048));
+});
+check("tailBytes: the tail is BF16 whatever the body format is", () => {
+  // KvCacheStorage::BFloat16 is hard-coded for the tail pool (decoder_state.cpp), so the cost must
+  // follow model.kv.bf16 and never the selected body format. A quantized body makes the tail a
+  // *larger* share of the cache, not a smaller one.
+  const model = DATA.models["27b"];
+  for (const kv of ["int8", "nvfp4", "rk4v4"]) {
+    assert.notEqual(tailBytes(model, 2048), (33 * PAGE_TOKENS) * model.kv[kv]);
+  }
+});
+check("tailBytes: N = 0 leaves the golden engine reservation untouched", () => {
+  // The zero-cost identity, stated against the engine cross-check below: disabling the tail adds
+  // exactly nothing to the reservation the engine reports.
+  const model = DATA.models["27b"];
+  const ctx = 262144;
+  const none = model.spec.none;
+  const kvBytes = (model.kv.int8 * none.kvRatio + none.kvExtraPerToken) * pageRoundUp(ctx);
+  const ovhBytes = none.seqFixedBytes + none.seqPerToken * ctx;
+  const reservation = kvBytes + ovhBytes + model.workspaceBytes + graphBytes(none, ctx);
+  assert.equal(reservation + tailBytes(model, 0), 9197389568);
+});
+check("tailBytes: a tail consumes context headroom, page-consistently", () => {
+  // Constant term -> the tokens it displaces are the ring's own footprint divided by the per-token
+  // cost, so a tail of k pages costs k*64 tokens of context plus whatever the rollback page holds.
+  const model = DATA.models["27b"];
+  const pt = perToken(model, "int8", "none");
+  const tail = tailBytes(model, 4096);
+  const displaced = tail / pt;
+  assert.ok(displaced > 0 && displaced < 4096 * 2,
+    "tail should displace O(N) cache tokens, not an unbounded amount (" + displaced + ")");
 });
 
 // --- decodeAtDepth -----------------------------------------------------------------------------

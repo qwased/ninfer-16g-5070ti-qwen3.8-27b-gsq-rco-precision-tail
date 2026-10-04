@@ -455,3 +455,63 @@ Verified the capacity chain in `port/wp1`:
   is `ninfer_kv_cache_append{,_k8v4,_nvfp4}_test`, `ninfer_softmax_attention{,_{rk2v4_e8,rk4v4_e8,
   k8v4,nvfp4,int8_prompt,wide}}_test`, `ninfer_paged_kv_window_test`, `ninfer_kv_capacity_test`,
   `ninfer_rmsnorm_pack_tail_test`, `ninfer_resident_memory_test`. GPU run pending device confirmation.
+
+---
+
+## 2026-10-05 — Step 23: WP9 — exact-tail dimension in the fit calculator
+
+Worktree `.worktrees/wp2`, branch `port/wp9-docs`. Docs + the self-contained calculator only; no
+`src/`, `include/`, `apps/`, `tests/` or `cmake/` file touched, no build, no GPU run.
+
+- `docs/config-calculator.html`: new `#tail` input (`--kv-tail-tokens N`, default `0` = off) with a
+  hint, a `--seg-tail` bar segment and legend row (light/dark palette entries added), and new
+  `tailRingPages()`/`tailBytes()` helpers. The tail enters `total` and the fit verdict as its own
+  term, is subtracted once from the max-context room (`render()`, `room = usable - solveFixed -
+  tail`), and is taken off `buildKvTable()`'s context budget with a matching table caption. The
+  dynamic `#tail-hint` and `#ctx-hint` report the per-sequence cost and ring size. Method notes gain
+  a bullet for the one non-linear term; the "does not model" concurrency paragraph now says the tail
+  scales with `--max-concurrency`, unlike the shared KV pool.
+  - **Formula implemented (per sequence):**
+    `tail_bytes = (ceil(N / 64) + 1) * 64 * model.kv.bf16`.
+    Verified in the code, not guessed:
+    `src/models/qwen3_5/program/planning/startup.cpp:146-151` gives
+    `tail_ring_pages = page_count(kv_tail_tokens) + 1` where `page_count(N) = 1 + (N-1)/64 =
+    ceil(N/64)` (`startup.cpp:71-74`), i.e. round-up to the physical page **plus one rollback
+    page**, and `tail_physical_pages = tail_ring_pages * plan.max_concurrency`.
+    `src/models/qwen3_5/state/decoder_state.cpp:124-136` plans the pool as `KvCacheStorage::BFloat16`,
+    `device_plane_order = HeadMajor`, `page_tokens = kPagedKVPageSize = 64`
+    (`src/core/paged_kv_cache.h:19`), **two planes (K then V) per full-attention layer** with
+    `leading_extent = head_dim`, `head_extent = kv_heads`, `dtype = BF16`
+    (`src/core/paged_kv_storage.h:66-67`), so one plane page is `64 * kv_heads * head_dim * 2` bytes
+    and the layer-and-plane factor is exactly one 64-token page of the BF16 body cache. That is what
+    makes `model.kv.bf16` (the already-measured BF16 per-token body cost) the right multiplier.
+    Single-lane page => engine's `--max-concurrency` factor is 1.
+  - The tail is BF16 whatever body format is selected, and `N = 0` yields exactly 0 bytes, so the
+    previous numbers are reproduced byte for byte when disabled. **No tail figure has been measured
+    against the engine**, so the page derives it from the measured BF16 row + the layout formula and
+    adds no golden cross-check; the method note says so rather than claiming a measurement.
+- `docs/config-calculator.test.mjs`: `tailRingPages`/`tailBytes` extracted from the page and covered
+  — ring is `page_count(N) + 1` (anchored at N=1/64/65/2048/40960, pinning the extra rollback page),
+  `N = 0` is exactly zero on both models, the cost is BF16 regardless of body format, and adding
+  `tailBytes(model, 0)` leaves the golden 262,144-token int8 engine reservation at `9197389568`.
+- `docs/config-calculator.render.test.mjs`: the tail is now a fourth loop dimension
+  (0/2048/65536) over all model×spec×kv×ctx combinations; it further asserts that a bigger tail
+  never fits more context, that `N = 0` restores the exact previous readouts (max context, sub,
+  hints, segment width, legend), that the segment and legend row exist, and that an impossible tail
+  reports `Does not fit` instead of being silently capped. The speculation-only block resets the
+  tail to 0 so its printed figures keep their old meaning.
+- Both test files' `<script>` extractor is now `/<script>\r?\n/`. The committed blob is LF, but Git
+  for Windows' default `core.autocrlf=true` checks this page out CRLF, so the previous bare `\n`
+  anchor matched nothing on this host — a **pre-existing** failure, reproduced on the unmodified
+  HEAD via `git stash`. No git config was changed; the optional `\r` keeps both checkouts working.
+- Evidence (run from `.worktrees/wp2`):
+  - `node docs/config-calculator.test.mjs` -> `ok` × 23 (4 pageRoundUp, 7 tail, 4 decodeAtDepth,
+    3 golden engine cross-checks, 5 model/table checks), then `PASS`, exit 0.
+  - `node docs/config-calculator.render.test.mjs` -> `render()+buildKvTable() over 1260
+    combinations: 0 threw`, the three 35b speculation rows (`none`/`mtp3+head` 262,144 capped,
+    `dflash-3` 240,192), then `PASS`, exit 0.
+  - `git diff --check` clean.
+- Commit: `d8c5bdc89832f4c1ef667cc7aaccf9ac79f198e9` — "docs: add exact KV tail dimension to the
+  config calculator" (4 files: `docs/config-calculator.html`, its two test harnesses,
+  `PORT-JOURNAL.md`). The hash is recorded here in a following journal-only commit, because a commit
+  cannot contain its own hash.
