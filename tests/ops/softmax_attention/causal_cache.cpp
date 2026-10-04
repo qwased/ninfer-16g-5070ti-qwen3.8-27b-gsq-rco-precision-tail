@@ -222,6 +222,10 @@ struct AttentionCase {
     bool fast_prompt_kernel = false;
     bool wide_verification  = false;
     bool small_prefill      = false;
+    // Exact KV tail (KV cache precision tail): keep this many newest tokens unquantized in the
+    // BFloat16 ring the cache view exposes as PagedKVExactTailView. 0 (the default) disables the
+    // tail and leaves the pre-tail code path byte-for-byte unchanged.
+    std::int32_t kv_tail_tokens = 0;
 };
 
 enum class MappingPattern { Identity, Offset, Fragmented };
@@ -374,6 +378,30 @@ std::size_t physical_plane_elements(std::int32_t leading_extent, const Geometry&
                                     std::int32_t physical_pages) {
     return static_cast<std::size_t>(leading_extent) * kPagedKVPageSize * geometry.kv_heads *
            physical_pages;
+}
+
+// Exact KV tail: a BF16 ring of ceil(retention / 64) pages per sequence, page 64, HeadMajor.
+// Position p lives at ring page (p / 64) % page_count and offset p % 64, matching the addressing
+// ops::kv_cache_append shadows and the causal attention Op reads (paged_kv_element_offset with
+// the ring page as the physical page). One Tensor [D, 64, kv_heads, page_count] holds the ring.
+std::int32_t tail_page_count(std::int32_t retention) {
+    return retention <= 0 ? 0 : (retention + kPagedKVPageSize - 1) / kPagedKVPageSize;
+}
+
+std::size_t tail_ring_elements(const Geometry& geometry, std::int32_t page_count) {
+    return static_cast<std::size_t>(kHeadDim) * kPagedKVPageSize *
+           static_cast<std::size_t>(geometry.kv_heads) * static_cast<std::size_t>(page_count);
+}
+
+std::size_t tail_ring_index(const Geometry& geometry, std::int32_t page_count, std::int32_t head,
+                            std::int32_t position, std::int32_t d) {
+    const std::int32_t ring = (position / kPagedKVPageSize) % page_count;
+    return static_cast<std::size_t>(d) +
+           static_cast<std::size_t>(kHeadDim) *
+               (static_cast<std::size_t>(position % kPagedKVPageSize) +
+                static_cast<std::size_t>(kPagedKVPageSize) *
+                    (static_cast<std::size_t>(head) +
+                     static_cast<std::size_t>(geometry.kv_heads) * static_cast<std::size_t>(ring)));
 }
 
 template <typename T>
@@ -625,6 +653,16 @@ struct HostCache {
     std::vector<float> logical_k_quantized;
     std::vector<float> rotated_k_quantized;
     std::vector<float> rotated_v_quantized;
+    // Exact KV tail fixture (KV cache precision tail): the newest tail_retention positions as
+    // unquantized BF16 in the ring layout the attention Op reads. Kept only when a tail case
+    // requested it; the independent oracle uses it for the newest positions, and DeviceCache
+    // uploads or shadows it into the device ring.
+    std::int32_t tail_retention  = 0;
+    std::int32_t tail_page_count = 0;
+    std::vector<std::uint16_t> tail_k_bf16;
+    std::vector<std::uint16_t> tail_v_bf16;
+
+    [[nodiscard]] bool tail_enabled() const { return tail_retention > 0; }
 
     [[nodiscard]] bool packed_values() const { return profile.packed_int4_values(); }
     [[nodiscard]] bool packed_keys() const {
@@ -1516,6 +1554,53 @@ double cache_value(const HostCache& cache, bool key, std::int32_t head, std::int
     return static_cast<double>(decoded);
 }
 
+// Builds the exact-tail fixture from the same BF16 k/v rows append_cache consumes. Every appended
+// position is written into the ring (as the append Op does); only the newest `retention` are ever
+// read back (tail_covers). The k/v layout is the append input layout, [kHeadDim, kv_heads, tokens].
+void populate_tail(HostCache& cache, const std::vector<float>& k, const std::vector<float>& v,
+                   const std::vector<std::int32_t>& positions, std::int32_t retention) {
+    const Geometry& geometry = cache.geometry;
+    cache.tail_retention     = std::max(retention, 0);
+    cache.tail_page_count    = tail_page_count(cache.tail_retention);
+    cache.tail_k_bf16.assign(tail_ring_elements(geometry, cache.tail_page_count), 0);
+    cache.tail_v_bf16.assign(tail_ring_elements(geometry, cache.tail_page_count), 0);
+    if (cache.tail_retention <= 0) { return; }
+    // Ascending token order means the newest position wins any ring-slot collision, matching the
+    // single-sequence append. Tail cases keep tokens <= 64 * page_count, so none occur.
+    for (std::int32_t token = 0; token < static_cast<std::int32_t>(positions.size()); ++token) {
+        const std::int32_t position = positions[static_cast<std::size_t>(token)];
+        for (std::int32_t head = 0; head < geometry.kv_heads; ++head) {
+            for (std::int32_t d = 0; d < kHeadDim; ++d) {
+                const std::size_t index =
+                    tail_ring_index(geometry, cache.tail_page_count, head, position, d);
+                const std::size_t source = kv_input_index(geometry, head, d, token);
+                cache.tail_k_bf16[index] = f32_to_bf16(k[source]);
+                cache.tail_v_bf16[index] = f32_to_bf16(v[source]);
+            }
+        }
+    }
+}
+
+// True when `position` is inside the newest `tail_retention` positions of the sequence whose
+// newest position is `newest`; that is exactly the set the exact-tail ring covers.
+bool tail_covers(const HostCache& cache, std::int32_t position, std::int32_t newest) {
+    return cache.tail_retention > 0 && position + cache.tail_retention > newest;
+}
+
+// Tail-aware cache_value: the newest tail_retention positions decode from the exact BF16 ring,
+// every older position keeps its stored (possibly quantized) representation. With the tail off
+// this is exactly cache_value, so untailed case results are unchanged.
+double cache_value_with_tail(const HostCache& cache, bool key, std::int32_t head,
+                             std::int32_t position, std::int32_t d, std::int32_t newest) {
+    if (tail_covers(cache, position, newest)) {
+        const std::size_t index =
+            tail_ring_index(cache.geometry, cache.tail_page_count, head, position, d);
+        return static_cast<double>(
+            bf16_to_f32(key ? cache.tail_k_bf16[index] : cache.tail_v_bf16[index]));
+    }
+    return cache_value(cache, key, head, position, d);
+}
+
 std::vector<double> ideal_attention(const std::vector<float>& q, const HostCache& cache,
                                     const std::vector<std::int32_t>& positions) {
     const Geometry& geometry  = cache.geometry;
@@ -1567,13 +1652,18 @@ std::vector<double> ideal_attention(const std::vector<float>& q, const HostCache
         return output;
     }
 
+    const std::int32_t newest = positions.back();
     naive_dense_softmax_attention(
-        op_geometry(geometry), tokens, positions.back() + 1, static_cast<double>(kAttentionScale),
+        op_geometry(geometry), tokens, newest + 1, static_cast<double>(kAttentionScale),
         [&](int d, int head, int token) {
             return static_cast<double>(q[q_index(geometry, head, d, token)]);
         },
-        [&](int d, int head, int position) { return cache_value(cache, true, head, position, d); },
-        [&](int d, int head, int position) { return cache_value(cache, false, head, position, d); },
+        [&](int d, int head, int position) {
+            return cache_value_with_tail(cache, true, head, position, d, newest);
+        },
+        [&](int d, int head, int position) {
+            return cache_value_with_tail(cache, false, head, position, d, newest);
+        },
         [&](int token, int position) {
             return position <= positions[static_cast<std::size_t>(token)];
         },
@@ -1592,7 +1682,7 @@ std::vector<T> copy_from_guarded(const GuardedDeviceBuffer& buffer, std::size_t 
 
 class DeviceCache {
 public:
-    DeviceCache(const HostCache& cache, MappingPattern mapping)
+    DeviceCache(const HostCache& cache, MappingPattern mapping, std::int32_t kv_tail_tokens = 0)
         : geometry_(cache.geometry), storage_(cache.storage), layout_(test_cache_layout(storage_)),
           max_context_(cache.max_context), logical_capacity_(cache.logical_capacity),
           logical_pages_(logical_capacity_ / kPagedKVPageSize),
@@ -1615,7 +1705,11 @@ public:
           v_scale_(layout_.value.scale_extent == 0
                        ? 1
                        : v_scale_elements_ * dtype_size(layout_.value.scale_dtype)),
-          block_table_(block_table_host_.size() * sizeof(std::int32_t)) {
+          block_table_(block_table_host_.size() * sizeof(std::int32_t)),
+          tail_retention_(std::max(kv_tail_tokens, 0)),
+          tail_page_count_(tail_page_count(tail_retention_)),
+          k_tail_(tail_ring_elements(geometry_, tail_page_count_) * sizeof(std::uint16_t)),
+          v_tail_(tail_ring_elements(geometry_, tail_page_count_) * sizeof(std::uint16_t)) {
         block_table_.copy_from_host(block_table_host_.data(),
                                     block_table_host_.size() * sizeof(std::int32_t));
         if (storage_ == KvCacheStorage::BFloat16) {
@@ -1756,6 +1850,16 @@ public:
                                           {layout_.value.scale_extent, kPagedKVPageSize,
                                            geometry_.kv_heads, physical_pages_});
         }
+        if (tail_page_count_ > 0) {
+            result.tail.k_pages    = Tensor(k_tail_.data(), DType::BF16,
+                                            {kHeadDim, kPagedKVPageSize, geometry_.kv_heads,
+                                             tail_page_count_});
+            result.tail.v_pages    = Tensor(v_tail_.data(), DType::BF16,
+                                            {kHeadDim, kPagedKVPageSize, geometry_.kv_heads,
+                                             tail_page_count_});
+            result.tail.page_count = tail_page_count_;
+            result.tail.retention  = tail_retention_;
+        }
         return result;
     }
 
@@ -1770,7 +1874,39 @@ public:
             .head_dim      = direct.head_dim,
             .num_kv_heads  = direct.num_kv_heads,
             .storage       = direct.storage,
+            .tail          = direct.tail,
         };
+    }
+
+    // Copies the exact-tail fixture's BF16 ring into the device ring. The cached entry never
+    // appends, so a cached tail case uploads the ring directly instead of shadow-writing it.
+    void upload_tail(const HostCache& cache) {
+        if (tail_page_count_ <= 0) { return; }
+        const std::size_t elements = tail_ring_elements(geometry_, tail_page_count_);
+        if (cache.tail_k_bf16.size() != elements || cache.tail_v_bf16.size() != elements) {
+            throw std::invalid_argument("exact KV tail fixture ring size mismatch");
+        }
+        k_tail_.copy_from_host(cache.tail_k_bf16.data(), elements * sizeof(std::uint16_t));
+        v_tail_.copy_from_host(cache.tail_v_bf16.data(), elements * sizeof(std::uint16_t));
+    }
+
+    // Checks the device ring against the exact-tail fixture. For the fused entry this holds the
+    // append Op's shadow write (ops::kv_cache_append writes the ring when the view's tail is
+    // enabled); for the cached entry it holds the harness upload.
+    int verify_tail(const std::string& label, const HostCache& expected) const {
+        if (tail_page_count_ <= 0) { return 0; }
+        int failures = 0;
+        failures += verify_exact(
+            (label + " exact-tail-k").c_str(),
+            copy_from_guarded<std::uint16_t>(k_tail_, expected.tail_k_bf16.size()),
+            expected.tail_k_bf16);
+        failures += verify_exact(
+            (label + " exact-tail-v").c_str(),
+            copy_from_guarded<std::uint16_t>(v_tail_, expected.tail_v_bf16.size()),
+            expected.tail_v_bf16);
+        failures += k_tail_.verify_guards((label + " exact-tail-k guard").c_str());
+        failures += v_tail_.verify_guards((label + " exact-tail-v guard").c_str());
+        return failures;
     }
 
     // dtype/value_code_dtype/profile are populated for the four profiles d256_kv_cache_profile
@@ -1895,6 +2031,10 @@ public:
             verify_exact((label + " block-table unchanged").c_str(),
                          copy_from_guarded<std::int32_t>(block_table_, block_table_host_.size()),
                          block_table_host_);
+        if (tail_page_count_ > 0) {
+            failures += k_tail_.verify_guards((label + " cache-tail-k").c_str());
+            failures += v_tail_.verify_guards((label + " cache-tail-v").c_str());
+        }
         return failures;
     }
 
@@ -1918,11 +2058,16 @@ private:
     GuardedDeviceBuffer k_scale_;
     GuardedDeviceBuffer v_scale_;
     GuardedDeviceBuffer block_table_;
+    std::int32_t tail_retention_;
+    std::int32_t tail_page_count_;
+    GuardedDeviceBuffer k_tail_;
+    GuardedDeviceBuffer v_tail_;
 };
 
 class BatchDeviceCache {
 public:
-    BatchDeviceCache(std::span<const HostCache> rows, MappingPattern mapping)
+    BatchDeviceCache(std::span<const HostCache> rows, MappingPattern mapping,
+                     std::int32_t kv_tail_tokens = 0)
         : geometry_(rows.front().geometry), storage_(rows.front().storage),
           layout_(test_cache_layout(storage_)), rows_(rows.size()),
           logical_capacity_(rows.front().logical_capacity),
@@ -1948,7 +2093,11 @@ public:
           v_scale_(layout_.value.scale_extent == 0
                        ? 1
                        : v_scale_elements_ * dtype_size(layout_.value.scale_dtype)),
-          block_tables_(block_tables_host_.size() * sizeof(std::int32_t)) {
+          block_tables_(block_tables_host_.size() * sizeof(std::int32_t)),
+          tail_retention_(std::max(kv_tail_tokens, 0)),
+          tail_page_count_(tail_page_count(tail_retention_)),
+          k_tail_(tail_ring_elements(geometry_, tail_page_count_) * sizeof(std::uint16_t)),
+          v_tail_(tail_ring_elements(geometry_, tail_page_count_) * sizeof(std::uint16_t)) {
         for (std::size_t row = 0; row < rows_; ++row) {
             const HostCache& cache = rows[row];
             if (cache.geometry.q_heads != geometry_.q_heads ||
@@ -1991,7 +2140,29 @@ public:
                                           {layout_.value.scale_extent, kPagedKVPageSize,
                                            geometry_.kv_heads, physical_pages_});
         }
+        if (tail_page_count_ > 0) {
+            result.tail.k_pages    = Tensor(k_tail_.data(), DType::BF16,
+                                            {kHeadDim, kPagedKVPageSize, geometry_.kv_heads,
+                                             tail_page_count_});
+            result.tail.v_pages    = Tensor(v_tail_.data(), DType::BF16,
+                                            {kHeadDim, kPagedKVPageSize, geometry_.kv_heads,
+                                             tail_page_count_});
+            result.tail.page_count = tail_page_count_;
+            result.tail.retention  = tail_retention_;
+        }
         return result;
+    }
+
+    // The batched append route skips the ring shadow (a batched view carries no single-sequence
+    // block_table), so a batched tail case uploads the one shared ring directly.
+    void upload_tail(const HostCache& cache) {
+        if (tail_page_count_ <= 0) { return; }
+        const std::size_t elements = tail_ring_elements(geometry_, tail_page_count_);
+        if (cache.tail_k_bf16.size() != elements || cache.tail_v_bf16.size() != elements) {
+            throw std::invalid_argument("batch exact KV tail fixture ring size mismatch");
+        }
+        k_tail_.copy_from_host(cache.tail_k_bf16.data(), elements * sizeof(std::uint16_t));
+        v_tail_.copy_from_host(cache.tail_v_bf16.data(), elements * sizeof(std::uint16_t));
     }
 
     int verify(const std::string& label, std::span<const HostCache> expected) const {
@@ -2323,6 +2494,10 @@ private:
     GuardedDeviceBuffer k_scale_;
     GuardedDeviceBuffer v_scale_;
     GuardedDeviceBuffer block_tables_;
+    std::int32_t tail_retention_;
+    std::int32_t tail_page_count_;
+    GuardedDeviceBuffer k_tail_;
+    GuardedDeviceBuffer v_tail_;
 };
 
 int verify_cache(const std::string& label, const HostCache& got, const HostCache& expected,
@@ -2484,6 +2659,7 @@ std::string case_label(const char* entry, const Geometry& geometry, const CacheP
            " mapping=" + mapping_name(mapping) + " T=" + std::to_string(test_case.tokens) +
            " keys=" + std::to_string(test_case.base + test_case.tokens) +
            " envelope_max=" + std::to_string(test_case.envelope_max) +
+           (test_case.kv_tail_tokens > 0 ? " tail=" + std::to_string(test_case.kv_tail_tokens) : "") +
            (test_case.graph_replay ? " graph-replay" : "");
 }
 
@@ -2493,6 +2669,7 @@ std::string case_label(const char* entry, const Geometry& geometry, KvCacheStora
            " mapping=" + mapping_name(mapping) + " T=" + std::to_string(test_case.tokens) +
            " keys=" + std::to_string(test_case.base + test_case.tokens) +
            " envelope_max=" + std::to_string(test_case.envelope_max) +
+           (test_case.kv_tail_tokens > 0 ? " tail=" + std::to_string(test_case.kv_tail_tokens) : "") +
            (test_case.graph_replay ? " graph-replay" : "") +
            (test_case.fast_prompt_kernel ? " fast-prompt" : "");
 }
@@ -2550,7 +2727,7 @@ void inject_codec_edges(const Geometry& geometry, std::int32_t tokens, std::vect
 }
 
 int run_a1_case(const Geometry& geometry, const CachePlan& plan, const AttentionCase& test_case,
-                MappingPattern mapping) {
+                MappingPattern mapping, std::vector<std::uint16_t>* captured = nullptr) {
     const std::int32_t total       = test_case.base + test_case.tokens;
     const std::int32_t max_context = static_cast<std::int32_t>(
         std::max<std::uint32_t>(static_cast<std::uint32_t>(total + 3), test_case.envelope_max));
@@ -2573,11 +2750,13 @@ int run_a1_case(const Geometry& geometry, const CachePlan& plan, const Attention
         static_cast<std::uint32_t>(total), test_case.envelope_max, test_case.fast_prompt_kernel,
         test_case.wide_verification, test_case.small_prefill};
 
+    const std::int32_t tail_tokens = std::max(test_case.kv_tail_tokens, 0);
     const HostCache initial = make_cache(geometry, plan, max_context, test_case.seed + 10u);
     HostCache expected      = initial;
     append_cache(expected, k, v, positions);
+    if (tail_tokens > 0) { populate_tail(expected, k, v, positions, tail_tokens); }
     const std::vector<double> reference = ideal_attention(q, expected, positions);
-    DeviceCache cache(initial, mapping);
+    DeviceCache cache(initial, mapping, tail_tokens);
 
     const std::vector<std::uint16_t> q_bits = to_bf16_bits(q);
     const std::vector<std::uint16_t> k_bits = to_bf16_bits(k);
@@ -2603,6 +2782,12 @@ int run_a1_case(const Geometry& geometry, const CachePlan& plan, const Attention
     Tensor tp(dp.data(), DType::I32, {test_case.tokens});
     Tensor ttable_row(dtable_row.data(), DType::I32, {1});
     Tensor tout(dout.data(), DType::BF16, {kHeadDim, geometry.q_heads, test_case.tokens});
+    if (tail_tokens > 0) {
+        // The append Op shadow-writes the ring when the view's tail is enabled; one standalone
+        // append populates it (the body is rewritten idempotently, then again by the fused Op).
+        ops::kv_cache_append(tk, tv, tp, cache.view(), nullptr);
+        cuda_synchronize();
+    }
     const std::size_t workspace_bytes = ops::causal_softmax_attention_workspace_capacity_bytes(
         op_geometry(geometry), cache_plan_storage(plan), envelope, 1, test_case.tokens,
         test_case.tokens);
@@ -2621,9 +2806,11 @@ int run_a1_case(const Geometry& geometry, const CachePlan& plan, const Attention
         case_label("causal_softmax_attention", geometry, plan, test_case, mapping);
     const std::vector<std::uint16_t> output_bits =
         copy_from_guarded<std::uint16_t>(dout, q_bits.size());
+    if (captured != nullptr) { *captured = output_bits; }
     int failures = verify_attention(label, bf16_bits_to_double(output_bits), reference,
                                     attention_criterion(plan));
     failures += verify_cache(label, cache.snapshot(), expected, plan.dtype == DType::BF16);
+    failures += cache.verify_tail(label, expected);
     failures += verify_input(label + " q unchanged", dq, q_bits);
     failures += verify_input(label + " k unchanged", dk, k_bits);
     failures += verify_input(label + " v unchanged", dv, v_bits);
@@ -2640,7 +2827,8 @@ int run_a1_case(const Geometry& geometry, const CachePlan& plan, const Attention
 }
 
 int run_a1_case(const Geometry& geometry, KvCacheStorage storage, const AttentionCase& test_case,
-                MappingPattern mapping) {
+                MappingPattern mapping, std::vector<std::uint16_t>* captured = nullptr,
+                bool assert_oracle = true) {
     const std::int32_t total       = test_case.base + test_case.tokens;
     const std::int32_t max_context = static_cast<std::int32_t>(
         std::max<std::uint32_t>(static_cast<std::uint32_t>(total + 3), test_case.envelope_max));
@@ -2668,8 +2856,10 @@ int run_a1_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
         make_cache(geometry, storage, max_context, test_case.seed + 10u, test_case.value_scale);
     HostCache expected      = initial;
     append_cache(expected, k, v, positions);
+    const std::int32_t tail_tokens = std::max(test_case.kv_tail_tokens, 0);
+    if (tail_tokens > 0) { populate_tail(expected, k, v, positions, tail_tokens); }
     const std::vector<double> reference = ideal_attention(q, expected, positions);
-    DeviceCache cache(initial, mapping);
+    DeviceCache cache(initial, mapping, tail_tokens);
 
     const std::vector<std::uint16_t> q_bits = to_bf16_bits(q);
     const std::vector<std::uint16_t> k_bits = to_bf16_bits(k);
@@ -2695,6 +2885,10 @@ int run_a1_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
     Tensor tp(dp.data(), DType::I32, {test_case.tokens});
     Tensor ttable_row(dtable_row.data(), DType::I32, {1});
     Tensor tout(dout.data(), DType::BF16, {kHeadDim, geometry.q_heads, test_case.tokens});
+    if (tail_tokens > 0) {
+        ops::kv_cache_append(tk, tv, tp, cache.view(), nullptr);
+        cuda_synchronize();
+    }
     const std::size_t workspace_bytes = ops::causal_softmax_attention_workspace_capacity_bytes(
         op_geometry(geometry), storage, envelope, 1, test_case.tokens, test_case.tokens);
     GuardedDeviceBuffer workspace_buffer(std::max<std::size_t>(workspace_bytes, 256));
@@ -2712,13 +2906,18 @@ int run_a1_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
         case_label("causal_softmax_attention", geometry, storage, test_case, mapping);
     const std::vector<std::uint16_t> output_bits =
         copy_from_guarded<std::uint16_t>(dout, q_bits.size());
-    int failures =
-        verify_attention(label, unit_value_scale(bf16_bits_to_double(output_bits), test_case),
-                         unit_value_scale(reference, test_case), attention_criterion(storage));
+    if (captured != nullptr) { *captured = output_bits; }
+    int failures = 0;
+    if (assert_oracle) {
+        failures += verify_attention(
+            label, unit_value_scale(bf16_bits_to_double(output_bits), test_case),
+            unit_value_scale(reference, test_case), attention_criterion(storage));
+    }
     failures += verify_cache(label, cache.snapshot(), expected,
                              storage == KvCacheStorage::BFloat16 ||
                                  storage == KvCacheStorage::Nvfp4Group16 ||
                                  storage == KvCacheStorage::Fp8KeyNvfp4Value);
+    failures += cache.verify_tail(label, expected);
     // rk4v4-e8 and rk2v4-e8 keys are not compared with the host oracle above (its rotation rounds
     // differently), so the fused write is held byte-for-byte to the standalone append instead.
     if (storage == KvCacheStorage::Nvfp4Group16 || storage == KvCacheStorage::Fp8KeyNvfp4Value ||
@@ -2746,6 +2945,33 @@ int run_a1_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
     return failures;
 }
 
+// Exact-tail source rows for the cached (read-only) entry: the Op never appends, so the harness
+// generates fresh unquantized k/v for the newest `retention` positions (layout
+// [kHeadDim, kv_heads, count]) to upload into the ring directly. The cached body underneath those
+// positions keeps its stored representation; the tail oracle overrides it with these exact rows.
+struct TailFixture {
+    std::vector<float> k;
+    std::vector<float> v;
+    std::vector<std::int32_t> positions;
+};
+
+TailFixture make_tail_fixture(const Geometry& geometry,
+                              const std::vector<std::int32_t>& positions, std::int32_t retention,
+                              std::uint32_t seed) {
+    TailFixture fixture;
+    if (retention <= 0 || positions.empty()) { return fixture; }
+    const std::int32_t newest = positions.back();
+    const std::int32_t first  = std::max(newest - retention + 1, positions.front());
+    for (std::int32_t position = first; position <= newest; ++position) {
+        fixture.positions.push_back(position);
+    }
+    const std::size_t count =
+        static_cast<std::size_t>(kHeadDim) * geometry.kv_heads * fixture.positions.size();
+    fixture.k = make_bf16_values(count, seed, -0.25f, 0.25f);
+    fixture.v = make_bf16_values(count, seed + 1u, -1.0f, 1.0f);
+    return fixture;
+}
+
 int run_a3_case(const Geometry& geometry, const CachePlan& plan, const AttentionCase& test_case,
                 MappingPattern mapping) {
     const std::int32_t total       = test_case.base + test_case.tokens;
@@ -2764,9 +2990,16 @@ int run_a3_case(const Geometry& geometry, const CachePlan& plan, const Attention
         static_cast<std::uint32_t>(total), test_case.envelope_max, test_case.fast_prompt_kernel,
         test_case.wide_verification, test_case.small_prefill};
 
-    const HostCache cache_host = make_cache(geometry, plan, max_context, test_case.seed + 10u);
+    HostCache cache_host = make_cache(geometry, plan, max_context, test_case.seed + 10u);
+    const std::int32_t tail_tokens = std::max(test_case.kv_tail_tokens, 0);
+    if (tail_tokens > 0) {
+        const TailFixture tail =
+            make_tail_fixture(geometry, positions, tail_tokens, test_case.seed + 40u);
+        populate_tail(cache_host, tail.k, tail.v, tail.positions, tail_tokens);
+    }
     const std::vector<double> reference = ideal_attention(q, cache_host, positions);
-    DeviceCache cache(cache_host, mapping);
+    DeviceCache cache(cache_host, mapping, tail_tokens);
+    if (tail_tokens > 0) { cache.upload_tail(cache_host); }
 
     const std::vector<std::uint16_t> q_bits = to_bf16_bits(q);
     GuardedDeviceBuffer dq(q_bits.size() * sizeof(std::uint16_t));
@@ -2800,6 +3033,7 @@ int run_a3_case(const Geometry& geometry, const CachePlan& plan, const Attention
     int failures = verify_attention(label, bf16_bits_to_double(output_bits), reference,
                                     attention_criterion(plan));
     failures += verify_cache(label + " cache unchanged", cache.snapshot(), cache_host, true);
+    failures += cache.verify_tail(label, cache_host);
     failures += verify_input(label + " q unchanged", dq, q_bits);
     failures += verify_positions(label + " positions unchanged", dp, positions);
     failures += dout.verify_guards((label + " output").c_str());
@@ -2830,10 +3064,17 @@ int run_a3_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
         static_cast<std::uint32_t>(total), test_case.envelope_max, test_case.fast_prompt_kernel,
         test_case.wide_verification, test_case.small_prefill};
 
-    const HostCache cache_host =
+    HostCache cache_host =
         make_cache(geometry, storage, max_context, test_case.seed + 10u, test_case.value_scale);
+    const std::int32_t tail_tokens = std::max(test_case.kv_tail_tokens, 0);
+    if (tail_tokens > 0) {
+        const TailFixture tail =
+            make_tail_fixture(geometry, positions, tail_tokens, test_case.seed + 40u);
+        populate_tail(cache_host, tail.k, tail.v, tail.positions, tail_tokens);
+    }
     const std::vector<double> reference = ideal_attention(q, cache_host, positions);
-    DeviceCache cache(cache_host, mapping);
+    DeviceCache cache(cache_host, mapping, tail_tokens);
+    if (tail_tokens > 0) { cache.upload_tail(cache_host); }
 
     const std::vector<std::uint16_t> q_bits = to_bf16_bits(q);
     GuardedDeviceBuffer dq(q_bits.size() * sizeof(std::uint16_t));
@@ -2867,6 +3108,7 @@ int run_a3_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
         verify_attention(label, unit_value_scale(bf16_bits_to_double(output_bits), test_case),
                          unit_value_scale(reference, test_case), attention_criterion(storage));
     failures += verify_cache(label + " cache unchanged", cache.snapshot(), cache_host, true);
+    failures += cache.verify_tail(label, cache_host);
     failures += verify_input(label + " q unchanged", dq, q_bits);
     failures += verify_positions(label + " positions unchanged", dp, positions);
     failures += dout.verify_guards((label + " output").c_str());
@@ -2901,6 +3143,9 @@ struct BatchAttentionCase {
     MappingPattern mapping;
     std::uint32_t seed;
     bool wide_verification = false;
+    // Exact KV tail (KV cache precision tail). A batched tail case must address one cache
+    // sequence: every writer must share one table row.
+    std::int32_t kv_tail_tokens = 0;
 };
 
 std::vector<float> extract_request_columns(const std::vector<float>& source,
@@ -3069,6 +3314,26 @@ int verify_gated_attention(const std::string& label, const Geometry& geometry,
     return failures;
 }
 
+// The exact tail is one ring per sequence and the batched view exposes exactly one, so a batched
+// tail case must address a single cache sequence: every writer request must share one table row.
+// Returns that writer's request index, or -1 when no column is live.
+std::int32_t batch_tail_writer(const BatchAttentionCase& test_case) {
+    std::int32_t writer = -1;
+    std::int32_t row    = -1;
+    for (std::int32_t request = 0;
+         request < static_cast<std::int32_t>(test_case.valid_columns.size()); ++request) {
+        if (test_case.valid_columns[static_cast<std::size_t>(request)] == 0) { continue; }
+        const std::int32_t table_row = test_case.table_rows[static_cast<std::size_t>(request)];
+        if (writer >= 0 && table_row != row) {
+            throw std::invalid_argument(
+                "batched exact-tail case addresses more than one cache sequence");
+        }
+        writer = request;
+        row    = table_row;
+    }
+    return writer;
+}
+
 int run_batch_case(const Geometry& geometry, const CachePlan& plan, const BatchAttentionCase& test_case) {
     validate_batch_case(test_case);
     const std::int32_t batch = static_cast<std::int32_t>(test_case.contexts.size());
@@ -3115,6 +3380,10 @@ int run_batch_case(const Geometry& geometry, const CachePlan& plan, const BatchA
     // B=1 with table_rows={7}: expected[7] on a one-element vector, unchecked, so the symptom
     // varied run to run and never pointed at the real fault.
     const std::size_t table_rows = cache_table_row_count(test_case.table_rows);
+    const std::int32_t tail_tokens = std::max(test_case.kv_tail_tokens, 0);
+    const std::int32_t tail_writer = tail_tokens > 0 ? batch_tail_writer(test_case) : -1;
+    const std::int32_t tail_row =
+        tail_writer >= 0 ? test_case.table_rows[static_cast<std::size_t>(tail_writer)] : -1;
     std::vector<HostCache> initial;
     initial.reserve(table_rows);
     for (std::size_t row = 0; row < table_rows; ++row) {
@@ -3137,12 +3406,19 @@ int run_batch_case(const Geometry& geometry, const CachePlan& plan, const BatchA
         const std::vector<float> row_v =
             extract_request_columns(v, kv_column_elements, test_case.width, request, valid);
         append_cache(expected.at(static_cast<std::size_t>(table_row)), row_k, row_v, row_positions);
+        if (request == tail_writer) {
+            const TailFixture tail =
+                make_tail_fixture(geometry, row_positions, tail_tokens, test_case.seed + 60u);
+            populate_tail(expected.at(static_cast<std::size_t>(table_row)), tail.k, tail.v,
+                          tail.positions, tail_tokens);
+        }
         insert_request_columns(
             ideal_attention(row_q, expected.at(static_cast<std::size_t>(table_row)), row_positions),
             q_column_elements, test_case.width, request, reference);
     }
 
-    BatchDeviceCache cache(initial, test_case.mapping);
+    BatchDeviceCache cache(initial, test_case.mapping, tail_tokens);
+    if (tail_writer >= 0) { cache.upload_tail(expected.at(static_cast<std::size_t>(tail_row))); }
     const std::vector<std::uint16_t> q_bits = to_bf16_bits(q);
     const std::vector<std::uint16_t> k_bits = to_bf16_bits(k);
     const std::vector<std::uint16_t> v_bits = to_bf16_bits(v);
@@ -3260,6 +3536,10 @@ int run_batch_case(const Geometry& geometry, KvCacheStorage storage,
     // Sized by the table rows the batch addresses, not by the batch. See the note on the CachePlan
     // overload above for why those differ and what it cost.
     const std::size_t table_rows = cache_table_row_count(test_case.table_rows);
+    const std::int32_t tail_tokens = std::max(test_case.kv_tail_tokens, 0);
+    const std::int32_t tail_writer = tail_tokens > 0 ? batch_tail_writer(test_case) : -1;
+    const std::int32_t tail_row =
+        tail_writer >= 0 ? test_case.table_rows[static_cast<std::size_t>(tail_writer)] : -1;
     std::vector<HostCache> initial;
     initial.reserve(table_rows);
     for (std::size_t row = 0; row < table_rows; ++row) {
@@ -3282,12 +3562,19 @@ int run_batch_case(const Geometry& geometry, KvCacheStorage storage,
         const std::vector<float> row_v =
             extract_request_columns(v, kv_column_elements, test_case.width, request, valid);
         append_cache(expected.at(static_cast<std::size_t>(table_row)), row_k, row_v, row_positions);
+        if (request == tail_writer) {
+            const TailFixture tail =
+                make_tail_fixture(geometry, row_positions, tail_tokens, test_case.seed + 60u);
+            populate_tail(expected.at(static_cast<std::size_t>(table_row)), tail.k, tail.v,
+                          tail.positions, tail_tokens);
+        }
         insert_request_columns(
             ideal_attention(row_q, expected.at(static_cast<std::size_t>(table_row)), row_positions),
             q_column_elements, test_case.width, request, reference);
     }
 
-    BatchDeviceCache cache(initial, test_case.mapping);
+    BatchDeviceCache cache(initial, test_case.mapping, tail_tokens);
+    if (tail_writer >= 0) { cache.upload_tail(expected.at(static_cast<std::size_t>(tail_row))); }
     const std::vector<std::uint16_t> q_bits = to_bf16_bits(q);
     const std::vector<std::uint16_t> k_bits = to_bf16_bits(k);
     const std::vector<std::uint16_t> v_bits = to_bf16_bits(v);
@@ -3643,6 +3930,181 @@ int run_geometry(const Geometry& geometry) {
                 run_a3_case(geometry, plan, {16, 17, 1025, 404u}, MappingPattern::Identity);
         }
     }
+    return failures;
+}
+
+// ---------------------------------------------------------------------------
+// Exact KV tail (KV cache precision tail) coverage.
+//
+// The tail is a second BFloat16 pool keeping the newest `kv_tail_tokens` tokens per sequence
+// unquantized, exposed on the cache view as PagedKVExactTailView. Attention merges a quantized
+// body partial with an exact tail partial. The independent oracle above is extended the same way:
+// cache_value_with_tail decodes the newest positions from the exact BF16 ring and every older
+// position from its stored representation, so verify_attention's existing criterion is applied
+// unchanged to the merged result. The fused entry (run_a1_case, causal_softmax_attention) is the
+// main model's step path; the cached entry (run_a3_case, causal_softmax_attention_cached) is
+// MTP-only. Both are covered.
+
+AttentionCase with_tail(AttentionCase test_case, std::int32_t tokens) {
+    test_case.kv_tail_tokens = tokens;
+    return test_case;
+}
+
+// Tail-off zero regression: an exact-tail case with kv_tail_tokens == 0 is the pre-tail path. Run
+// it with the field left at its default and with it set explicitly to 0, and assert the BF16
+// outputs are bit-for-bit identical (the tail branch is guarded by kv_tail_tokens > 0, so the
+// harness allocates no ring and takes no tail code path).
+int run_tail_off_regression(const Geometry& geometry, const CachePlan& plan, std::uint32_t seed) {
+    const AttentionCase defaulted{6, 61, 67, seed};
+    const AttentionCase explicit_zero = with_tail(defaulted, 0);
+    std::cout << "    " << case_label("causal_softmax_attention", geometry, plan, explicit_zero,
+                                      MappingPattern::Fragmented)
+              << '\n';
+    std::vector<std::uint16_t> defaulted_bits;
+    std::vector<std::uint16_t> zero_bits;
+    int failures =
+        run_a1_case(geometry, plan, defaulted, MappingPattern::Fragmented, &defaulted_bits);
+    failures += run_a1_case(geometry, plan, explicit_zero, MappingPattern::Fragmented, &zero_bits);
+    failures += verify_exact("exact KV tail N=0 bit parity", zero_bits, defaulted_bits);
+    return failures;
+}
+
+// Quantized body with the tail on where no complete hybrid oracle exists. NVFP4 (and K8V4)
+// evaluate attention in a Hadamard-rotated frame that the raw tail rows are not expressed in, so
+// a hybrid oracle would have to reproduce the kernel's own rotation rounding. Instead the result
+// is qualified against the exact unquantized causal oracle: it must be produced (finite) and no
+// farther from that oracle than the same case with the tail off, because the tail can only replace
+// quantized rows with exact ones.
+int run_quantized_tail_case(const Geometry& geometry, KvCacheStorage storage,
+                            const AttentionCase& test_case, MappingPattern mapping) {
+    const std::int32_t total       = test_case.base + test_case.tokens;
+    const std::int32_t max_context = static_cast<std::int32_t>(
+        std::max<std::uint32_t>(static_cast<std::uint32_t>(total + 3), test_case.envelope_max));
+    const std::size_t q_elements = static_cast<std::size_t>(kHeadDim) *
+                                   static_cast<std::size_t>(geometry.q_heads) *
+                                   static_cast<std::size_t>(test_case.tokens);
+    const std::size_t kv_elements = static_cast<std::size_t>(kHeadDim) *
+                                    static_cast<std::size_t>(geometry.kv_heads) *
+                                    static_cast<std::size_t>(test_case.tokens);
+    std::vector<float> q = make_bf16_values(q_elements, test_case.seed, -0.25f, 0.25f);
+    std::vector<float> k = make_bf16_values(kv_elements, test_case.seed + 1u, -0.25f, 0.25f);
+    std::vector<float> v = make_bf16_values(kv_elements, test_case.seed + 2u, -1.0f, 1.0f);
+    inject_codec_edges(geometry, test_case.tokens, k, v);
+    std::vector<std::int32_t> positions(static_cast<std::size_t>(test_case.tokens));
+    for (std::int32_t token = 0; token < test_case.tokens; ++token) {
+        positions[static_cast<std::size_t>(token)] = test_case.base + token;
+    }
+
+    HostCache exact = make_cache(geometry, KvCacheStorage::BFloat16, max_context,
+                                 test_case.seed + 10u);
+    append_cache(exact, k, v, positions);
+    const std::vector<double> reference =
+        unit_value_scale(ideal_attention(q, exact, positions), test_case);
+
+    const AttentionCase tail    = with_tail(test_case, test_case.kv_tail_tokens);
+    const AttentionCase no_tail = with_tail(test_case, 0);
+    std::vector<std::uint16_t> tail_bits;
+    std::vector<std::uint16_t> no_tail_bits;
+    std::cout << "    " << case_label("causal_softmax_attention", geometry, storage, tail, mapping)
+              << " (no-worse-than-tail-off vs exact oracle)\n";
+    int failures = run_a1_case(geometry, storage, tail, mapping, &tail_bits, false);
+    failures += run_a1_case(geometry, storage, no_tail, mapping, &no_tail_bits, true);
+
+    const std::vector<double> tail_output =
+        unit_value_scale(bf16_bits_to_double(tail_bits), test_case);
+    const std::vector<double> no_tail_output =
+        unit_value_scale(bf16_bits_to_double(no_tail_bits), test_case);
+    const ReductionStats tail_stats = compute_reduction_stats(
+        tail_output.data(), reference.data(), static_cast<std::int64_t>(tail_output.size()));
+    const ReductionStats no_tail_stats = compute_reduction_stats(
+        no_tail_output.data(), reference.data(), static_cast<std::int64_t>(no_tail_output.size()));
+    std::printf("TAIL\trel_l2_tail=%.4e\trel_l2_tail_off=%.4e\t%s %s T=%d N=%d\n",
+                tail_stats.relative_l2, no_tail_stats.relative_l2, geometry.name,
+                cache_name(storage), test_case.tokens, test_case.kv_tail_tokens);
+    if (!std::isfinite(tail_stats.relative_l2) || !std::isfinite(tail_stats.maximum_absolute_error)) {
+        std::cerr << "exact KV tail " << geometry.name << " " << cache_name(storage)
+                  << ": tail result is not finite\n";
+        ++failures;
+    }
+    if (!(tail_stats.relative_l2 <= no_tail_stats.relative_l2 * (1.0 + 0x1p-10) + 0x1p-24)) {
+        std::cerr << "exact KV tail " << geometry.name << " " << cache_name(storage)
+                  << ": exact tail is farther from the exact oracle than tail-off (tail="
+                  << tail_stats.relative_l2 << " off=" << no_tail_stats.relative_l2 << ")\n";
+        ++failures;
+    }
+    return failures;
+}
+
+int run_tail_cases() {
+    std::cout << "  exact KV tail (KV cache precision tail): merge, boundary, regression, masked\n";
+    int failures = 0;
+    const Geometry& h24 = kGeometries[0];
+    const Geometry& h16 = kGeometries[1];
+
+    const auto fused = [&](const Geometry& geometry, auto plan, const AttentionCase& test_case,
+                           MappingPattern mapping) {
+        std::cout << "    " << case_label("causal_softmax_attention", geometry, plan, test_case,
+                                          mapping)
+                  << '\n';
+        return run_a1_case(geometry, plan, test_case, mapping);
+    };
+    const auto cached = [&](const Geometry& geometry, auto plan, const AttentionCase& test_case,
+                            MappingPattern mapping) {
+        std::cout << "    " << case_label("causal_softmax_attention_cached", geometry, plan,
+                                          test_case, mapping)
+                  << '\n';
+        return run_a3_case(geometry, plan, test_case, mapping);
+    };
+
+    // (1) Primary merge formula: a BFloat16 body with N > 0. Body and tail are both exact, so the
+    // engine result must equal the plain causal FP32 oracle within the existing BF16 criterion.
+    // T=6 N=2 exercises p+1 > N (non-empty body window); T=6 N=6 is the boundary p+1 <= N (the
+    // body window is empty and every key comes from the tail); T=130 N=129 crosses several 64-page
+    // ring wraps with a one-key body.
+    failures += fused(h24, kPlanBf16, with_tail({6, 61, 67, 2301u}, 2), MappingPattern::Fragmented);
+    failures += fused(h16, kPlanBf16, with_tail({6, 61, 67, 2302u}, 6), MappingPattern::Identity);
+    failures +=
+        fused(h24, kPlanBf16, with_tail({130, 0, 133, 2303u}, 129), MappingPattern::Fragmented);
+    failures += cached(h24, kPlanBf16, with_tail({1, 128, 129, 2304u}, 1), MappingPattern::Offset);
+    failures +=
+        cached(h16, kPlanBf16, with_tail({130, 0, 133, 2305u}, 129), MappingPattern::Fragmented);
+
+    // (2) Tail-off zero regression.
+    failures += run_tail_off_regression(h24, kPlanBf16, 2311u);
+    failures += run_tail_off_regression(h16, kPlanInt8, 2312u);
+
+    // (3) Quantized body with the tail on, INT8 family (rk8v4 and rk4v4-e8). Their decoded key
+    // plane is in original coordinates, so the tail-aware oracle can substitute the exact newest
+    // rows and the merged result is judged by the existing criterion -- the complete hybrid oracle.
+    failures += fused(h24, kPlanRk8v4, with_tail({6, 61, 67, 2321u}, 2), MappingPattern::Fragmented);
+    failures +=
+        fused(h24, kPlanRk8v4, with_tail({130, 0, 133, 2322u}, 129), MappingPattern::Fragmented);
+    failures += cached(h24, kPlanRk8v4, with_tail({6, 61, 67, 2323u}, 6), MappingPattern::Identity);
+    failures +=
+        cached(h16, kPlanRk8v4, with_tail({128, 0, 131, 2324u}, 65), MappingPattern::Offset);
+    for (const Geometry& geometry : kGeometries) {
+        failures += fused(geometry, KvCacheStorage::RotatedInt4KeyInt4ValueE8,
+                          with_tail({6, 61, 67, 2325u}, 2), MappingPattern::Fragmented);
+        failures += cached(geometry, KvCacheStorage::RotatedInt4KeyInt4ValueE8,
+                           with_tail({130, 0, 133, 2326u}, 129), MappingPattern::Fragmented);
+    }
+
+    // (4) NVFP4 has no complete hybrid oracle (rotated frame), so the weaker production check
+    // applies: the tail result is produced and no worse than tail-off relative to the exact oracle.
+    failures += run_case_allowing_arch_skip("exact KV tail nvfp4 (decode)", [&] {
+        return run_quantized_tail_case(h24, KvCacheStorage::Nvfp4Group16,
+                                       with_tail({6, 61, 67, 2331u}, 2),
+                                       MappingPattern::Fragmented);
+    });
+
+    // (5) C>1 masked batched rows with the tail on. The view carries a single per-sequence ring,
+    // so the batched tail case addresses one cache sequence: the writer (valid_columns < width)
+    // lives on table row 0 and a zero-valid row shares that row (legal because it never writes).
+    const BatchAttentionCase masked_tail{8,          {63, 63}, {6, 0},   {0, 0},
+                                         MappingPattern::Fragmented, 2341u,  false,  2};
+    std::cout << "    causal_softmax_attention batch " << h24.name << " bf16 B=2 W=8 valid={6,0} "
+                 "tail=2\n";
+    failures += run_batch_case(h24, kPlanBf16, masked_tail);
     return failures;
 }
 
@@ -4252,6 +4714,7 @@ int run_softmax_attention_causal_cache_tests() {
     failures += run_rk4v4_e8_cases();
     failures += run_rk2v4_e8_cases();
     failures += run_batch_cases();
+    failures += run_tail_cases();
     std::cout << (failures == 0 ? "PASS" : "FAIL")
               << " causal_softmax_attention public-contract correctness\n";
     return failures == 0 ? 0 : 1;

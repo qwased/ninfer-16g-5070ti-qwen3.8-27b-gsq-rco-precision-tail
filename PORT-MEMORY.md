@@ -278,6 +278,26 @@ length is computed on device from `positions` and never enters any graph key. Th
 hybrid-cache file key does carry `N` (`;kvt=`, `model_instance.cpp:178`).
 
 
+
+## 5.9 WP10 — exact-tail oracle coverage (verified by compile, not run)
+
+WP10 adds the numerical-verification half of the KV precision tail to
+`tests/ops/softmax_attention/causal_cache.cpp`. `AttentionCase`/`BatchAttentionCase` carry
+`kv_tail_tokens`; the harness sizes a BF16 ring `[D, 64, kv_heads, ceil(N/64)]`, wires it onto the
+`PagedKVExactTailView` of the cache view, and populates it exactly the way the engine does: the
+fused entry runs the same `ops::kv_cache_append` shadow write (`append/launch.cu:22-37`), the cached
+entry uploads the ring directly (it never appends). The independent oracle is extended in parallel —
+`cache_value_with_tail` returns the exact newest rows and the stored representation otherwise — so the
+existing `verify_attention` criterion judges the merged result, and `N = 0` is provably the pre-tail
+path (`tail_covers` returns false for every position). Coverage: BF16 merge (p+1>N and the empty-body
+boundary), an N=0 bit-exact regression, the INT8-family hybrid (rk8v4 / rk4v4-e8), an NVFP4
+no-worse-than-tail-off check, and a C>1 masked batched case. NVFP4/K8V4 stay on the weaker check
+because their kernel frame is Hadamard-rotated and the raw tail is not; a full hybrid oracle would
+have to reproduce the kernel's rotation rounding. **Not run at the time of writing** — the fused tail
+*read* was still wired by a separate work package; it now exists (WP3 §5.7 fused wiring) and the
+merged cases must be re-run to become evidence. Compile evidence and the wp3-specific per-TU harness
+variant are in the WP10 journal entry.
+
 ## 6. Working protocol (how we operate here)
 
 1. One work package per branch/worktree. Subagents do the reading + editing; the main agent keeps
