@@ -15,7 +15,9 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
 const html = readFileSync("docs/config-calculator.html", "utf8");
-const m = html.match(/<script>\n([\s\S]*?)<\/script>/);
+// Tolerate CRLF as well as LF: the blob is LF but a Windows checkout with core.autocrlf=true is
+// CRLF, and `<script>\n` would not match there (see config-calculator.test.mjs).
+const m = html.match(/<script>\r?\n([\s\S]*?)<\/script>/);
 const source = m[1];
 
 const els = new Map();
@@ -49,6 +51,7 @@ el("spec").value = "none";
 el("kv").value = "int8";
 el("ctx").value = "8192";
 el("reserve").value = "307";
+el("tail").value = "0";
 vm.createContext(context);
 vm.runInContext(source, context, { filename: "config-calculator inline script" });
 
@@ -59,15 +62,22 @@ for (const modelKey of Object.keys(DATA.models)) {
   for (const specKey of Object.keys(model.spec)) {
     for (const kv of Object.keys(model.kv)) {
       for (const ctx of [256, 4096, 8192, 8193, 40960, 262144]) {
-        el("model").value = modelKey;
-        el("spec").value = specKey;
-        el("kv").value = kv;
-        el("ctx").value = String(ctx);
-        el("reserve").value = "307";
-        try { render(); buildKvTable(); runs++; }
-        catch (e) {
-          failures++;
-          if (failures <= 3) console.log(`FAIL ${modelKey}/${specKey}/${kv}/${ctx}: ${e.message}`);
+        // The exact KV tail is exercised as a fourth dimension: 0 (off), a few pages, and a tail
+        // large enough to visibly shrink the largest fitting context on either model.
+        for (const tail of [0, 2048, 65536]) {
+          el("model").value = modelKey;
+          el("spec").value = specKey;
+          el("kv").value = kv;
+          el("ctx").value = String(ctx);
+          el("reserve").value = "307";
+          el("tail").value = String(tail);
+          try { render(); buildKvTable(); runs++; }
+          catch (e) {
+            failures++;
+            if (failures <= 3) {
+              console.log(`FAIL ${modelKey}/${specKey}/${kv}/${ctx}/tail=${tail}: ${e.message}`);
+            }
+          }
         }
       }
     }
@@ -78,6 +88,7 @@ console.log(`render()+buildKvTable() over ${runs + failures} combinations: ${fai
 // The largest-fitting context must respond to the speculation mode, or the page is silently
 // promising context a speculative configuration cannot deliver.
 el("model").value = "35b"; el("kv").value = "int8"; el("ctx").value = "32768"; el("reserve").value = "307";
+el("tail").value = "0"; // the loop above left a tail set; this check is about speculation alone
 for (const specKey of ["none", "mtp3+head", "dflash-3"]) {
   el("spec").value = specKey; render();
   const mx = el("out-maxctx").firstChild.nodeValue;
@@ -91,5 +102,54 @@ if (noneCtx === dflashCtx) {
   console.log(`FAIL largest context did not move with the speculation mode (${noneCtx} both ways)`);
   failures++;
 }
+// The exact KV tail must be a constant per-sequence cost that shrinks the fitting context, appear
+// as its own segment/legend row, and cost exactly nothing when N = 0.
+el("model").value = "27b"; el("kv").value = "int8"; el("spec").value = "none";
+el("ctx").value = "32768"; el("reserve").value = "307";
+function tailSnapshot() {
+  return {
+    maxCtx: el("out-maxctx").firstChild.nodeValue,
+    sub: el("out-maxctx-sub").textContent,
+    ctxHint: el("ctx-hint").textContent,
+    segment: el("seg-tail").style.width,
+    legend: el("legend").innerHTML,
+  };
+}
+el("tail").value = "0"; render();
+const off = tailSnapshot();
+if (!off.legend.includes("Exact KV tail")) {
+  console.log("FAIL the tail has no legend row"); failures++;
+}
+const maxCtxOf = (t) => { el("tail").value = String(t); render(); return el("out-maxctx").firstChild.nodeValue; };
+const offCtx = maxCtxOf(0);
+const smallCtx = maxCtxOf(4096);
+const bigCtx = maxCtxOf(32768);
+if (!(Number(bigCtx.replace(/,/g, "")) < Number(smallCtx.replace(/,/g, "")) &&
+      Number(smallCtx.replace(/,/g, "")) < Number(offCtx.replace(/,/g, "")))) {
+  console.log(`FAIL a larger tail must not fit more context (off=${offCtx} 4096=${smallCtx} 32768=${bigCtx})`);
+  failures++;
+}
+el("tail").value = "4096"; render();
+if (el("seg-tail").style.width === "0%") {
+  console.log("FAIL an enabled tail draws no segment"); failures++;
+}
+if (!el("tail-hint").textContent.includes("pages/sequence")) {
+  console.log("FAIL the tail hint does not report the ring size"); failures++;
+}
+el("tail").value = "0"; render();
+const back = tailSnapshot();
+for (const k of Object.keys(off)) {
+  if (off[k] !== back[k]) {
+    console.log(`FAIL N = 0 did not reproduce the previous ${k}: ${JSON.stringify(off[k])} vs ${JSON.stringify(back[k])}`);
+    failures++;
+  }
+}
+// A tail larger than the whole card must be reported as not fitting rather than silently capped.
+el("tail").value = "1048576"; render();
+if (el("verdict-head").textContent !== "Does not fit") {
+  console.log(`FAIL an impossible tail reported "${el("verdict-head").textContent}", not "Does not fit"`);
+  failures++;
+}
+el("tail").value = "0"; render();
 console.log(failures ? `FAIL (${failures})` : "PASS");
 process.exit(failures ? 1 : 0);
