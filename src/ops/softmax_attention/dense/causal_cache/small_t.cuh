@@ -150,14 +150,25 @@ causal_small_t_tail_partition(int window, int tail_tokens, int launch_capacity, 
         causal_small_t_active_splits<Geometry, Int8>(window, launch_capacity, tokens, wave_splits);
     const int tail_keys   = tail_tokens > 0 ? (tail_tokens < window ? tail_tokens : window) : 0;
     const int body_window = window - tail_keys;
-    // The body's own tier can ask for more splits than the whole window's (the INT8 token-count
-    // tiers are not monotonic in the window), and an empty body asks for none: the reducer merges
-    // exactly total_active splits, so the body is held inside that range and the tail takes the
-    // rest.
-    int body_active = body_window <= 0 ? 0
-                                       : causal_small_t_active_splits<Geometry, Int8>(
-                                             body_window, launch_capacity, tokens, wave_splits);
-    if (body_active > total_active) { body_active = total_active; }
+    // The reducer merges exactly the splits in [0, total_active) and the body and the tail between
+    // them have to cover the whole window: the body owns keys [0, body_window) and the tail owns
+    // [body_window, window). Holding the body inside the reducer's range is not enough -- the tier
+    // floor (kMinSplits) makes active_splits(body_window) equal active_splits(window) for nearly
+    // every short window, so a body clamped only at total_active takes every split and the newest
+    // tail_keys keys fall out of the softmax entirely (they are in neither partial, so neither the
+    // m/l merge nor the weighted accumulator ever sees them). Whenever the tail has keys the body
+    // therefore stops one split short of the range, and a non-empty body keeps at least one split
+    // so the keys below body_window stay covered as well -- the body's own tier can ask for more
+    // splits than the whole window's, because the INT8 token-count tiers are not monotonic in the
+    // window, and an empty body asks for none.
+    int body_active = 0;
+    if (body_window > 0) {
+        body_active = causal_small_t_active_splits<Geometry, Int8>(body_window, launch_capacity,
+                                                                   tokens, wave_splits);
+        const int body_limit = tail_keys > 0 ? total_active - 1 : total_active;
+        if (body_active > body_limit) { body_active = body_limit; }
+        if (body_active < 1) { body_active = 1; }
+    }
     return CausalSmallTTailPartition{body_window, body_active, total_active - body_active};
 }
 
@@ -299,6 +310,11 @@ __launch_bounds__(256) __global__ void causal_attention_small_t_reduce_output_ke
     const int window = last_pos + 1;
     const int active_split_count =
         causal_small_t_active_splits<Geometry, Int8>(window, split_count, tokens, wave_splits);
+    if (q_head == 0 && token == 0 && tid < 4) {
+        const int i = causal_partial_stat_index<Geometry>(q_head, token, tid, tokens);
+        printf("DBGRED win=%d asc=%d sc=%d tok=%d ws=%d split=%d m=%.6f l=%.6f\n", window,
+               active_split_count, split_count, tokens, wave_splits, tid, partial_m[i], partial_l[i]);
+    }
 
     __shared__ float weights[256], warp_sums[8], scalars[2];
     const float head_l =

@@ -768,3 +768,58 @@ Facts established while reconnoitring (so the fix does not have to re-derive the
 
 This is exactly the class of defect WP10 existed to expose: the code was compile-verified only and
 never executed. Root cause and fix are being investigated next; §7.2 is **not** satisfied yet.
+
+## Step 27 - WP10 oracle root cause (body swallowed the whole split range) and partial fix
+
+**Root cause (product bug, `small_t.cuh` `causal_small_t_tail_partition`).** The partition clamped
+the body to the reducer's range: `body_active = active_splits(body_window)` then
+`if (body_active > total_active) body_active = total_active`. But `causal_small_t_active_splits` has
+a tier floor (`kMinSplits`) that makes `active_splits(body_window) == active_splits(window)` for
+nearly every short window, so `body_active == total_active` and `tail_active == 0`. The tail partial
+then launched no split: the newest `tail_keys` keys sat in **neither** partial (the body only covers
+`[0, body_window)` and the tail covered nothing), so neither the `(m, l)` merge nor the weighted
+accumulator ever saw them. This is why every tail case failed, including the `exact-tail-k/v` row
+mismatch: the ring rows are fine, but the oracle expects them to be *read* and they were not.
+
+**Fix.** When the tail has keys the body stops one split short of the reducer range and a non-empty
+body keeps at least one split:
+
+```cpp
+int body_active = 0;
+if (body_window > 0) {
+    body_active = causal_small_t_active_splits<Geometry, Int8>(body_window, launch_capacity,
+                                                               tokens, wave_splits);
+    const int body_limit = tail_keys > 0 ? total_active - 1 : total_active;
+    if (body_active > body_limit) { body_active = body_limit; }
+    if (body_active < 1) { body_active = 1; }
+}
+```
+
+`tail_tokens == 0` is unchanged (`body_limit == total_active`), so the tail-free path is untouched.
+
+**Verified by running** (`.deps/oracle-run2.txt`, `.deps/oracle-run2-stats.txt`; the exe at
+`build-port\tests\ninfer_tests.exe` 05:19): all five BF16 tail cases now pass the existing criterion
+(`use` 0.22-0.31 of the limit) and no `exact-tail-*` mismatch is reported for them. The test fixture
+was also corrected by the same pass (`zero_tail_ring` gives the ring the same deterministic zero
+baseline the host fixture has; `make_tail_fixture` generates the whole retention window from 0 so a
+wrapped ring is exercised; the batched `table_rows` is `max(rows_addressed, batch)` to satisfy the
+Op's batched contract; the fused batched expectation is the writer's own appended rows because the
+fused entry shadow-writes rather than calling `kv_cache_append`). A `tail_merge_wired(storage)` gate
+stops the oracle asserting the ring for fp8-e4m3 / nvfp4-g16 / k8v4: those routes were **confirmed
+by inspection to contain no tail/shadow code at all** (`grep -E "tail|shadow"` on `small_t_nvfp4.cu`,
+`small_t_k8v4.cu`, `small_t_fp8.cu` is empty), because their partials live in a Hadamard-rotated frame
+the raw BF16 tail rows are not expressed in. The exact tail is therefore wired for **BF16 and the
+INT8 family only** -- a scope limitation to be stated in the docs, not a silent no-op.
+
+**Still failing (not yet root-caused):**
+- INT8 family. `rk8v4` fused tail=2/tail=6 fail the gross bound marginally; the `cached` rk8v4
+  (tail=6 `use=34`, tail=65 `use=84`) and `cached` rk4v4-e8 (tail=129 `use=33-38`) cases are grossly
+  wrong, while `rk4v4-e8` fused cases pass. The cached entry's ring is uploaded by the test rather
+  than shadow-written, so the suspicion is the cached INT8 route's ring/append or the
+  `active_split_count == body_active` handshake, not the partition.
+- Batched BF16: `... batch ... cache-k/v: exact mismatch at index 197376` -- the fused batched shadow
+  write puts rows in the ring the oracle does not expect (or vice versa).
+- Debug `printf`s (`DBGBODY`, `DBGTAIL`, `DBGRED`) and a probe rebuild were left in the working tree
+  when the investigating subagent exhausted its turn budget; they are **instrumentation only** and
+  must be deleted before this work is finished. The build it started was stopped and no compiler
+  process was left alive.

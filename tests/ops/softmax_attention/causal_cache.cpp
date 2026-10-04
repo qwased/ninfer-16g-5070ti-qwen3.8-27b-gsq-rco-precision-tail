@@ -1587,6 +1587,18 @@ bool tail_covers(const HostCache& cache, std::int32_t position, std::int32_t new
     return cache.tail_retention > 0 && position + cache.tail_retention > newest;
 }
 
+// Whether this storage's small-T route implements the exact tail at all. The merge lives in the
+// shared BF16 / INT8-family partials, whose reducer merges split partials through (m, l); the
+// rotated-frame storages (fp8-e4m3, nvfp4-g16, k8v4) reach their own reduce kernels, which consume
+// partials in the rotated frame the raw BF16 tail rows are not expressed in, so their launchers
+// neither read nor write PagedKVExactTailView -- with --kv-tail-tokens on such a layer the ring is
+// allocated but no entry populates it, and nothing reads it. Such a case is qualified against the
+// exact oracle no worse than its tail-off run (run_quantized_tail_case) and must not also assert a
+// ring no route writes.
+bool tail_merge_wired(KvCacheStorage storage) {
+    return storage == KvCacheStorage::BFloat16 || ops::kv_cache_is_int8_family(storage);
+}
+
 // Tail-aware cache_value: the newest tail_retention positions decode from the exact BF16 ring,
 // every older position keeps its stored (possibly quantized) representation. With the tail off
 // this is exactly cache_value, so untailed case results are unchanged.
@@ -1826,6 +1838,7 @@ public:
             k_scale_.copy_from_host(ks_physical.data(), ks_physical.size());
             v_scale_.copy_from_host(vs_physical.data(), vs_physical.size());
         }
+        zero_tail_ring();
     }
 
     PagedKVLayerView view() {
@@ -1876,6 +1889,19 @@ public:
             .storage       = direct.storage,
             .tail          = direct.tail,
         };
+    }
+
+    // The ring holds the newest `retention` tokens; a sequence only ever writes the positions it has
+    // appended, so slots for positions it has not reached yet keep whatever the allocation held.
+    // Nothing in the product reads those slots (the tail partial reads keys inside the window), so
+    // their content is not part of any contract and the fixture leaves them zero. Give the device
+    // ring the same deterministic baseline instead of the harness's guard poison, so verify_tail's
+    // exact compare is an assertion about the slots the append owns -- and about the appended rows
+    // landing exactly where the addressing says they do.
+    void zero_tail_ring() {
+        if (tail_page_count_ <= 0) { return; }
+        k_tail_.fill();
+        v_tail_.fill();
     }
 
     // Copies the exact-tail fixture's BF16 ring into the device ring. The cached entry never
@@ -2115,6 +2141,7 @@ public:
         block_tables_.copy_from_host(block_tables_host_.data(),
                                      block_tables_host_.size() * sizeof(std::int32_t));
         upload_rows(rows);
+        zero_tail_ring();
     }
 
     PagedKVBatchLayerView view() {
@@ -2151,6 +2178,15 @@ public:
             result.tail.retention  = tail_retention_;
         }
         return result;
+    }
+
+    // Same zero baseline as the single-row cache: the batched ring is written for whichever
+    // sequence owns it (here the fused shadow write), and every other slot is don't-care memory
+    // the product never reads.
+    void zero_tail_ring() {
+        if (tail_page_count_ <= 0) { return; }
+        k_tail_.fill();
+        v_tail_.fill();
     }
 
     // The batched append route skips the ring shadow (a batched view carries no single-sequence
@@ -2917,7 +2953,7 @@ int run_a1_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
                              storage == KvCacheStorage::BFloat16 ||
                                  storage == KvCacheStorage::Nvfp4Group16 ||
                                  storage == KvCacheStorage::Fp8KeyNvfp4Value);
-    failures += cache.verify_tail(label, expected);
+    if (tail_merge_wired(storage)) { failures += cache.verify_tail(label, expected); }
     // rk4v4-e8 and rk2v4-e8 keys are not compared with the host oracle above (its rotation rounds
     // differently), so the fused write is held byte-for-byte to the standalone append instead.
     if (storage == KvCacheStorage::Nvfp4Group16 || storage == KvCacheStorage::Fp8KeyNvfp4Value ||
@@ -2961,7 +2997,11 @@ TailFixture make_tail_fixture(const Geometry& geometry,
     TailFixture fixture;
     if (retention <= 0 || positions.empty()) { return fixture; }
     const std::int32_t newest = positions.back();
-    const std::int32_t first  = std::max(newest - retention + 1, positions.front());
+    // The ring holds the newest `retention` positions, whoever appended them: a decode step's tail
+    // reaches back past the step into rows earlier steps wrote. Generate the whole retention window
+    // so a wrapped ring is exercised at every page it can address, not just the page the step's own
+    // columns happen to land in.
+    const std::int32_t first = std::max(newest - retention + 1, 0);
     for (std::int32_t position = first; position <= newest; ++position) {
         fixture.positions.push_back(position);
     }
@@ -3379,7 +3419,13 @@ int run_batch_case(const Geometry& geometry, const CachePlan& plan, const BatchA
     // Sizing this by `batch` is what made upstream's DFlash2 sweep die on its very first case,
     // B=1 with table_rows={7}: expected[7] on a one-element vector, unchecked, so the symptom
     // varied run to run and never pointed at the real fault.
-    const std::size_t table_rows = cache_table_row_count(test_case.table_rows);
+    // The Op's batched contract requires the block-table tensor to hold one row per request
+    // (`block_tables.ne[1] >= batch`), while the table itself is indexed by the rows a request
+    // addresses -- and a batched exact-tail case needs several requests to address the *same* row,
+    // because the view carries one ring per sequence. Size for both: the rows addressed, and never
+    // fewer than the batch.
+    const std::size_t table_rows = std::max(cache_table_row_count(test_case.table_rows),
+                                            static_cast<std::size_t>(batch));
     const std::int32_t tail_tokens = std::max(test_case.kv_tail_tokens, 0);
     const std::int32_t tail_writer = tail_tokens > 0 ? batch_tail_writer(test_case) : -1;
     const std::int32_t tail_row =
@@ -3407,10 +3453,12 @@ int run_batch_case(const Geometry& geometry, const CachePlan& plan, const BatchA
             extract_request_columns(v, kv_column_elements, test_case.width, request, valid);
         append_cache(expected.at(static_cast<std::size_t>(table_row)), row_k, row_v, row_positions);
         if (request == tail_writer) {
-            const TailFixture tail =
-                make_tail_fixture(geometry, row_positions, tail_tokens, test_case.seed + 60u);
-            populate_tail(expected.at(static_cast<std::size_t>(table_row)), tail.k, tail.v,
-                          tail.positions, tail_tokens);
+            // The fused entry appends nothing through ops::kv_cache_append: it shadow-writes the
+            // rows it appends into the ring from the same source. The expected ring is therefore
+            // the writer's own appended rows, not a separately generated exact fixture -- those
+            // would be rows no route ever puts in the ring.
+            populate_tail(expected.at(static_cast<std::size_t>(table_row)), row_k, row_v,
+                          row_positions, tail_tokens);
         }
         insert_request_columns(
             ideal_attention(row_q, expected.at(static_cast<std::size_t>(table_row)), row_positions),
@@ -3533,9 +3581,11 @@ int run_batch_case(const Geometry& geometry, KvCacheStorage storage,
         }
     }
 
-    // Sized by the table rows the batch addresses, not by the batch. See the note on the CachePlan
-    // overload above for why those differ and what it cost.
-    const std::size_t table_rows = cache_table_row_count(test_case.table_rows);
+    // Sized by the table rows the batch addresses, not by the batch, and never below the batch the
+    // Op's batched contract requires. See the note on the CachePlan overload above for why those
+    // differ and what it cost.
+    const std::size_t table_rows = std::max(cache_table_row_count(test_case.table_rows),
+                                            static_cast<std::size_t>(batch));
     const std::int32_t tail_tokens = std::max(test_case.kv_tail_tokens, 0);
     const std::int32_t tail_writer = tail_tokens > 0 ? batch_tail_writer(test_case) : -1;
     const std::int32_t tail_row =
@@ -3563,10 +3613,8 @@ int run_batch_case(const Geometry& geometry, KvCacheStorage storage,
             extract_request_columns(v, kv_column_elements, test_case.width, request, valid);
         append_cache(expected.at(static_cast<std::size_t>(table_row)), row_k, row_v, row_positions);
         if (request == tail_writer) {
-            const TailFixture tail =
-                make_tail_fixture(geometry, row_positions, tail_tokens, test_case.seed + 60u);
-            populate_tail(expected.at(static_cast<std::size_t>(table_row)), tail.k, tail.v,
-                          tail.positions, tail_tokens);
+            populate_tail(expected.at(static_cast<std::size_t>(table_row)), row_k, row_v,
+                          row_positions, tail_tokens);
         }
         insert_request_columns(
             ideal_attention(row_q, expected.at(static_cast<std::size_t>(table_row)), row_positions),
@@ -4056,18 +4104,27 @@ int run_tail_cases() {
         return run_a3_case(geometry, plan, test_case, mapping);
     };
 
+    // Every case below is a *decode* shape: a short step (width <= 6, which is inside the small-T
+    // route for both geometries and every storage) over a window carried by `base`. The tail merge
+    // lives in the small-T family; the prompt (prefill) route keeps its quantized body and does not
+    // merge the tail (plan section 1.5, "prefill only writes, decode merges"), and a width above the
+    // verify window always resolves to that route -- so a prefill-shaped tail case has no route that
+    // could satisfy a tail-aware oracle and is not a valid case. A BF16 h24 body additionally needs
+    // the envelope above its 256-key prompt cutoff, because for width <= 8 a narrower envelope
+    // selects Prompt; 512 is used throughout to keep that explicit.
+    //
     // (1) Primary merge formula: a BFloat16 body with N > 0. Body and tail are both exact, so the
     // engine result must equal the plain causal FP32 oracle within the existing BF16 criterion.
-    // T=6 N=2 exercises p+1 > N (non-empty body window); T=6 N=6 is the boundary p+1 <= N (the
-    // body window is empty and every key comes from the tail); T=130 N=129 crosses several 64-page
-    // ring wraps with a one-key body.
-    failures += fused(h24, kPlanBf16, with_tail({6, 61, 67, 2301u}, 2), MappingPattern::Fragmented);
-    failures += fused(h16, kPlanBf16, with_tail({6, 61, 67, 2302u}, 6), MappingPattern::Identity);
+    // T=6 N=2 exercises p+1 > N (non-empty body window); T=6 N=6 nearly empties it; T=6 base=124 is
+    // a decode step whose tail reaches back over three 64-page ring wraps for one key of body.
     failures +=
-        fused(h24, kPlanBf16, with_tail({130, 0, 133, 2303u}, 129), MappingPattern::Fragmented);
-    failures += cached(h24, kPlanBf16, with_tail({1, 128, 129, 2304u}, 1), MappingPattern::Offset);
+        fused(h24, kPlanBf16, with_tail({6, 61, 512, 2301u}, 2), MappingPattern::Fragmented);
+    failures += fused(h16, kPlanBf16, with_tail({6, 61, 512, 2302u}, 6), MappingPattern::Identity);
     failures +=
-        cached(h16, kPlanBf16, with_tail({130, 0, 133, 2305u}, 129), MappingPattern::Fragmented);
+        fused(h24, kPlanBf16, with_tail({6, 124, 512, 2303u}, 6), MappingPattern::Fragmented);
+    failures += cached(h24, kPlanBf16, with_tail({1, 128, 512, 2304u}, 1), MappingPattern::Offset);
+    failures +=
+        cached(h16, kPlanBf16, with_tail({6, 124, 512, 2305u}, 129), MappingPattern::Fragmented);
 
     // (2) Tail-off zero regression.
     failures += run_tail_off_regression(h24, kPlanBf16, 2311u);
@@ -4076,21 +4133,24 @@ int run_tail_cases() {
     // (3) Quantized body with the tail on, INT8 family (rk8v4 and rk4v4-e8). Their decoded key
     // plane is in original coordinates, so the tail-aware oracle can substitute the exact newest
     // rows and the merged result is judged by the existing criterion -- the complete hybrid oracle.
-    failures += fused(h24, kPlanRk8v4, with_tail({6, 61, 67, 2321u}, 2), MappingPattern::Fragmented);
     failures +=
-        fused(h24, kPlanRk8v4, with_tail({130, 0, 133, 2322u}, 129), MappingPattern::Fragmented);
-    failures += cached(h24, kPlanRk8v4, with_tail({6, 61, 67, 2323u}, 6), MappingPattern::Identity);
+        fused(h24, kPlanRk8v4, with_tail({6, 61, 512, 2321u}, 2), MappingPattern::Fragmented);
     failures +=
-        cached(h16, kPlanRk8v4, with_tail({128, 0, 131, 2324u}, 65), MappingPattern::Offset);
+        fused(h24, kPlanRk8v4, with_tail({6, 124, 512, 2322u}, 6), MappingPattern::Fragmented);
+    failures += cached(h24, kPlanRk8v4, with_tail({6, 61, 512, 2323u}, 6), MappingPattern::Identity);
+    failures +=
+        cached(h16, kPlanRk8v4, with_tail({6, 122, 512, 2324u}, 65), MappingPattern::Offset);
     for (const Geometry& geometry : kGeometries) {
         failures += fused(geometry, KvCacheStorage::RotatedInt4KeyInt4ValueE8,
-                          with_tail({6, 61, 67, 2325u}, 2), MappingPattern::Fragmented);
+                          with_tail({6, 61, 512, 2325u}, 2), MappingPattern::Fragmented);
         failures += cached(geometry, KvCacheStorage::RotatedInt4KeyInt4ValueE8,
-                           with_tail({130, 0, 133, 2326u}, 129), MappingPattern::Fragmented);
+                           with_tail({6, 124, 512, 2326u}, 129), MappingPattern::Fragmented);
     }
 
     // (4) NVFP4 has no complete hybrid oracle (rotated frame), so the weaker production check
     // applies: the tail result is produced and no worse than tail-off relative to the exact oracle.
+    // That storage's small-T route is not tailed at all (see tail_merge_wired), so the case also
+    // does not assert a ring no nvfp4 entry writes.
     failures += run_case_allowing_arch_skip("exact KV tail nvfp4 (decode)", [&] {
         return run_quantized_tail_case(h24, KvCacheStorage::Nvfp4Group16,
                                        with_tail({6, 61, 67, 2331u}, 2),

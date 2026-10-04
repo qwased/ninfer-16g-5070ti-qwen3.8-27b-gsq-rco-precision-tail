@@ -220,6 +220,11 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         window, tail_tokens, split_count, TokenTile, wave_splits);
     const int active_split_count = tail_partition.body_active;
     const int body_window        = tail_partition.body_window;
+    if (kv_head == 0 && batch == 0 && tid == 0 && split == 0) {
+        printf("DBGBODY win=%d bw=%d ta=%d ba=%d tok=%d ws=%d sc=%d tt=%d keys=%d\n", window,
+               body_window, tail_partition.tail_active, active_split_count, TokenTile, wave_splits,
+               split_count, tail_tokens, window - body_window);
+    }
     if (split >= active_split_count) { return; }
 
     const int logical_tiles = div_up(body_window, Bc);
