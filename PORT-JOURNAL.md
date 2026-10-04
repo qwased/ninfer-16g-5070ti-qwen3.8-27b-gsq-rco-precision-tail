@@ -251,3 +251,15 @@ libs+headers+DLLs, curl and zlib). Not yet a completion notification.
 
 Next: on completion, review + syntax/compile verify, then merge `port/wp1` → `main` once the BUILD
 agent's full build finishes (incremental rebuild will recompile the touched TUs).
+
+---
+
+## 2026-10-05 — Step 10: completion-audit checklist created
+
+- Added `PORT-DOD.md`: maps every plan §7 DoD item, §4 milestone, §3 work package, and every
+  objective-level requirement to concrete evidence + honest status (DONE/PARTIAL/TODO/BLOCKED).
+  This is the artifact the final audit will be performed against; it prevents claiming completion
+  from intent rather than verified state.
+- Current honest summary: WP6 config + WP1 view interface landed; WP1 pool attach and WP5 accounting
+  in flight; WP2/WP3/WP4/WP7/WP8/WP9 still TODO; DoD items 1-7 all PARTIAL/TODO/BLOCKED.
+- Build at 479 objects, still compiling.
