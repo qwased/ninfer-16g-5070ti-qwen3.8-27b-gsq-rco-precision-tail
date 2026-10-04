@@ -464,7 +464,9 @@ Verified the capacity chain in `port/wp1`:
   (`ctest -R` serial, single GPU owner): `kv_capacity`, `rmsnorm_pack_tail`, `paged_kv_window`,
   `softmax_attention`, `_nvfp4`, `_k8v4`, `_rk4v4_e8`, `_rk2v4_e8`, `_dflash2` (195 s),
   `_int8_prompt`, `_pack_gqa`, `kv_cache_append{,_nvfp4,_k8v4}` all **Passed**; the last,
-  `softmax_attention_wide_test`, is a long CPU-heavy sweep still running when this was written.
+  `softmax_attention_wide_test`, completed at 729.93 s. Final: **100% passed, 0 failed of 15**,
+  total 1121.09 s, `CTEST_EXIT=0` — the tail-off regression baseline for the merged WP1/WP2/WP5/WP6
+  increment.
   `ninfer_resident_memory_test` is a standalone exe not built by the `ninfer_tests` target.
   Two environment facts fixed the earlier all-`0xc0000135` run: the test harness needs the CUDA
   `bin` on PATH (source `.deps/env-port.bat`) and the `ninfer_stage_test_runtime_dlls` ALL target
