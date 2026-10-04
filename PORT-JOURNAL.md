@@ -346,3 +346,18 @@ agent's full build finishes (incremental rebuild will recompile the touched TUs)
   `apps/cli/main.cpp` and `src/serve/generation_service.cpp`.
 - Technique recorded in PORT-MEMORY so later steps can verify without a full build.
 - Build still running (529 objects).
+
+---
+
+## 2026-10-05 — Step 16: WP5 premise verified and corrected (plan amended)
+
+Verified the capacity chain in `port/wp1`:
+- `SequenceCapacityCurve::reservation_bytes` (`kv_capacity.cpp:57-69`) is already
+  `constant + linear`; `startup.cpp:1216-1218` folds `persistent.bytes` (which contains
+  `DecoderStateLayout::kv_payload_bytes()`, now tail-inclusive) into `minimum_device_reservation_bytes`.
+- Therefore the exact tail is **already accounted** as a per-sequence constant in both the capacity
+  curve and `MemorySummary.kv_payload_bytes`. Plan §3 WP5's "convert the single-coefficient curve"
+  rests on a wrong premise and is **not needed** — the plan is amended (allowed by the updated
+  objective). Remaining WP5 item is only the optional reporting split
+  `kv_exact_history_bytes` / `kv_rollback_reserve_bytes`.
+- Recorded as PORT-MEMORY §5.5 and updated PORT-DOD WP5.

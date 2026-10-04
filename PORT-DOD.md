@@ -36,7 +36,7 @@ packages, each mapped to concrete evidence. **Update on every step.** Status val
 | WP2 fused dual write | **TODO** | Anchor: `src/ops/kv_cache/append/launch.cu` (201/219, template 16-121), `kernel.cuh` BF16 kernel 69-104; upstream semantics in PORT-BEELLAMA-SPEC §C |
 | WP3 attention merge | **TODO** (design fixed) | Merge reuse: `small_t.cuh` `causal_merge_split_statistics` 183-210 + `..._reduce_output_kernel` 212-299; design in PORT-MEMORY §5.4 |
 | WP4 graph/route family | **TODO** | N goes in the tail identity (§5.2 correction 2); dynamic window excluded |
-| WP5 capacity/`MemorySummary` | **PARTIAL** | In flight (agent) |
+| WP5 capacity/`MemorySummary` | **PARTIAL** | Tail cost already inside the curve constant + `kv_payload_bytes` (verified, PORT-MEMORY §5.5 — plan premise was wrong). Optional split fields TODO |
 | WP6 config chain | **PARTIAL** | Option + identity + help landed (`64f32d3e`); draft tail=0 forcing in flight |
 | WP7 tier ownership | **TODO** | M1 decision: exact pool device-only; update `docs/maintainer/paged-kv-cache.md §4.5` |
 | WP8 transaction/rollback | **TODO** | Commit-after-attention + reserve `R` |

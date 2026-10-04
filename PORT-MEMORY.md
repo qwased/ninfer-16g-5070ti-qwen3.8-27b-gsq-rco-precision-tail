@@ -191,6 +191,22 @@ Result (Step 15): all changed TUs compile except `apps/cli/main.cpp`, which only
 build-generated `ninfer_build_id.h`. Two real errors were found and fixed this way
 (`kv_tail_tokens` missing from `cli::Options` / `serve::ServeOptions`).
 
+
+## 5.5 Plan correction — WP5 capacity curve (verified in code)
+
+Plan §3 WP5 says `SequenceCapacityCurve` is "线性单系数" and must become "常量项 + 线性项".
+**That premise is wrong.** Verified in `src/runtime/contract/resources.h:392-398` and
+`src/runtime/engine/kv_capacity.cpp:57-69`:
+`reservation_bytes(p) = minimum_device_reservation_bytes + (p - minimum_main_page_groups) *
+bytes_per_additional_main_page_group` — it already carries a constant term AND a linear term.
+And `startup.cpp:1216-1218` sets `device_reservation_bytes = persistent.bytes + workspace.capacity +
+graph_allowance`, so the sequence candidate's constant already contains `persistent.bytes`, which
+contains `DecoderStateLayout::kv_payload_bytes()` — which now includes the exact tail pool.
+=> **The tail is already fully accounted** as a per-sequence constant in the capacity curve and in
+`MemorySummary.kv_payload_bytes`; no curve change is needed. Only the optional explicit split fields
+(`kv_exact_history_bytes` / `kv_rollback_reserve_bytes`) remain unimplemented; the plan's named
+`kv_exact_history_bytes` split is a reporting nicety, not a capacity-correctness requirement.
+
 ## 6. Working protocol (how we operate here)
 
 1. One work package per branch/worktree. Subagents do the reading + editing; the main agent keeps
