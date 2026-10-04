@@ -9,6 +9,8 @@
 #include "ops/softmax_attention/dense/causal_cache/small_t.cuh"
 #include "ops/softmax_attention/dense/causal_cache/small_t_bf16.cuh"
 #include "ops/softmax_attention/dense/causal_cache/small_t_i8_launch.h"
+#include "ops/softmax_attention/dense/causal_cache/small_t_tail.cuh"
+#include "ops/softmax_attention/dense/causal_cache/small_t_tail_shadow.cuh"
 #include "core/device.h" // CUDA_CHECK
 #include "ninfer/ops/softmax_attention.h"
 
@@ -204,12 +206,18 @@ template <typename Geometry, int TokenTile, int WarpsPerCta, bool MultiBatch, bo
           typename CacheInput>
 void launch_tc_partial_bf16(const Tensor& q, CacheInput input, const Tensor& pos, float scale,
                             PagedKVBatchLayerView cache, const CausalSmallTInvocation& invocation,
-                            std::int32_t logical_capacity, std::int32_t splits, Tensor& partial_acc,
-                            Tensor& partial_m, Tensor& partial_l, cudaStream_t stream) {
+                            std::int32_t logical_capacity, std::int32_t splits,
+                            Tensor& partial_acc, Tensor& partial_m, Tensor& partial_l,
+                            cudaStream_t stream) {
     constexpr int kBlock = 32 * WarpsPerCta;
     const dim3 grid(Geometry::KVHeads, splits, invocation.batch_size);
+    const std::int32_t tail_tokens = causal_small_t_tail_retention<CacheInput>(cache);
     Tensor& cache_k = cache.k_pages;
     Tensor& cache_v = cache.v_pages;
+    const std::int32_t* valid_columns =
+        invocation.valid_columns == nullptr
+            ? nullptr
+            : static_cast<const std::int32_t*>(invocation.valid_columns->data);
     // bf16 kernel uses only static smem (no dynamic staging).
     causal_attention_small_t_tc_partial_bf16_kernel<Geometry, TokenTile, WarpsPerCta, MultiBatch,
                                                     Masked, CacheInput>
@@ -217,16 +225,29 @@ void launch_tc_partial_bf16(const Tensor& q, CacheInput input, const Tensor& pos
             static_cast<const __nv_bfloat16*>(q.data), input,
             static_cast<const std::int32_t*>(pos.data), static_cast<__nv_bfloat16*>(cache_k.data),
             static_cast<__nv_bfloat16*>(cache_v.data),
-            static_cast<const std::int32_t*>(cache.block_tables.data),
-            invocation.valid_columns == nullptr
-                ? nullptr
-                : static_cast<const std::int32_t*>(invocation.valid_columns->data),
+            static_cast<const std::int32_t*>(cache.block_tables.data), valid_columns,
             invocation.table_rows == nullptr
                 ? nullptr
                 : static_cast<const std::int32_t*>(invocation.table_rows->data),
             cache.block_tables.ne[0], invocation.width, invocation.full_width,
-            invocation.column_begin, logical_capacity, scale, static_cast<float*>(partial_acc.data),
-            static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data));
+            invocation.column_begin, logical_capacity, tail_tokens, scale,
+            static_cast<float*>(partial_acc.data), static_cast<float*>(partial_m.data),
+            static_cast<float*>(partial_l.data));
+    CUDA_CHECK(cudaGetLastError());
+    if (tail_tokens <= 0 || cache.tail.page_count <= 0) { return; }
+    // Same grid and block as the body partial: grid.y is the launch capacity the reducer takes as
+    // its split count, so the tail's split indices line up with the ones the body left free.
+    causal_attention_small_t_tail_bf16_kernel<Geometry, TokenTile,
+                                              kCausalSmallTTailWarps<TokenTile>, false>
+        <<<grid, kBlock, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(q.data),
+            static_cast<const std::int32_t*>(pos.data),
+            static_cast<const __nv_bfloat16*>(cache.tail.k_pages.data),
+            static_cast<const __nv_bfloat16*>(cache.tail.v_pages.data), cache.tail.page_count,
+            tail_tokens, 0, invocation.width, invocation.full_width, invocation.column_begin,
+            logical_capacity, invocation.batch_size, valid_columns, scale,
+            static_cast<float*>(partial_acc.data), static_cast<float*>(partial_m.data),
+            static_cast<float*>(partial_l.data));
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -300,6 +321,31 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
                                                     cache.storage)
             : 0;
 
+    // Fused-append exact tail: this entry writes the quantized body from inside its partial kernel
+    // and never calls ops::kv_cache_append, so shadow-write this step's unquantized rows into each
+    // sequence's ring before the tail partial reads it (the cached entry's ring was filled by that
+    // op). Storage-independent: the source is BF16 whatever the body coding is.
+    if constexpr (CacheInput::writes_cache) {
+        if (cache.tail.enabled() && cache.tail.page_count > 0 && invocation.width > 0) {
+            constexpr int kShadowThreads = 256;
+            const std::int64_t units     = static_cast<std::int64_t>(invocation.width) *
+                                       Geometry::KVHeads * (kCausalHeadDim / 8);
+            const int shadow_grid = static_cast<int>(
+                div_up(units, static_cast<std::int64_t>(kShadowThreads)));
+            const dim3 shadow_dims(shadow_grid, invocation.batch_size);
+            causal_attention_small_t_tail_shadow_kernel<Geometry, CacheInput>
+                <<<shadow_dims, kShadowThreads, 0, stream>>>(
+                    input, static_cast<const std::int32_t*>(pos.data),
+                    static_cast<__nv_bfloat16*>(cache.tail.k_pages.data),
+                    static_cast<__nv_bfloat16*>(cache.tail.v_pages.data), cache.tail.page_count,
+                    invocation.width, invocation.full_width, invocation.column_begin,
+                    invocation.valid_columns == nullptr
+                        ? nullptr
+                        : static_cast<const std::int32_t*>(invocation.valid_columns->data));
+            CUDA_CHECK(cudaGetLastError());
+        }
+    }
+
     // BF16 keeps its row-tile warp count; INT8 selects its producer/consumer
     // geometry inside launch_tc_partial_i8.
 #define NINFER_CAUSAL_SMALL_T_DISPATCH(TOKENS, WARPS)                                              \
@@ -308,12 +354,12 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
             if (kv_cache_is_int8_family(cache.storage)) {                                          \
                 launch_small_t_i8<Geometry, (TOKENS), CacheInput>(                                 \
                     MultiBatch, Masked, q, input, pos, scale, cache, invocation, logical_capacity, \
-                    implementation_window, splits, wave_splits, partial_acc, partial_m, partial_l, \
+                    implementation_window, splits, wave_splits, partial_acc, partial_m, partial_l,  \
                     stream);                                                                       \
             } else {                                                                               \
                 launch_tc_partial_bf16<Geometry, (TOKENS), (WARPS), MultiBatch, Masked>(           \
                     q, input, pos, scale, cache, invocation, logical_capacity, splits,             \
-                    partial_acc, partial_m, partial_l, stream);                                    \
+                    partial_acc, partial_m, partial_l, stream);                                     \
             }                                                                                      \
         };                                                                                         \
         const bool masked = invocation.valid_columns != nullptr;                                   \

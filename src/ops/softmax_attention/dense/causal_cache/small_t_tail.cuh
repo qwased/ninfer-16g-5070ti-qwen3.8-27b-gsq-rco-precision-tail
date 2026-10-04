@@ -1,10 +1,23 @@
 #pragma once
 
-// ninfer::ops - split-KV causal small-T attention, BF16 KV-cache partial kernel.
-// Standalone from the int8 kernel (causal_attention_small_t_i8.cuh): shared scaffolding
-// lives in causal_attention_small_t.cuh, but the body/append/load are not shared so the
-// bf16 path can be tuned independently. Processes one KV head, one query-head
-// subgroup, and one token tile; a reducer combines FP32 split-local partials.
+// ninfer::ops - split-KV causal small-T attention, exact-tail partial kernel (WP3).
+//
+// The newest `tail_tokens` keys of a window are kept unquantized in the exact BF16 ring (one
+// contiguous ring per sequence, page of position p = (p / 64) % ring_pages, no block table). This
+// kernel produces the partial (acc, m, l) of exactly those keys and writes it at the split indices
+// [body_active, total_active) the quantized body partial leaves free; the shared reducer then
+// merges body and tail with one online-softmax pass, which is the merge itself -- no separate
+// merge kernel exists.
+//
+// It is storage-independent: whatever the body's coding is (INT8 family, fp8, nvfp4, k8v4, bf16),
+// the tail is always read as BF16, so the merge unifies the body's scaled-in-code domain with the
+// exact domain through (m, l) only. `Int8` and `wave_splits` mirror the body kernel's active-split
+// policy so the two sides agree on where the body ends and the tail begins.
+//
+// The body partial covers keys [0, body_window) in splits [0, body_active); the tail covers
+// [body_window, window) in splits [body_active, total_active). The ranges are disjoint and
+// adjacent, so no key is counted twice and none is dropped, and a split never straddles the
+// boundary.
 
 #include <cuda_bf16.h>
 #include <math_constants.h>
@@ -15,14 +28,32 @@
 
 namespace ninfer::ops {
 
-template <typename Geometry, int TokenTile, int WarpsPerCta, bool MultiBatch, bool Masked,
-          typename CacheInput>
-__launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf16_kernel(
-    const __nv_bfloat16* q, CacheInput input, const std::int32_t* pos, __nv_bfloat16* cache_k,
-    __nv_bfloat16* cache_v, const std::int32_t* block_tables, const std::int32_t* valid_columns,
-    const std::int32_t* table_rows, std::int32_t table_stride, std::int32_t tokens,
-    std::int32_t full_width, std::int32_t column_begin, std::int32_t logical_capacity,
-    std::int32_t tail_tokens, float scale, float* partial_acc, float* partial_m, float* partial_l) {
+// Row-tile width of the tail kernel: enough 16-row tiles for one token tile's rows and no more.
+// Mirrors the BF16 body's own choice (two warps for a single token, four above it), and stays
+// independent of the body kernel's producer geometry.
+template <int TokenTile>
+inline constexpr int kCausalSmallTTailWarps = TokenTile == 1 ? 2 : 4;
+
+// Host-side gate of the merge: the retention a partial launcher on this entry may actually use.
+// Both entries are tailed. The cached entry's ring was filled by ops::kv_cache_append; the
+// fused-append entry (CacheInput::writes_cache) writes the quantized body from inside its partial
+// kernel and never calls that op, so causal_attention_small_t_tail_shadow_kernel (launched in
+// small_t.cu) writes the ring from the same source before the tail partial reads it.
+template <typename CacheInput>
+[[nodiscard]] inline std::int32_t
+causal_small_t_tail_retention(const PagedKVBatchLayerView& cache) noexcept {
+    (void)sizeof(CacheInput);
+    return cache.tail.enabled() && cache.tail.page_count > 0 ? cache.tail.retention : 0;
+}
+
+template <typename Geometry, int TokenTile, int WarpsPerCta, bool Int8>
+__launch_bounds__(WarpsPerCta * 32, 2) __global__ void causal_attention_small_t_tail_bf16_kernel(
+    const __nv_bfloat16* q, const std::int32_t* pos, const __nv_bfloat16* tail_k,
+    const __nv_bfloat16* tail_v, std::int32_t ring_pages, std::int32_t tail_tokens,
+    std::int32_t wave_splits, std::int32_t tokens, std::int32_t full_width,
+    std::int32_t column_begin, std::int32_t logical_capacity, std::int32_t batch_size,
+    const std::int32_t* valid_columns, float scale, float* partial_acc, float* partial_m,
+    float* partial_l) {
     static_assert(TokenTile >= 1 && TokenTile * Geometry::GroupSize <= 48);
     static_assert(WarpsPerCta >= 1 && WarpsPerCta <= 4);
 
@@ -35,9 +66,6 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
     constexpr int QKKs    = D / 16;
     constexpr int PVNt    = D / 8;
     constexpr int PVKs    = Bc / 16;
-    // A split stages up to 64 page IDs, enough for a 262,144-key window in this split
-    // geometry; a split that spans more pages reads the block table directly.
-    constexpr int PageIds       = 64;
     constexpr float Log2E       = 1.4426950408889634074f;
     constexpr unsigned FullMask = 0xffffffffu;
     constexpr int QkvRows       = 2 * Bc;
@@ -46,42 +74,52 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
 
     __shared__ __align__(16) __nv_bfloat16 qkv_s[QkvRows * D];
     __shared__ __align__(16) __nv_bfloat16 p_s[Wc * 16 * Bc];
-    __shared__ std::int32_t physical_pages_s[PageIds];
     __nv_bfloat16* k_s = qkv_s;
     __nv_bfloat16* v_s = qkv_s + Bc * D;
 
     const int kv_head     = static_cast<int>(blockIdx.x);
-    const int split       = static_cast<int>(blockIdx.y);
-    const int batch       = MultiBatch ? static_cast<int>(blockIdx.z) : 0;
+    const int split_local = static_cast<int>(blockIdx.y);
+    const int batch       = static_cast<int>(blockIdx.z);
     const int split_count = static_cast<int>(gridDim.y);
     const int tid         = static_cast<int>(threadIdx.x);
     const int warp        = tid >> 5;
     const int lane        = tid & 31;
-    int valid_tokens      = tokens;
-    if constexpr (Masked) {
+    if (kv_head < 0 || kv_head >= Geometry::KVHeads || ring_pages <= 0 || tail_tokens <= 0 ||
+        tokens < 1 || tokens > TokenTile || batch < 0 || batch >= batch_size || split_count <= 0) {
+        return;
+    }
+    int valid_tokens = tokens;
+    if (valid_columns != nullptr) {
         const int remaining = valid_columns[batch] - column_begin;
         valid_tokens        = remaining <= 0 ? 0 : (remaining < tokens ? remaining : tokens);
     }
     const int row_count = tokens * Geometry::GroupSize;
+    if (row_count > Br) { return; }
 
-    std::int64_t column_base = column_begin;
-    if constexpr (MultiBatch) { column_base += static_cast<std::int64_t>(batch) * full_width; }
-    q += static_cast<std::int64_t>(kCausalHeadDim) * Geometry::QHeads * column_base;
+    const std::int64_t column_base =
+        static_cast<std::int64_t>(column_begin) + static_cast<std::int64_t>(batch) * full_width;
+    q += static_cast<std::int64_t>(D) * Geometry::QHeads * column_base;
     pos += column_base;
-    if constexpr (CacheInput::writes_cache) {
-        input.k += static_cast<std::int64_t>(kCausalHeadDim) * Geometry::KVHeads * column_base;
-        input.v += static_cast<std::int64_t>(kCausalHeadDim) * Geometry::KVHeads * column_base;
-    }
-    const int table_row = table_rows == nullptr ? 0 : table_rows[batch];
-    const std::int32_t* block_table =
-        block_tables + static_cast<std::int64_t>(table_row) * table_stride;
-    if constexpr (MultiBatch) {
-        partial_acc += static_cast<std::int64_t>(batch) * kCausalHeadDim * Geometry::QHeads *
-                       tokens * split_count;
-        partial_m += static_cast<std::int64_t>(batch) * Geometry::QHeads * tokens * split_count;
-        partial_l += static_cast<std::int64_t>(batch) * Geometry::QHeads * tokens * split_count;
-    }
+    partial_acc += static_cast<std::int64_t>(batch) * D * Geometry::QHeads * tokens * split_count;
+    partial_m += static_cast<std::int64_t>(batch) * Geometry::QHeads * tokens * split_count;
+    partial_l += static_cast<std::int64_t>(batch) * Geometry::QHeads * tokens * split_count;
 
+    // The body kernel's neutral fill already covers every split of the launch (its early exits
+    // happen before the split-ownership check), so the tail kernel must not write anything in the
+    // same situations: it would only race the body's own writes.
+    if (valid_tokens == 0) { return; }
+
+    const std::int32_t last_pos = pos[tokens - 1];
+    if (last_pos < 0 || last_pos >= logical_capacity) { return; }
+
+    const int window = last_pos + 1;
+    const CausalSmallTTailPartition partition = causal_small_t_tail_partition<Geometry, Int8>(
+        window, tail_tokens, split_count, tokens, wave_splits);
+    const int body_window = partition.body_window;
+    const int tail_active = partition.tail_active;
+    if (split_local >= tail_active) { return; }
+
+    const int split = partition.body_active + split_local;
     auto write_neutral = [&]() {
         for (int row = tid; row < row_count; row += Threads) {
             int q_head = 0;
@@ -106,80 +144,27 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
         }
     };
 
-    if (kv_head < 0 || kv_head >= Geometry::KVHeads || tokens < 1 || tokens > TokenTile ||
-        row_count > Br || split_count <= 0) {
-        return;
-    }
-    if (valid_tokens == 0) {
-        write_neutral();
-        return;
-    }
-
-    const std::int32_t first_pos = pos[0];
-    const std::int32_t last_pos  = pos[tokens - 1];
-    if (first_pos < 0 || last_pos < 0 || last_pos >= logical_capacity) {
-        write_neutral();
-        return;
-    }
-
-    const int window = last_pos + 1;
-    // With an exact tail the body covers only the keys the tail does not: splits
-    // [0, body_active) read [0, body_window), and the tail kernel reproduces the same partition to
-    // write the splits above them. With no tail (tail_tokens == 0) this is total_active and window,
-    // exactly as before.
-    const CausalSmallTTailPartition tail_partition =
-        causal_small_t_tail_partition<Geometry, false>(window, tail_tokens, split_count, TokenTile);
-    const int active_split_count = tail_partition.body_active;
-    const int body_window        = tail_partition.body_window;
-    if (split >= active_split_count) { return; }
-
-    const int logical_tiles = div_up(body_window, Bc);
-    const bool tile_split   = logical_tiles >= active_split_count;
-    const int units_per_split = tile_split ? div_up(logical_tiles, active_split_count)
-                                           : div_up(body_window, active_split_count);
-    const int split_start = split * units_per_split * (tile_split ? Bc : 1);
+    const int tail_keys     = window - body_window;
+    const int logical_tiles = div_up(tail_keys, Bc);
+    const bool tile_split   = logical_tiles >= tail_active;
+    const int units_per_split =
+        tile_split ? div_up(logical_tiles, tail_active) : div_up(tail_keys, tail_active);
+    const int split_start = split_local * units_per_split * (tile_split ? Bc : 1);
     const int split_limit = split_start + units_per_split * (tile_split ? Bc : 1);
-    const int split_end   = (split_limit < body_window) ? split_limit : body_window;
+    const int split_end   = (split_limit < tail_keys) ? split_limit : tail_keys;
+    // A split this launch owns but that no key falls into must still publish a neutral partial:
+    // the reducer reads every split in [body_active, total_active). Splits past tail_active are
+    // outside the reducer's range and are left untouched.
     if (split_start >= split_end) {
         write_neutral();
         return;
     }
     const int first_tile = (split_start / Bc) * Bc;
     const int key_blocks = div_up(split_end - first_tile, Bc);
-    const int first_page = first_tile >> kPagedKVPageShift;
-    const int page_count    = ((split_end - 1) >> kPagedKVPageShift) - first_page + 1;
-    const bool staged_pages = page_count <= PageIds;
-    if (staged_pages) {
-        for (int page = tid; page < page_count; page += Threads) {
-            physical_pages_s[page] = block_table[first_page + page];
-        }
-    }
-    const auto page_at = [&](int key) {
-        return staged_pages ? physical_pages_s[(key >> kPagedKVPageShift) - first_page]
-                            : block_table[key >> kPagedKVPageShift];
-    };
-
-    if constexpr (CacheInput::writes_cache) {
-        // The owning split writes each new row. Current attention reads those rows directly from
-        // input below, so no split depends on another split's cache write.
-        for (int chunk = tid; chunk < valid_tokens * (D / 8); chunk += Threads) {
-            const int token = chunk / (D / 8);
-            const int d     = (chunk - token * (D / 8)) * 8;
-            const int p_tok = pos[token];
-            if (p_tok >= split_start && p_tok < split_end && p_tok >= 0 &&
-                p_tok < logical_capacity) {
-                const std::int64_t new_off = kv_cache_int8_new_index<Geometry>(kv_head, d, token);
-                const int lane             = tid & 31;
-                int physical_page = lane == 0 ? paged_kv_physical_page(block_table, p_tok) : 0;
-                physical_page     = __shfl_sync(FullMask, physical_page, 0);
-                const std::int64_t cache_off = causal_cache_index<Geometry>(
-                    physical_page, kv_head, d, p_tok & kPagedKVPageMask);
-                store_vec(&cache_k[cache_off], load_vec<int4>(&input.k[new_off]));
-                store_vec(&cache_v[cache_off], load_vec<int4>(&input.v[new_off]));
-            }
-        }
-        __syncthreads();
-    }
+    // Absolute key range this split reads: [first_key, limit_key) with first_key = body_window +
+    // split_start. The ring page follows from the absolute key alone.
+    const int first_key = body_window + split_start;
+    const int limit_key = body_window + split_end;
 
     for (int idx = tid; idx < Br * D; idx += Threads) {
         const int row = idx / D;
@@ -206,7 +191,7 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
     const int b_koff   = ((lane >> 3) & 1) << 3;
 
     const int warp_row0 = warp * 16;
-    __nv_bfloat16* p_sw  = &p_s[warp * 16 * Bc];
+    __nv_bfloat16* p_sw = &p_s[warp * 16 * Bc];
 
     unsigned af_q[QKKs][4];
 #pragma unroll
@@ -217,7 +202,6 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
                     smem_addr(&qkv_s[arow * D + causal_small_t_tc_swz(arow, acol)]));
     }
     __syncthreads();
-    int physical_page = page_at(first_tile);
     float acc[PVNt][4];
 #pragma unroll
     for (int n = 0; n < PVNt; ++n) {
@@ -227,41 +211,22 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
     float m0 = -CUDART_INF_F, m1 = -CUDART_INF_F, l0 = 0.0f, l1 = 0.0f;
 
     for (int kb = 0; kb < key_blocks; ++kb) {
-        const int k0 = first_tile + kb * Bc;
-        if (kb != 0 && (k0 & kPagedKVPageMask) == 0) {
-            physical_page = page_at(k0);
-        }
-        // Stage the bf16 K/V key tile with one cp.async wave (16B/thread, high MLP).
-        // Current-step tokens come from k_new/v_new; tail slots are zeroed.
+        const int tile_first_key = body_window + first_tile + kb * Bc;
+        // Stage the exact K/V key tile; keys outside this split read as zero and are masked below.
 #pragma unroll 1
         for (int chunk = tid; chunk < Bc * (D / 8); chunk += Threads) {
             const int key_l      = chunk / (D / 8);
             const int d          = (chunk - key_l * (D / 8)) * 8;
-            const int key        = k0 + key_l;
+            const int key        = tile_first_key + key_l;
             __nv_bfloat16* k_dst = &k_s[key_l * D + causal_small_t_tc_swz(key_l, d)];
             __nv_bfloat16* v_dst = &v_s[key_l * D + causal_small_t_tc_swz(key_l, d)];
-            if (key >= split_start && key < split_end) {
-                if constexpr (CacheInput::writes_cache) {
-                    const int new_token = key - first_pos;
-                    const bool from_new =
-                        new_token >= 0 && new_token < valid_tokens && key >= first_pos;
-                    if (from_new) {
-                        const std::int64_t off =
-                            kv_cache_int8_new_index<Geometry>(kv_head, d, new_token);
-                        ninfer::ops::cp_async<16>(k_dst, &input.k[off]);
-                        ninfer::ops::cp_async<16>(v_dst, &input.v[off]);
-                    } else {
-                        const std::int64_t off = causal_cache_index<Geometry>(
-                            physical_page, kv_head, d, key & kPagedKVPageMask);
-                        ninfer::ops::cp_async<16>(k_dst, &cache_k[off]);
-                        ninfer::ops::cp_async<16>(v_dst, &cache_v[off]);
-                    }
-                } else {
-                    const std::int64_t off = causal_cache_index<Geometry>(physical_page, kv_head, d,
-                                                                          key & kPagedKVPageMask);
-                    ninfer::ops::cp_async<16>(k_dst, &cache_k[off]);
-                    ninfer::ops::cp_async<16>(v_dst, &cache_v[off]);
-                }
+            if (key >= first_key && key < limit_key) {
+                const int physical_page =
+                    batch * ring_pages + ((key >> kPagedKVPageShift) % ring_pages);
+                const std::int64_t off = causal_cache_index<Geometry>(
+                    physical_page, kv_head, d, key & kPagedKVPageMask);
+                ninfer::ops::cp_async<16>(k_dst, &tail_k[off]);
+                ninfer::ops::cp_async<16>(v_dst, &tail_v[off]);
             } else {
                 store_vec(k_dst, make_int4(0, 0, 0, 0));
                 store_vec(v_dst, make_int4(0, 0, 0, 0));
@@ -300,22 +265,22 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
         for (int nt = 0; nt < QKNt; ++nt) {
             const int col0 = nt * 8 + 2 * lid;
             const int col1 = col0 + 1;
-            const int key0 = k0 + col0;
-            const int key1 = col1 + k0;
+            const int key0 = tile_first_key + col0;
+            const int key1 = tile_first_key + col1;
             score[nt][0] =
-                (row0 < row_count && key0 >= split_start && key0 < split_end && key0 <= qabs0)
+                (row0 < row_count && key0 >= first_key && key0 < limit_key && key0 <= qabs0)
                     ? score[nt][0] * scale
                     : -CUDART_INF_F;
             score[nt][1] =
-                (row0 < row_count && key1 >= split_start && key1 < split_end && key1 <= qabs0)
+                (row0 < row_count && key1 >= first_key && key1 < limit_key && key1 <= qabs0)
                     ? score[nt][1] * scale
                     : -CUDART_INF_F;
             score[nt][2] =
-                (row1 < row_count && key0 >= split_start && key0 < split_end && key0 <= qabs1)
+                (row1 < row_count && key0 >= first_key && key0 < limit_key && key0 <= qabs1)
                     ? score[nt][2] * scale
                     : -CUDART_INF_F;
             score[nt][3] =
-                (row1 < row_count && key1 >= split_start && key1 < split_end && key1 <= qabs1)
+                (row1 < row_count && key1 >= first_key && key1 < limit_key && key1 <= qabs1)
                     ? score[nt][3] * scale
                     : -CUDART_INF_F;
             bm0 = fmaxf(bm0, fmaxf(score[nt][0], score[nt][1]));

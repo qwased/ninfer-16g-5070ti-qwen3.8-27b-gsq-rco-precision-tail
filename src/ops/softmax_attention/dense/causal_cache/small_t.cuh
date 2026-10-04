@@ -131,6 +131,36 @@ __device__ __forceinline__ int causal_small_t_active_splits(int window, int laun
     return splits < launch_capacity ? splits : launch_capacity;
 }
 
+// Exact-tail split partition (WP3). `tail_tokens` is the configured retention N: zero (or a
+// negative, or an absent tail) leaves the partition the identity -- body_window == window,
+// body_active == total_active, tail_active == 0 -- so a launch without a tail is unchanged bit for
+// bit. Beyond that, the newest min(N, window) keys move from the body to the tail, and the splits
+// the body no longer uses become the tail's, at the same global indices the reducer merges.
+struct CausalSmallTTailPartition {
+    int body_window; // the quantized body covers keys [0, body_window)
+    int body_active; // splits [0, body_active) belong to the body partial
+    int tail_active; // splits [body_active, body_active + tail_active) belong to the tail partial
+};
+
+template <typename Geometry, bool Int8>
+__device__ __forceinline__ CausalSmallTTailPartition
+causal_small_t_tail_partition(int window, int tail_tokens, int launch_capacity, int tokens,
+                              int wave_splits = 0) {
+    const int total_active =
+        causal_small_t_active_splits<Geometry, Int8>(window, launch_capacity, tokens, wave_splits);
+    const int tail_keys   = tail_tokens > 0 ? (tail_tokens < window ? tail_tokens : window) : 0;
+    const int body_window = window - tail_keys;
+    // The body's own tier can ask for more splits than the whole window's (the INT8 token-count
+    // tiers are not monotonic in the window), and an empty body asks for none: the reducer merges
+    // exactly total_active splits, so the body is held inside that range and the tail takes the
+    // rest.
+    int body_active = body_window <= 0 ? 0
+                                       : causal_small_t_active_splits<Geometry, Int8>(
+                                             body_window, launch_capacity, tokens, wave_splits);
+    if (body_active > total_active) { body_active = total_active; }
+    return CausalSmallTTailPartition{body_window, body_active, total_active - body_active};
+}
+
 // Quantized storages take the plain default tier. This used to ask for SmallTMaximumSplits at
 // tokens==1 and window>8198 while the host granted that capacity to fp8 only, so nvfp4 and k8v4
 // silently ran fewer splits than this function returned and the two sides disagreed about intent.

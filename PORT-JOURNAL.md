@@ -622,3 +622,78 @@ the weaker no-worse-than-tail-off check, documented in `run_quantized_tail_case`
   coverage in causal-cache attention" (3 files: `tests/ops/softmax_attention/causal_cache.cpp`,
   `PORT-JOURNAL.md`, `PORT-MEMORY.md`). The hash is recorded here in a following journal-only
   commit, because a commit cannot contain its own hash.
+## 2026-10-05 — WP3 step 1: exact-tail merge in the BF16 small-T partial
+
+Worktree `.worktrees/wp1` (branch `port/wp1`). Code + this entry committed together (hash recorded
+at the head of the next WP3 entry, and in the final entry).
+
+### What changed
+- **New kernel** `src/ops/softmax_attention/dense/causal_cache/small_t_tail.cuh` (389 lines):
+  `causal_attention_small_t_tail_bf16_kernel<Geometry, TokenTile, WarpsPerCta, Int8>` plus
+  `kCausalSmallTTailWarps<TokenTile>`. Storage-independent exact-tail partial: reads K/V from the
+  BF16 ring (`physical_page = batch * ring_pages + ((key >> 6) % ring_pages)`, then
+  `causal_cache_index<Geometry>`), owns the absolute keys `[body_window, window)`, writes
+  `partial_m/l/acc` at the *global* split index `body_active + blockIdx.y` with `tokens` as the
+  split stride, and is launched with `grid = (KVHeads, splits, batch)` so `gridDim.y` equals the
+  launch capacity the reducer receives. A split it owns but that no key falls into publishes a
+  neutral partial (`m = -inf, l = 0, acc = 0`); splits past `tail_active` write nothing (the
+  reducer never reads them). Modeled on `small_t_bf16.cuh`: same 128-thread `__launch_bounds__`,
+  MMA producer/consumer, `qkv_s`/`p_s` staging and `causal_small_t_tc_swz`/`_swz32` swizzles.
+- **Shared partition helper** `small_t.cuh:134-166`: `CausalSmallTTailPartition` +
+  `causal_small_t_tail_partition<Geometry, Int8>(window, tail_tokens, launch_capacity, tokens,
+  wave_splits)`, used by body and tail alike so the two cannot disagree:
+  `total_active = causal_small_t_active_splits(...)` (unchanged), `tail_keys = min(N, window)`,
+  `body_window = window - tail_keys`, `body_active = active_splits(body_window)` (0 when
+  `body_window == 0`, clamped to `total_active`), `tail_active = total_active - body_active`.
+- **Body substitution** `small_t_bf16.cuh:18-25` (signature) and `:125-141`: new
+  `std::int32_t tail_tokens` parameter; the split tier, the tile/unit mapping and the mask now use
+  `body_window`/`body_active` instead of `window`/`active_split_count`. With `tail_tokens == 0` the
+  helper returns `body_window == window` and `body_active == total_active` -> bit-identical.
+- **Dispatch** `small_t.cu`: includes the new header; `launch_tc_partial_bf16` (`:203-243`) takes
+  `tail_tokens` and, after the body launch, launches the tail kernel with the same grid and block
+  when `tail_tokens > 0 && cache.tail.page_count > 0`; `causal_attention_small_t_launch_for`
+  (`:284-306`) resolves the effective retention. The reducer call is untouched.
+
+### Deviations from the plan text (deliberate; see PORT-MEMORY section 5.6)
+1. `causal_attention_split_capacity` untouched: the capacity still follows the full window and
+   `total_active <= launch_capacity` holds exactly as before, so no workspace or grid change.
+2. `body_active` is 0 for an empty body and clamped to `total_active`. The bare plan formula
+   returns `launch_capacity` for `body_window == 0` (the helper's non-positive-window default), and
+   the INT8 token-count tiers are not monotonic in the window, so an unclamped `body_active` can
+   exceed `total_active` and starve the tail.
+3. The retention passed on the *fused-append* entry (`CacheInput::writes_cache`) is 0: see "not
+   done" below.
+4. The tail uses the uniform split mapping over `tail_keys`, not nvfp4's proportional
+   `split * logical_tiles / active` variant. Any partition of the tail key range is correct for the
+   merge (the reducer weights each split by its own `exp(m_i - max)`), so the tail need not mirror
+   the body's tile ownership.
+
+### Not done (the fused-append entry; step 4 of the task, deferred)
+`causal_attention_small_t_launch` (the fused-append entry, `small_t.cu:410-455`) is not tailed. Its
+partial kernel appends the new K/V rows itself in the loop guarded by `p_tok >= split_start &&
+p_tok < split_end` (`small_t_i8.cuh:244-342`, `small_t_bf16.cuh:156-176`), so shortening the body
+range would leave the newest N rows unwritten in the quantized body cache; and the ring is not
+written on that path at all (WP2 hangs `kv_cache_append_tail_bf16_kernel` off
+`kv_cache_append_launch`/`_batch_launch`, `src/ops/kv_cache/append/launch.cu:25-38`, which the
+text-layer decode path never calls: `src/models/qwen3_5/execution/text.cpp:965-985` goes through
+the fused attention entry, and the only standalone `ops::kv_cache_append` on a text-shaped cache is
+the MTP one at `:523`). Enabling the merge there without fixing both would silently drop the newest
+tokens. The wired path (standalone append + `causal_softmax_attention_cached`) is exactly WP2's
+single-sequence scope.
+
+### Evidence
+```
+python .deps/ptcheck.py src/ops/softmax_attention/dense/causal_cache/small_t.cu \
+                         src/ops/softmax_attention/dense/causal_cache/causal_softmax_attention.cpp
+cmd //c .deps\ptcheck.bat
+```
+-> `=== small_t.cu ===`, `=== causal_softmax_attention.cpp ===`, `DONE`; no `SYNTAXFAIL` and no
+nvcc diagnostic. The first run reported one real error (a missing `scale` argument in the body
+launch) which was fixed; the clean run above is the recorded one.
+
+Environment note: new files written by the editor tool in this worktree flicker in and out of the
+filesystem view (two nvcc runs reported `C1083` for a header that the very next listing showed).
+The new header was therefore staged with `git add` the moment it was visible, and copies of all
+four touched files are kept outside the tree at `.deps/wp3-backup/`. Another agent is working in
+`.worktrees/wp2` and building/running tests in `build-port` concurrently; `.deps/ptcheck.bat` is a
+shared file, so the file list is regenerated before every run.

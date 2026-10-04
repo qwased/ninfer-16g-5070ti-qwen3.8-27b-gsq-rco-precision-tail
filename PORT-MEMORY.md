@@ -85,8 +85,23 @@ Key design decisions already fixed by the plan:
 - **Step 1 (done):** build env recon + WP1–3 code dossier (two read-only subagents).
   Toolchain resolved; FFMPEG/vcpkg is the build blocker; plan anchors corrected
   (`DeviceKVPagePoolSpec` and `PagedKVPlaneOrder` live in `src/core/paged_kv_cache.h`).
-- Next: task #2 get a working configure/build via an in-workspace FFMPEG triplet tree;
-  in parallel start WP1 storage and WP3 merge work.
+- **WP1 (done, `port/wp1`):** `PagedKVExactTailView` attached as `.tail` on both layer views
+  (`src/core/paged_kv_cache.h:27-34,46,59`), the exact pool planned in
+  `decoder_state.cpp:118-163` (`BFloat16`, `HeadMajor`, two planes per full-attention layer) with
+  `retention = kv_tail_tokens` and `ring_pages`, wired at `PagedKVCache::layer_view`
+  (`decoder_state.cpp:212-219`).
+- **WP2 (done, `port/wp1`):** `kv_cache_append_tail_bf16_kernel` (`append/kernel.cuh:69-104`)
+  shadow-writes the ring, launched from `append/launch.cu:25-38` for a single-sequence view.
+  **Caveat found in WP3:** it hangs off `kv_cache_append_launch`/`_batch_launch`, and the
+  text-layer decode path does not call those (it fuses the append into the small-T partial), so no
+  production path currently fills the ring.
+- **WP3 step 1 (done, `port/wp1`, 2026-10-05):** exact-tail partial kernel
+  (`causal_cache/small_t_tail.cuh`), the shared `causal_small_t_tail_partition` helper
+  (`small_t.cuh:134-166`) and the body/`body_window` substitution + dispatch for the BF16 storage
+  path. Compile-verified with `.deps/ptcheck.py` on `small_t.cu` +
+  `causal_softmax_attention.cpp` (clean). Details and deviations: PORT-JOURNAL + section 5.6.
+- Next: WP3 steps 2-3 (INT8 family, then nvfp4/fp8/k8v4); the fused-append entry stays untailed
+  until the write path covers the newest rows.
 
 ## 5.1 Corrected anchor map (from Step 1 dossier)
 
@@ -299,7 +314,6 @@ merged cases must be re-run to become evidence. Compile evidence and the wp3-spe
 variant are in the WP10 journal entry.
 
 ## 6. Working protocol (how we operate here)
-
 1. One work package per branch/worktree. Subagents do the reading + editing; the main agent keeps
    only summaries. Never let a subagent modify the original trees.
 2. Every step: (a) do the work, (b) update `PORT-JOURNAL.md` with an entry, (c) update §5 of this
@@ -313,3 +327,33 @@ variant are in the WP10 journal entry.
 - R1 cross-domain merge (INT8 body × BF16 tail): first falsifiable step of M1 (plan §6 R1).
 - Exact cmake path + a working configure preset for a CUDA Release build (#2).
 - Whether M0's product-level experiments can run on this host now (products present; needs GPU idle).
+
+## 8. WP3 merge design as implemented (exact tail)
+
+- Split partition (shared, device side, `small_t.cuh:134-166`):
+  `total_active = causal_small_t_active_splits(window, launch_capacity, tokens[, wave_splits])`
+  (unchanged, identical to what the reducer computes);
+  `tail_keys = min(retention, window)`;
+  `body_window = window - tail_keys`;
+  `body_active = body_window <= 0 ? 0 : min(active_splits(body_window), total_active)`;
+  `tail_active = total_active - body_active`.
+- Body partial: splits `[0, body_active)` cover keys `[0, body_window)` (the plan substitution).
+  With `retention == 0`, `body_window == window` and `body_active == total_active`: bit-identical.
+- Tail partial (`small_t_tail.cuh`): splits `[body_active, total_active)` cover keys
+  `[body_window, window)` read from the exact BF16 ring
+  (`page = batch * ring_pages + ((key >> 6) % ring_pages)`), written at the global split index
+  `body_active + blockIdx.y`. Launched with the body grid `(KVHeads, launch_capacity, batch)`.
+- Reducer: untouched (`causal_attention_small_t_reduce_output_kernel`,
+  `causal_merge_split_statistics`). It merges `[0, total_active)`; no merge kernel is added.
+- Workspace/capacity, route family and grid: untouched.
+- Deviations from the plan text: (a) `body_active` for an empty body is 0 rather than the
+  non-positive-window default of `causal_small_t_active_splits` (which is `launch_capacity`), and it
+  is clamped to `total_active` because the INT8 tiers are not monotonic in the window; (b) the tail
+  uses the uniform split mapping (`units_per_split` over `tail_keys`), not nvfp4's proportional
+  variant -- any partition of the tail key range is correct because the reducer weights each split
+  by its own `exp(m_i - max)`.
+- Not wired: the fused-append entry (`CacheInput::writes_cache`), the launch that both attends and
+  appends. Its append range follows the split range, so a shortened body would never write the
+  newest N rows to the quantized body cache, and the ring is not written on that path at all.
+  Retention 0 keeps the entry bit-identical. Wiring it requires the fused append to shadow-write its
+  new rows into the ring and to decouple its write range from its read range.
