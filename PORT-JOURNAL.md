@@ -376,3 +376,17 @@ Verified the capacity chain in `port/wp1`:
   lease (materializing `ring_pages` contiguous pages per sequence), which WP2 needs.
 - Remaining feature work is WP2 (fused dual write) and WP3 (tail partial + FP32 merge) — the actual
   numerical feature — plus WP4/WP7/WP8/WP9/WP10.
+
+---
+
+## 2026-10-05 — Step 18: MemorySummary split fields (WP5 complete for M1)
+
+- Commit `fc325aeb` on `port/wp1`: `MemorySummary` gains `kv_exact_history_bytes` /
+  `kv_rollback_reserve_bytes`; computed in `startup.cpp` from the planned tail pool
+  (`(tail_payload / physical_pages) * max_concurrency` is the one-page-per-sequence reserve), carried
+  through `PersistentLayout` and `ProgramImpl`, and published in the summary. Zero when the tail is off.
+- Compile-verified per TU with `.deps/ptcheck.py`: `startup.cpp` and `program_impl.cpp` clean; all other
+  changed TUs clean. Only `apps/cli/main.cpp` remains unverifiable (build-generated `ninfer_build_id.h`).
+- WP5 is complete for M1: the tail's memory is accounted in the capacity curve constant (verified, §5.5)
+  and reported explicitly in `MemorySummary`.
+- Build still running (537 objects, ninja log active). No executables yet.
