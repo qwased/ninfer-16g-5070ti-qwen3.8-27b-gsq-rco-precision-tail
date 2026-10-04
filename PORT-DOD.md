@@ -33,8 +33,8 @@ packages, each mapped to concrete evidence. **Update on every step.** Status val
 | WP | Status | Evidence / gap |
 |---|---|---|
 | WP1 storage/exact pool | **DONE (scaffolding)** | `PagedKVExactTailView` (`74297cba`); pool planned in `DecoderState` (`f15a4d72`); ctx plumbed (`d9c013fd`); views expose the pool (`75343cc2`). Compile-verified per TU. NOT done: per-sequence ring page leases at runtime |
-| WP2 fused dual write | **TODO** | Anchor: `src/ops/kv_cache/append/launch.cu` (201/219, template 16-121), `kernel.cuh` BF16 kernel 69-104; upstream semantics in PORT-BEELLAMA-SPEC §C |
-| WP3 attention merge | **TODO** (design fixed) | Merge reuse: `small_t.cuh` `causal_merge_split_statistics` 183-210 + `..._reduce_output_kernel` 212-299; design in PORT-MEMORY §5.4 |
+| WP2 fused dual write | **PARTIAL** | Single-sequence tail shadow write landed (`52b36257`), CUDA-compile-verified. Separate pass, not fused single-read (documented deviation). Batch path + per-sequence arena base TODO |
+| WP3 attention merge | **TODO** (design proven) | **No new merge kernel needed** — the existing split reducer already merges body+tail (PORT-MEMORY §5.6). Remaining: tail-partial kernel + workspace split sizing + dispatch wiring |
 | WP4 graph/route family | **TODO** | N goes in the tail identity (§5.2 correction 2); dynamic window excluded |
 | WP5 capacity/`MemorySummary` | **DONE (M1)** | Tail cost inside the curve constant + `kv_payload_bytes` (verified, PORT-MEMORY §5.5); split fields added (`fc325aeb`). Compile-verified |
 | WP6 config chain | **DONE** | Option + identity + help (`64f32d3e`, `2f010b36`); draft caches are tail-free by construction (`d9c013fd`) |

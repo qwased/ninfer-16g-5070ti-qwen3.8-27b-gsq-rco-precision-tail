@@ -409,3 +409,15 @@ Verified the capacity chain in `port/wp1`:
     is correct for one sequence (M1's C=1 target) and needs the per-sequence arena base for C>1.
   - Verified: `launch.cu` (which includes `kernel.cuh`) compiles cleanly with the harness.
 - Build still running.
+
+---
+
+## 2026-10-05 — Step 20: WP3 reduced to "add splits" (verified in-tree)
+
+- Verified `causal_merge_split_statistics` (`small_t.cuh:183-210`) implements exactly the upstream
+  body x tail online-softmax merge: max over splits, `exp(m_i - max)` weights, summed denominators.
+- Consequence: **WP3 needs no new merge kernel.** Write body partials into splits `[0,s_b)` and tail
+  partials into `[s_b, s_b+s_t)` of the same workspace and call the existing
+  `causal_attention_small_t_reduce_output_kernel`. Remaining work is a tail-partial kernel, workspace
+  split sizing, and dispatch wiring — route family unchanged (still small-T), so §1.5 holds.
+- Recorded in PORT-MEMORY §5.6; PORT-DOD updated (WP2 PARTIAL/DONE-single-seq, WP3 design proven).

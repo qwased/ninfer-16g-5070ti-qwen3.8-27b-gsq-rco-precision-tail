@@ -208,6 +208,24 @@ contains `DecoderStateLayout::kv_payload_bytes()` — which now includes the exa
 (`kv_exact_history_bytes` / `kv_rollback_reserve_bytes`) remain unimplemented; the plan's named
 `kv_exact_history_bytes` split is a reporting nicety, not a capacity-correctness requirement.
 
+
+## 5.6 WP3 simplification — the split reducer already IS the merge (verified)
+
+`causal_merge_split_statistics` (`src/ops/softmax_attention/dense/causal_cache/small_t.cuh:183-210`)
+iterates every split, takes `maximum = max_i m_i`, and weights each split by `exp(m_i - maximum)`
+before summing `l` — which is exactly the body x tail online-softmax merge of PORT-BEELLAMA-SPEC §A
+(`g = max(m_b, m_t); out = (num_b*e^{m_b-g} + num_t*e^{m_t-g}) / (l_b*e^{m_b-g} + l_t*e^{m_t-g})`).
+Therefore **WP3 needs no new merge kernel**: write the body partials into splits `[0, s_b)` and the
+tail partials into splits `[s_b, s_b + s_t)` of the SAME workspace, then run the existing
+`causal_attention_small_t_reduce_output_kernel` (`:212-299`). Work that remains is therefore:
+1. a tail-partial kernel that reads the tail ring (window `[max(0,p+1-N), p]`, mask by position) and
+   writes `partial_acc/m/l` at split indices offset by the body's split count;
+2. workspace sizing so `splits` covers body + tail (`SmallTWorkspace` + `allocate_small_t_workspace`,
+   `causal_softmax_attention.cpp:269-284`);
+3. dispatch: in the cached small-T path, when `cache.tail.enabled()`, also run (1) and pass the total
+   split count to the reducer. The route family is unchanged (still small-T), satisfying §1.5.
+This is the concrete WP3 plan; the merge math is already proven in-tree.
+
 ## 6. Working protocol (how we operate here)
 
 1. One work package per branch/worktree. Subagents do the reading + editing; the main agent keeps
