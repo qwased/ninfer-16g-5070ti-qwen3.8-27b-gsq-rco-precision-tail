@@ -58,7 +58,10 @@ struct Options {
 #else
     ninfer::KvCacheStorage kv = ninfer::KvCacheStorage::Fp8E4M3Row256;
 #endif
-    bool quick                          = false;
+    // Exact KV tail: the newest N tokens per sequence stay unquantized (BF16) and attention merges
+    // an exact tail partial with the quantized body. Zero disables it.
+    std::int32_t kv_tail_tokens = 0;
+    bool quick                  = false;
     bool lm_head_q4                     = false;
     bool lm_head_q6                     = false;
     bool embedding_q4                   = false;
@@ -83,6 +86,7 @@ std::string usage_text() {
            "       [--context N] [--stride N | --disjoint] [--device N]\n"
            "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] [--output "
            "<directory>]\n"
+           "       [--kv-tail-tokens N]\n"
            "       [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--mtp-experts-q4] "
            "[--gdn-state-fp16]\n"
            "       [--mlp-a8-decode] [--no-prefill-a8] [--rope-yarn] [--rope-yarn-factor F]\n"
@@ -167,6 +171,10 @@ Options parse_options(int argc, char** argv) {
                 usage_error("--kv-dtype must be bf16, int8, fp8, rk8v4, rk4v4, rk4v4-e8, "
                             "rk2v4-e8, nvfp4, or k8v4");
             }
+        } else if (option == "--kv-tail-tokens") {
+            out.kv_tail_tokens =
+                parse_integer<std::int32_t>(value("--kv-tail-tokens"), "kv-tail-tokens");
+            if (out.kv_tail_tokens < 0) { usage_error("--kv-tail-tokens must be non-negative"); }
         } else if (option == "--output") {
             out.output = std::filesystem::path(value("--output"));
         } else if (option == "--lm-head-q4") {
@@ -317,6 +325,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     engine_options.device           = options.device;
     engine_options.max_context      = options.context;
     engine_options.kv_cache         = options.kv;
+    engine_options.kv_tail_tokens   = options.kv_tail_tokens;
     engine_options.lm_head_q4       = options.lm_head_q4;
     engine_options.lm_head_q6       = options.lm_head_q6;
     engine_options.embedding_q4     = options.embedding_q4;
@@ -515,7 +524,8 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
           {"windows", options.disjoint ? "disjoint" : "sliding"},
           {"prefill_chunk_tokens", 1024},
           {"score_tile_tokens", 1024},
-          {"kv_dtype", kv_name(options.kv)}}},
+          {"kv_dtype", kv_name(options.kv)},
+          {"kv_tail_tokens", options.kv_tail_tokens}}},
         {"timing",
          {{"load_seconds", load.load_seconds},
           {"read_and_tokenize_seconds", preflight_seconds},
