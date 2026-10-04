@@ -308,10 +308,32 @@ path (`tail_covers` returns false for every position). Coverage: BF16 merge (p+1
 boundary), an N=0 bit-exact regression, the INT8-family hybrid (rk8v4 / rk4v4-e8), an NVFP4
 no-worse-than-tail-off check, and a C>1 masked batched case. NVFP4/K8V4 stay on the weaker check
 because their kernel frame is Hadamard-rotated and the raw tail is not; a full hybrid oracle would
-have to reproduce the kernel's rotation rounding. **Not run at the time of writing** — the fused tail
-*read* was still wired by a separate work package; it now exists (WP3 §5.7 fused wiring) and the
-merged cases must be re-run to become evidence. Compile evidence and the wp3-specific per-TU harness
-variant are in the WP10 journal entry.
+have to reproduce the kernel's rotation rounding. **Now run** (the fused tail *read* landed with WP3
+§5.7); the first execution exposed a real product bug in the split partition — see §5.10 — and the
+merged cases are the evidence, not compile-only any more. Compile evidence and the wp3-specific
+per-TU harness variant are in the WP10 journal entry.
+
+## 5.10 WP10 run — partition bug, and the real storage scope of the tail (Step 26/27)
+
+Running the oracle (was compile-only) found, and the first fix cleared, a genuine product bug: in
+`causal_small_t_tail_partition` the body was clamped only at the reducer's `total_active`, but the
+split-tier floor (`kMinSplits`) makes `active_splits(body_window) == active_splits(window)` for nearly
+every short window, so `body_active == total_active` and `tail_active == 0`. The tail launched no
+split, so the newest `tail_keys` keys were in **neither** partial and fell out of the softmax
+entirely. The fix (`small_t.cuh`) stops the body one split short when the tail has keys and keeps a
+non-empty body at one split; `tail_tokens == 0` is unchanged. With it, **all five BF16 tail cases
+pass** (`.deps/oracle-run2*.txt`).
+
+The same run established the tail's **true storage scope**: the merge is implemented only where the
+body's decoded key plane is in original coordinates — **BF16 and the INT8 family (rk8v4, rk4v4-e8)**.
+The rotated-frame routes `fp8-e4m3`, `nvfp4-g16` and `k8v4` contain **no tail or shadow code at all**
+(`grep -E "tail|shadow"` over `small_t_fp8.cu`, `small_t_nvfp4.cu`, `small_t_k8v4.cu` is empty):
+their partials reach reduce kernels that consume the Hadamard-rotated frame, which the raw BF16 tail
+rows are not expressed in, so merging the tail there would require rotating the tail rows first — not
+implemented. For those storages `--kv-tail-tokens` still allocates the ring but no route writes or
+reads it, i.e. it is inert. This is a scope limitation to state in the docs, not a silent no-op; the
+oracle's `tail_merge_wired(storage)` gate reflects it. Still open at Step 27: the INT8-family cases
+(fused rk8v4 marginally, cached rk8v4/rk4v4-e8 grossly) and the batched BF16 masked case.
 
 ## 6. Working protocol (how we operate here)
 1. One work package per branch/worktree. Subagents do the reading + editing; the main agent keeps
