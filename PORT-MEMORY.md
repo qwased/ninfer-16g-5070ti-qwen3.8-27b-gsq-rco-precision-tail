@@ -226,6 +226,38 @@ tail partials into splits `[s_b, s_b + s_t)` of the SAME workspace, then run the
    split count to the reducer. The route family is unchanged (still small-T), satisfying §1.5.
 This is the concrete WP3 plan; the merge math is already proven in-tree.
 
+
+## 5.7 Plan correction — the tail must be wired on the FUSED-append path, not only cached
+
+Verified 2026-10-05 in `src/models/qwen3_5/execution/text.cpp`:
+
+- The main model's step attention — both prefill and single-row decode — calls
+  `ops::causal_softmax_attention(q, k, v, pos, …)` at `:965` (batched) and `:974` (single row).
+  That is the **fused-append** entry (`CausalAppendInput`, `writes_cache = true`): the partial kernel
+  writes the quantized body from inside itself. `ops::causal_softmax_attention_cached` is used only
+  by the MTP draft path (`:571`).
+- `ops::kv_cache_append` — where WP2 placed the exact shadow write (`src/ops/kv_cache/append/…`) — is
+  called only for `mtp_kv_` (`text.cpp:523`) and the draft prefix (`draft.cpp:223,228`). **Nothing
+  writes the exact ring of `batch_text_kv_`.**
+
+Consequence: with the cache-only wiring of §5.6 item 3, the exact tail is never populated on the
+main path and never merged there, so `--kv-tail-tokens` would change nothing measurable for the
+main model (M1 ppl would read a zero effect). §5.6's premise — that decode uses the cached path — is
+**wrong**, and so was WP2's placement of the shadow write.
+
+Correction (supersedes §5.6 item 3, and completes the intent of plan WP2 "fused dual write"):
+
+1. The **fused** entry must, when `cache.tail.enabled()`: (a) shadow-write this step's tokens,
+   unquantized, into the ring; and (b) run the tail partial over the tail window
+   `[body_window, window)`, reading keys `>= first_pos` from `input` (they are not in the ring yet on
+   this step) and older keys from the ring; then let the unchanged reducer merge.
+2. The **cached** entry keeps the ring-only read (its ring was filled by `ops::kv_cache_append`).
+3. The `ops::kv_cache_append` shadow write stays correct for the MTP/draft paths.
+
+Both entries share `causal_small_t_tail_partition` and the tail-partial kernel, so the merge stays
+one code path and the route family stays 0/1/2.
+
+
 ## 6. Working protocol (how we operate here)
 
 1. One work package per branch/worktree. Subagents do the reading + editing; the main agent keeps
