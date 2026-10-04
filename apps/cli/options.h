@@ -31,6 +31,7 @@ struct Options {
     std::vector<std::uint32_t> stage_layers;
 
     KvCacheStorage kv_cache = KvCacheStorage::BFloat16;
+    std::int32_t kv_tail_tokens = 0;
     SpeculativeOptions speculative;
     bool enable_vision  = false;
     VisionResidency vision_residency       = VisionResidency::Resident;

@@ -261,6 +261,7 @@ ninfer::EngineOptions make_engine_options(const ServeOptions& options) {
     engine_options.prefill_chunk            = options.prefill_chunk;
     engine_options.fast_prefill_kernel      = options.fast_prefill_kernel;
     engine_options.kv_cache                 = options.kv_cache;
+    engine_options.kv_tail_tokens           = options.kv_tail_tokens;
     engine_options.enable_vision            = options.enable_vision;
     engine_options.vision_residency         = options.vision_residency;
     engine_options.vision_max_merged_tokens = options.vision_max_merged_tokens;
