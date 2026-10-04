@@ -729,3 +729,42 @@ shared file, so the file list is regenerated before every run.
   of `ninfer_tests` + `ninfer-perplexity`, then the oracle run and the M1 `tail 0 vs N` ppl runs.
 - **Discipline:** every build/test/agent process was checked to have terminated; the only compiler
   left alive at any point was the one actively building, and no `ctest`/`ninfer_tests` was orphaned.
+
+## Step 26 - WP10 oracle RUN on the merged tree: the tail cases FAIL
+
+The incremental build of the merged `main` finished (`BUILD_EXIT=0`; `ninfer_tests.exe` and
+`ninfer-perplexity.exe` relinked; no build/compiler process left alive). The WP10 cases were then
+run, and the first real execution of the tail code does **not** pass:
+
+```
+tests\ninfer_tests.exe ninfer_softmax_attention_test
+...
+softmax_attention: FAIL
+ORACLE_EXIT=1
+```
+
+Two distinct symptom classes, both systematic (every fused, cached and quantized tail case):
+
+1. `... exact-tail-k: exact mismatch at index 768` / `exact-tail-v: exact mismatch at index 768`
+   (the same index for d256-h24-kv4 and d256-h16-kv2, i.e. it is not head-strided; 768 = 3*256 =
+   page_offset 3, d=0 for both). Also seen at index 131584 for the T=130/keys=130/tail=129 cases.
+2. `... reduction criterion failed at index <big> actual=<a> reference=<b>` - the merged small-T
+   output disagrees with the plain FP32 / hybrid oracle.
+
+The C>1 masked batched case throws before running: `causal_softmax_attention: invalid execution
+envelope or table`. `packed_softmax_attention` and `context_softmax_attention` PASS.
+
+Facts established while reconnoitring (so the fix does not have to re-derive them):
+
+- Read side `causal_cache_index<Geometry>(physical_page, kv_head, d, page_offset)` and write side
+  `paged_kv_element_offset<D, Geometry::KVHeads>(ring, kv_head, page_offset, d)` both expand to
+  `LeadingExtent*64*(head + KVHeads*physical_page) + LeadingExtent*page_offset + leading`, so the two
+  addressing helpers already agree; `physical_page = batch*ring_pages + ((pos>>6) % ring_pages)` on
+  both sides.
+- The fused shadow write is `small_t_tail_shadow.cuh`; the fused/cached tail partial is
+  `small_t_tail.cuh`; the split partition is `causal_small_t_tail_partition` in the same file.
+- The oracle is `cache_value_with_tail` (`tests/ops/softmax_attention/causal_cache.cpp:1593`) and the
+  exact-compare helper is `verify_exact` (`tests/ops/op_tester.h:277`).
+
+This is exactly the class of defect WP10 existed to expose: the code was compile-verified only and
+never executed. Root cause and fix are being investigated next; §7.2 is **not** satisfied yet.
