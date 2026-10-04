@@ -253,6 +253,26 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                             : block_table[key >> kPagedKVPageShift];
     };
 
+    // Fused-append ownership (exact tail). The body still *scores* only [0, body_window), but every
+    // key this step appends has to reach the quantized cache: the newest tail_keys keys are read from
+    // the exact ring on this step, yet a later step's body reads them from this cache once they leave
+    // the tail, and no other kernel quantizes them. So the split that owns the final body key also
+    // owns the newest tail keys the body does not score, and the append covers [0, window) exactly
+    // once. As the append range is a superset of the scoring range of that split only, no two splits
+    // append the same key and no split appends a key another split scores. Keeping the append row on
+    // the block table (rather than the staged page IDs of the scoring range) makes the extra keys'
+    // pages readable.
+    const int append_start = split_start;
+    const int append_end =
+        (split_start < body_window && split_end == body_window) ? window : split_end;
+    if (kv_head == 0 && batch == 0 && tid == 0) {
+        printf("XDBGBODY win=%d bw=%d ba=%d ta=%d split=%d ss=%d se=%d aps=%d ape=%d "
+               "ft=%d kb=%d tok=%d ws=%d cap=%d tt=%d\n",
+               window, body_window, active_split_count, tail_partition.tail_active, split,
+               split_start, split_end, append_start, append_end, first_tile, key_blocks, TokenTile,
+               wave_splits, split_count, tail_tokens);
+    }
+
     if constexpr (CacheInput::writes_cache) {
         // Decompose H256 as H4 over four independently transformed H64 groups. The existing
         // (token, group) warp schedule computes all H64 fragments in parallel; the FP32 main arena
@@ -264,7 +284,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             const int token    = pair / Groups;
             const int grp      = pair - token * Groups;
             const int position = pos[token];
-            if (position < split_start || position >= split_end) { continue; }
+            if (position < append_start || position >= append_end) { continue; }
             const int d0            = grp * kKVCacheInt8Group + lane;
             const int d1            = d0 + 32;
             const std::int64_t src0 = kv_cache_int8_new_index<Geometry>(kv_head, d0, token);
@@ -280,8 +300,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             const int token    = pair / Groups;
             const int grp      = pair - token * Groups;
             const int position = pos[token];
-            if (position < split_start || position >= split_end) { continue; }
-            const int physical_page = page_at(position);
+            if (position < append_start || position >= append_end) { continue; }
+            const int physical_page = block_table[position >> kPagedKVPageShift];
             const int page_offset   = position & kPagedKVPageMask;
             const int d0            = grp * kKVCacheInt8Group + lane;
             const int d1            = d0 + 32;

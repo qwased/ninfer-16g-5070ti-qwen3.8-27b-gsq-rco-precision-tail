@@ -962,3 +962,44 @@ Fix (test side): size the batched tail buffers and the `tail.k_pages`/`v_pages` 
 the kernel uses both for the modulo and as the per-sequence stride), and give the oracle a
 `(head, position, d, sequence)` index that adds the `sequence * page_count` page term. Confirm the
 mismatch index's unit while doing so. This is independent of the INT8 work the subagent is doing.
+
+## Step 28 - session paused (turn budget); state and exact next steps
+
+**Objective status: NOT achieved.** For the honest rule, DoD 7.1/7.2/7.3/7.4/7.5/7.6/7.7 each still
+have an unverified part; see `PORT-DOD.md` for the per-item status. Nothing here should be read as
+completion.
+
+**Verified and landed (on `main`):**
+- BF16 tail cases pass the FP32 oracle after the `body_active` partition fix; INT8-family and the
+  batched case still fail (Step 27, `.deps/oracle-run2*.txt`).
+- The exact tail is merged for `bf16` + the INT8 family only; `fp8`/`nvfp4`/`k8v4` are inert
+  (Step 27, §5.10; docs updated in `11d67445`).
+- `docs/config-calculator.html` tail modelling verified by its node test, 24/24 (Step 27d).
+- `report.json` now records `MemorySummary` (syntax-verified, Step 27c); `PORT-DOD.md` corrected
+  (WP7 DONE, WP8 DEFERRED, DoD 7.7 status fixed).
+- Batched BF16 mismatch root-caused as a **fixture** bug: the fixture models one ring, the kernel
+  addresses `batch*ring_pages` (Step 27i).
+
+**Parked in flight (this commit, `wip`):** a background fix agent was mid-work on the INT8 failures
+when the turn budget ran out. Its uncommitted edits to `src/ops/softmax_attention/dense/causal_cache/
+{small_t.cuh, small_t_bf16.cuh, small_t_i8.cuh, small_t_tail.cuh, small_t_tail_shadow.cuh}` are
+snapshotted in this commit **unverified** (not compiled, not run). Its analysis aid is
+`.deps/part-model.py` (host replication of the partition arithmetic; excludes `batch > 1`). The
+three debug `printf`s (`DBGBODY`/`DBGTAIL`/`DBGRED`) may still be present; they must be deleted.
+
+**Exact next steps (single GPU owner; confirm no `ninja`/`nvcc` process is alive before each):**
+1. Read the parked edits; keep the `body_active` fix, delete the `DBG*` printf blocks.
+2. Finish the INT8 root cause with `part-model.py` + the `DBG*` prints (or re-delegate).
+3. Apply the Step 27i fixture fix for the batched case: size the batched tail buffers/tensor page
+   extent as `rows_ * tail_page_count_`, keep `tail.page_count = tail_page_count_`, and add the
+   `sequence * page_count` term to the oracle's ring index.
+4. `cmake --build build-port --target ninfer_tests` (and `ninfer-perplexity`), then
+   `build-port\tests\ninfer_tests.exe ninfer_softmax_attention_test` until it prints `PASS` and
+   `ORACLE_EXIT=0` with no `exact mismatch` / `reduction criterion failed` / envelope throw.
+5. For DoD 7.1/7.3/7.4: `.deps/run-evidence.bat` (oracle + `rk8v4`/`rk4v4-e8`/`nvfp4` x tail 0/1024
+   ppl + memory), then write the measured numbers into `docs/performance.md` (DoD 7.7).
+6. Do NOT `git clean`/`reset --hard` while the agent may still be alive -- the parked edits and the
+   agent's later work both live in the working tree.
+
+**Test discipline:** every process started this session was checked and stopped; the one orphaned
+debug build was killed by PID; no build or GPU run was started while the agent held `build-port`.

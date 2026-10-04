@@ -159,6 +159,23 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
                             : block_table[key >> kPagedKVPageShift];
     };
 
+    // Fused-append ownership (exact tail). The body still *scores* only [0, body_window), but every
+    // key this step appends has to reach the quantized cache: the newest tail_keys keys are read from
+    // the exact ring on this step, yet a later step's body reads them from this cache once they leave
+    // the tail, and no other kernel quantizes them. So the split that owns the final body key also
+    // owns the newest tail keys the body does not score, and the append covers [0, window) exactly
+    // once. Keep the extra keys off the scoring range above (they are never scored here).
+    const int append_start = split_start;
+    const int append_end =
+        (split_start < body_window && split_end == body_window) ? window : split_end;
+    if (kv_head == 0 && batch == 0 && tid == 0) {
+        printf("XDBGBF16 win=%d bw=%d ba=%d ta=%d split=%d ss=%d se=%d aps=%d ape=%d ft=%d kb=%d "
+               "tok=%d cap=%d tt=%d\n",
+               window, body_window, active_split_count, tail_partition.tail_active, split,
+               split_start, split_end, append_start, append_end, first_tile, key_blocks, tokens,
+               split_count, tail_tokens);
+    }
+
     if constexpr (CacheInput::writes_cache) {
         // The owning split writes each new row. Current attention reads those rows directly from
         // input below, so no split depends on another split's cache write.
@@ -166,7 +183,7 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
             const int token = chunk / (D / 8);
             const int d     = (chunk - token * (D / 8)) * 8;
             const int p_tok = pos[token];
-            if (p_tok >= split_start && p_tok < split_end && p_tok >= 0 &&
+            if (p_tok >= append_start && p_tok < append_end && p_tok >= 0 &&
                 p_tok < logical_capacity) {
                 const std::int64_t new_off = kv_cache_int8_new_index<Geometry>(kv_head, d, token);
                 const int lane             = tid & 31;
