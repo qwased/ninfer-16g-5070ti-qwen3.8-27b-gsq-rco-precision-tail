@@ -22,6 +22,12 @@ The default evaluation uses a 4,096-token context and a 2,048-token stride. Use 
 `--stride` to change that protocol, or score one UTF-8 file with `--text FILE`. The available Main
 KV representations are `bf16`, `int8`, `fp8`, `rk8v4`, `rk4v4`, `nvfp4`, and `k8v4`.
 
+`--kv-tail-tokens N` enables the exact KV tail: the newest `N` tokens of every sequence stay
+unquantized (BF16) in a second pool and attention merges an exact tail partial with the quantized
+body. `N` defaults to 0 (off, no memory cost). The tail costs a fixed amount per sequence
+independent of context length, so the quality it buys is measured by scoring the same artifact and
+corpus twice, at `--kv-tail-tokens 0` and at the chosen `N`, and comparing the perplexity.
+
 All seven have been measured on this corpus; the results, alongside each format's size and decode
 speed, are in [`docs/config-calculator.html`](config-calculator.html).
 `--fast-prefill-kernel` scores `int8` with the fast prompt-attention kernel (as
