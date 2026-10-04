@@ -697,3 +697,35 @@ The new header was therefore staged with `git add` the moment it was visible, an
 four touched files are kept outside the tree at `.deps/wp3-backup/`. Another agent is working in
 `.worktrees/wp2` and building/running tests in `build-port` concurrently; `.deps/ptcheck.bat` is a
 shared file, so the file list is regenerated before every run.
+
+---
+
+## 2026-10-05 — Step 25: WP3 tail merge wired on BOTH entries (cached + fused), WP2 fused shadow write
+
+- **`port/wp1` step 2 (`0832e257`) and step 3 (`155fd1ab`), merged into `main` as `b691646e`.**
+  After the BF16 cached step (`80c00386`) the separate agent stalled on slow per-TU verification of
+  six INT8 wrapper TUs; I stopped it, reviewed the diff (a faithful INT8 twin of the BF16 change:
+  `causal_small_t_tail_partition<Geometry,true>`, `launch_tail()` on the cached path, and a
+  `small_t_tail_retention<CacheInput>` gate), committed it, and verified it with the independent
+  `.deps/vcheck.py` harness (`small_t.cu` OK; `small_t_i8_w8_h24_cached.cu` OK, `out.obj` 4.6 MB;
+  only `#177-D`/`#128-D` warnings).
+- **Fused-path wiring (`155fd1ab`).** Per the §5.7 correction: added
+  `causal_attention_small_t_tail_shadow_kernel` (`small_t_tail_shadow.cuh`, BF16, storage
+  independent) and launch it from `causal_attention_small_t_launch_for` when
+  `CacheInput::writes_cache` and the tail is enabled, before the tail partial reads the ring; dropped
+  the `!writes_cache` term from `causal_small_t_tail_retention` so both entries shorten the body and
+  merge the tail. `tail_tokens == 0` remains the identity partition, so a tail-free launch is
+  unchanged. Verified: `small_t.cu` compiles (`out.obj` 25.2 MB, no `SYNTAXFAIL`).
+- **Quick-start helpers** added under `.deps/` (untracked): `vcheck.py` (a parameterised per-TU
+  compile harness with a per-tree scratch dir, so concurrent agents do not clobber each other's
+  `ptcheck.bat`), `build-target.bat`, `run-m1-ppl.bat`, `run-tail-tests.bat`.
+- **`port/wp10-oracle` merged as `e8b22921`** (one `PORT-MEMORY.md` conflict resolved by renumbering
+  the incoming WP10 section to §5.9; `PORT-JOURNAL.md` union-merged). It adds `kv_tail_tokens` to the
+  test cases: BF16 merge vs the plain FP32 oracle (p+1>N and the empty-body boundary), an N=0
+  bit-exact regression, the INT8-family hybrid oracle (rk8v4 / rk4v4-e8), an NVFP4
+  no-worse-than-tail-off check and a C>1 masked batched case — all **compile-verified only** so far.
+- **Superseded note:** §5.9's "fused tail read is absent" is no longer true; the fused read now exists
+  on `main`, so the merged oracle cases must be RUN to become evidence. Next: the incremental build
+  of `ninfer_tests` + `ninfer-perplexity`, then the oracle run and the M1 `tail 0 vs N` ppl runs.
+- **Discipline:** every build/test/agent process was checked to have terminated; the only compiler
+  left alive at any point was the one actively building, and no `ctest`/`ninfer_tests` was orphaned.
