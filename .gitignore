@@ -102,3 +102,4 @@ tests/windows-manager-backend/bin/
 tests/windows-manager-backend/obj/
 !apps/windows-manager/config/profiles/
 !apps/windows-manager/config/profiles/*.json
+.worktrees/
