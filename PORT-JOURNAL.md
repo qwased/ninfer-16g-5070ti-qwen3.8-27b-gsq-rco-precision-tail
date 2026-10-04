@@ -434,3 +434,24 @@ Verified the capacity chain in `port/wp1`:
   `.worktrees/wp1` remains for further increments.
 - Verification status unchanged: every changed TU (C++ and CUDA) compiles individually via
   `.deps/ptcheck.py`; a full-tree ninja build has not yet been observed to complete.
+
+---
+
+## 2026-10-05 — Step 22: full-tree build completes; MSVC portability fix
+
+- Diagnosis: the earlier full build had not hung but died. `ninja`/`nvcc` were gone, objects frozen at
+  799/897, no test binary. Restarting resumed the 799 done objects and immediately surfaced the real
+  failure:
+  `tests/ops/test_hadamard_transform.cpp(45): error C3861: "__builtin_popcount" unknown identifier`.
+  `__builtin_popcount` is a GCC/Clang builtin absent in MSVC; a grep confirmed it is the only such use
+  outside `third_party/` (the vendored libraries guard their own).
+- Fix (`b5b71c84`): `#include <bit>` and use C++20 `std::popcount` in the oracle. The build already
+  targets `-std:c++20`, so `std::popcount` is the portable equivalent; no behaviour change.
+- Evidence: `cmd //c .deps\build-port.bat ninfer_tests 10` -> `[89/89] Linking CXX executable
+  tests\ninfer_tests.exe`, `BUILD_EXIT=0`, 884 objects, `build-port/tests/ninfer_tests.exe` present.
+  This is the first observed complete full-tree build of the port; it compiles the whole `small_t`
+  attention family (`ninfer_ops.lib` links) with the WP1/WP2/WP5/WP6 increments merged in `main`.
+- Test inventory (for the tail=0 regression run): 516 registered CTest entries; the tail-relevant set
+  is `ninfer_kv_cache_append{,_k8v4,_nvfp4}_test`, `ninfer_softmax_attention{,_{rk2v4_e8,rk4v4_e8,
+  k8v4,nvfp4,int8_prompt,wide}}_test`, `ninfer_paged_kv_window_test`, `ninfer_kv_capacity_test`,
+  `ninfer_rmsnorm_pack_tail_test`, `ninfer_resident_memory_test`. GPU run pending device confirmation.
