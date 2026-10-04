@@ -10,6 +10,7 @@
 #include "ops/softmax_attention/dense/causal_cache/small_t_bf16.cuh"
 #include "ops/softmax_attention/dense/causal_cache/small_t_i8_launch.h"
 #include "ops/softmax_attention/dense/causal_cache/small_t_tail.cuh"
+#include "ops/softmax_attention/dense/causal_cache/small_t_tail_shadow.cuh"
 #include "core/device.h" // CUDA_CHECK
 #include "ninfer/ops/softmax_attention.h"
 
@@ -319,6 +320,31 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
             ? causal_small_t_wave_splits<Geometry>(invocation.width, implementation_window,
                                                     cache.storage)
             : 0;
+
+    // Fused-append exact tail: this entry writes the quantized body from inside its partial kernel
+    // and never calls ops::kv_cache_append, so shadow-write this step's unquantized rows into each
+    // sequence's ring before the tail partial reads it (the cached entry's ring was filled by that
+    // op). Storage-independent: the source is BF16 whatever the body coding is.
+    if constexpr (CacheInput::writes_cache) {
+        if (cache.tail.enabled() && cache.tail.page_count > 0 && invocation.width > 0) {
+            constexpr int kShadowThreads = 256;
+            const std::int64_t units     = static_cast<std::int64_t>(invocation.width) *
+                                       Geometry::KVHeads * (kCausalHeadDim / 8);
+            const int shadow_grid = static_cast<int>(
+                div_up(units, static_cast<std::int64_t>(kShadowThreads)));
+            const dim3 shadow_dims(shadow_grid, invocation.batch_size);
+            causal_attention_small_t_tail_shadow_kernel<Geometry, CacheInput>
+                <<<shadow_dims, kShadowThreads, 0, stream>>>(
+                    input, static_cast<const std::int32_t*>(pos.data),
+                    static_cast<__nv_bfloat16*>(cache.tail.k_pages.data),
+                    static_cast<__nv_bfloat16*>(cache.tail.v_pages.data), cache.tail.page_count,
+                    invocation.width, invocation.full_width, invocation.column_begin,
+                    invocation.valid_columns == nullptr
+                        ? nullptr
+                        : static_cast<const std::int32_t*>(invocation.valid_columns->data));
+            CUDA_CHECK(cudaGetLastError());
+        }
+    }
 
     // BF16 keeps its row-tile warp count; INT8 selects its producer/consumer
     // geometry inside launch_tc_partial_i8.
