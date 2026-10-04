@@ -361,3 +361,18 @@ Verified the capacity chain in `port/wp1`:
   objective). Remaining WP5 item is only the optional reporting split
   `kv_exact_history_bytes` / `kv_rollback_reserve_bytes`.
 - Recorded as PORT-MEMORY §5.5 and updated PORT-DOD WP5.
+
+---
+
+## 2026-10-05 — Step 17: tail pool exposed through the layer views (WP1 attach complete)
+
+- Commit `75343cc2` (3 files, +35): `PagedKVCache::attach_exact_tail(pool, retention, ring_pages)`;
+  `layer_view`/`batch_layer_view` populate `PagedKVExactTailView` from the pool's per-layer K/V planes
+  (2 planes per layer, `tail_base = layer*2`); `DecoderState` binds the tail right after constructing
+  it; `startup.cpp` passes `kv_tail_ring_pages`. Verified by compiling `decoder_state.cpp` and
+  `startup.cpp` with the per-TU harness — both clean.
+- WP1 scaffolding is now complete: option -> planning -> sizing -> pool -> accounting in the curve
+  constant and `kv_payload_bytes` -> views. What remains for WP1 is the runtime per-sequence ring page
+  lease (materializing `ring_pages` contiguous pages per sequence), which WP2 needs.
+- Remaining feature work is WP2 (fused dual write) and WP3 (tail partial + FP32 merge) — the actual
+  numerical feature — plus WP4/WP7/WP8/WP9/WP10.
