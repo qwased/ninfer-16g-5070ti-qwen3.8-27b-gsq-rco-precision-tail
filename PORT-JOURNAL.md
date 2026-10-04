@@ -861,3 +861,28 @@ reachable in M1**: the pool is device-only, `C=1`, and the functional closure ex
 path. `R = 1` page is already carried in the WP5 sizing (`startup.cpp:360-363`), so the accounting is
 in place for when the transactional layer lands. Recorded as deviation 4 in `PORT-DOD.md` rather than
 left as a silent gap.
+
+## Step 27f - preserved diagnostic leads for the two open failure classes
+
+So a take-over does not re-derive them:
+
+- **INT8 `cached`, grossly wrong (`use` 33-84).** The fused BF16/fused-INT8 cases pass, so the
+  partition arithmetic is right. The cached entry differs in two ways: its ring is uploaded by the
+  test (`upload_tail`) and its body partial comes from the `small_t_i8_w*_h*_cached.cu`
+  instantiations, whose `causal_attention_small_t_launch_for` is a *different* instantiation than
+  the `*_append.cu` ones. Prime suspect: the cached path's `launch_tail()` passes an argument the
+  tail kernel keys off — `logical_capacity` (the tail kernel bails when `last_pos >=
+  logical_capacity`, which would silently drop the newest `tail_keys` keys and give exactly this
+  "missing newest keys" magnitude) or `wave_splits`/`split_count` (a disagreement with the body's
+  `active_split_count = tail_partition.body_active` would overlap or gap the split ranges). Compare
+  the two `launch_tail` call sites against the fused one, and check the `DBGBODY`/`DBGTAIL` prints
+  for a `win`/`sc`/`ws` mismatch between body and tail.
+- **Batched BF16 ring mismatch (index 197376).** The fused batched shadow write lands rows the oracle
+  does not expect. Check the per-sequence arithmetic in `causal_attention_small_t_tail_shadow.cuh`:
+  `column_base = column_begin + batch*full_width` and `ring = batch*ring_pages + ((position>>6) %
+  ring_pages)`, against the test's batched expectation (`populate_tail` with the writer's own rows,
+  `batch_tail_writer`, `tail_row`) — in particular whether `full_width` is the right per-sequence row
+  stride in the batched view (the batched append also skips the ring shadow, so the oracle and the
+  kernel must agree on which columns belong to which sequence).
+- The three debug `printf`s (`DBGBODY`, `DBGTAIL`, `DBGRED`) are still in the working tree
+  (committed in `f19425f1` as instrumentation) and must be removed before the work is finished.
