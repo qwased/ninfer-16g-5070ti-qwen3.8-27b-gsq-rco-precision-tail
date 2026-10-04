@@ -263,3 +263,14 @@ agent's full build finishes (incremental rebuild will recompile the touched TUs)
 - Current honest summary: WP6 config + WP1 view interface landed; WP1 pool attach and WP5 accounting
   in flight; WP2/WP3/WP4/WP7/WP8/WP9 still TODO; DoD items 1-7 all PARTIAL/TODO/BLOCKED.
 - Build at 479 objects, still compiling.
+
+---
+
+## 2026-10-05 — Step 11: WP9 partial — document the new option
+
+- Documented `--kv-tail-tokens N` in the option tables of `docs/cli.md` and `docs/serving.md`
+  (row added directly after `--kv-dtype`), matching the implemented semantics: newest-N unquantized
+  exact pool, device-only, `0` disables. `git diff --check` clean.
+- Done on `main` (docs are not touched by the pool agent and are not compiled), so no collision.
+- Remaining WP9: `config-calculator.html` tail rows, `docs/maintainer/paged-kv-cache.md §4.5`
+  ownership boundary, `docs/performance.md` measured tail numbers.
