@@ -285,3 +285,25 @@ agent's full build finishes (incremental rebuild will recompile the touched TUs)
   table; capacity `round_up(N,64)+R` pages per sequence × `--max-concurrency`. `git diff --check` clean.
 - WP9 now: cli.md, serving.md, paged-kv-cache §4.5 done. Remaining: `config-calculator.html` tail rows
   and `docs/performance.md` measured numbers (need the build + runs).
+
+---
+
+## 2026-10-05 — Step 13: exact tail pool planned (WP1 attach) — implemented directly
+
+- **Stopped the POOL agent** (second agent to stall: 0 file changes after ~6 min, same pattern as the
+  first). Implemented the increment directly in `.worktrees/wp1`.
+- Commit `f15a4d72` (2 files, +77) — the tail pool is now planned:
+  - `DecoderStateSpec`: `kv_tail_tokens`, `kv_tail_physical_page_groups`.
+  - `plan_decoder_state`: when `kv_tail_tokens > 0`, plans a second pool — BF16 `HeadMajor`, two planes
+    (K/V) per full-attention layer, placed on each layer's own rank (mirrors the DFlash pool pattern at
+    `startup.cpp:253-286`), `page_group_count = kv_tail_physical_page_groups`, **no execution table**
+    (ring addressing by position).
+  - `ExactTailCacheLayout {pages, retention, layers, payload_bytes()}`; `DecoderStateLayout::exact_tail`
+    and `DecoderState::exact_tail` (`optional<DeviceKVPagePool>`), constructed in place, plus
+    `exact_tail_pool()` accessors; `kv_payload_bytes()` now includes the tail.
+  - Fail-closed: throws if the tail is enabled with zero page groups. Default 0 = unchanged.
+- NOT yet wired: `startup.cpp` must compute `kv_tail_physical_page_groups` from
+  `round_up(N,64)+R` × `max_concurrency` and pass `kv_tail_tokens` into `DecoderStateSpec`; the views
+  are not yet attached (`PagedKVLayerView.tail`) — that lands with WP3, which consumes it; `MemorySummary`
+  population still TODO.
+- Build at 519 objects, still compiling.
