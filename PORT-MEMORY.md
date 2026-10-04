@@ -140,6 +140,46 @@ commit-after-attention + rollback reserve.
 - Caveat: published on **RTX 3090/sm_86**; our pinned baseline is **5070 Ti/sm_120a**, so absolute
   values will differ. Use as a sanity reference, not a gate.
 
+## 5.4 WP3 design decision — tail window & addressing (Step 6, pre-implementation)
+
+WP3 is the critical path and biggest risk. Decision recorded before coding, grounded in verified facts.
+
+**Question:** host-built descriptor (beellama's approach, see `PORT-BEELLAMA-SPEC.md` §B) vs device-computed
+window from `positions` (what plan §1.4 assumed).
+
+**Decision: device-computed window, because ninfer's addressing is already device-side.**
+Beellama selects the tail window on the host only because *its* persistent slot assignment is
+host-managed (`tail->commit` in `apply_ubatch`). NInfer addresses KV entirely from device tensors —
+`paged_kv_physical_page(block_table, position)` + `paged_kv_element_offset(...)`
+(`src/ops/kernel/paged_kv_address.cuh:42-45,55-69`) — with `positions` already a device input to the
+append kernels. So no host round-trip is needed, and adding one would put a sync in the decode path.
+
+**Concrete shape:**
+- Exact pool = **ring buffer** of `round_up(N,64)` pages (page = 64, matching the main pool geometry).
+- Tail page for absolute position `p` = `(p >> 6) & (pages - 1)` with `pages` a power of two, or
+  `(p >> 6) % pages` otherwise. Tail block table is therefore **implicit** (derived), not stored.
+- Per query row at absolute position `p`: tail rows are `[max(0, p+1-N), p]`; a row is valid iff its
+  position is in that window. Non-aligned `N` leaves the oldest page partially valid → mask by
+  position, mirroring beellama's "window+causal rides in the mask" (`set_input_kq_mask_tail_impl`,
+  `src/llama-kv-cache.cpp:7227-7367`).
+- Body window is `[0, max(0, p-N)-1]`; when `p+1 <= N` body is empty — still run the body partial with
+  mask −∞ (upstream does exactly this, `fattn-tail.cuh:854-856`), so no family/branch switch occurs.
+
+**Merge (reuse, not new):** the merge is the existing reducer pattern —
+`causal_merge_split_statistics` (`small_t.cuh:183-210`) + `causal_attention_small_t_reduce_output_kernel`
+(`:212-299`). Add a *tailed* branch **inside** the small-T family so the route family count stays 0/1/2
+(`softmax_attention.h:212-216`) and the session family sequence is unchanged (plan §1.5). Workspace:
+extend `SmallTWorkspace{acc,m,l}` (`causal_softmax_attention.cpp:269-284`) with a second partial set
+(`acc_t,m_t,l_t`) written by a BF16 tail-partial kernel (`small_t_bf16.cuh:18-25` is the nearest
+producer); merge kernel combines (acc_b,m_b,l_b) × (acc_t,m_t,l_t).
+
+**Interaction with §5.2 correction 2:** N IS part of the tail identity (upstream puts
+`retention_tokens` in the key) — fine for us: N is startup-fixed, so one graph per N. The *dynamic*
+window (per-row tail length) must NOT be in the graph key; it is a runtime input.
+
+**Open for implementation:** does the exact ring pool need its own `block_table` for tier/prefix paths
+(WP7 says device-only in M1, so no), and exact rollback reserve `R` page count (`history_stride = N+R`).
+
 ## 6. Working protocol (how we operate here)
 
 1. One work package per branch/worktree. Subagents do the reading + editing; the main agent keeps

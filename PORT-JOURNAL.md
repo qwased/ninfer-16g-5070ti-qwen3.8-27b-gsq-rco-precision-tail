@@ -175,3 +175,21 @@ Read `docs/performance.md:448-460` (published KV-format table, RTX 3090, Qwen3.8
 - Recorded in PORT-MEMORY §5.3.
 
 Still no BUILD/INCR1 completion notification; `.deps` was at 184 MB with `vcpkg-root` underway.
+
+---
+
+## 2026-10-05 — Step 6: WP3 window/addressing design decision (pre-implementation)
+
+Resolved the main WP3 design fork before coding, from verified facts (no code changed):
+- **Chose device-computed window** (plan §1.4) over beellama's host-selected descriptor, because
+  ninfer already addresses KV from device tensors via `paged_kv_address.cuh:42-45,55-69` with
+  `positions` on device; beellama's host selection is an artifact of its host-managed slot allocator.
+- **Exact pool = ring buffer** of `round_up(N,64)` pages, tail page implicit from `p>>6`; rows masked
+  by `[max(0,p+1-N), p]`. Body-empty case still runs the body partial with mask −∞ (upstream does the
+  same) so the route family never switches.
+- **Merge reuses** `causal_merge_split_statistics` + `causal_attention_small_t_reduce_output_kernel`
+  inside the small-T family; workspace gains a second partial set (acc_t,m_t,l_t).
+- N in the tail identity is fine (startup-fixed); the dynamic window must stay out of the graph key.
+- Recorded in PORT-MEMORY §5.4.
+
+Agents still running (no BUILD/INCR1 completion notification at end of step).
