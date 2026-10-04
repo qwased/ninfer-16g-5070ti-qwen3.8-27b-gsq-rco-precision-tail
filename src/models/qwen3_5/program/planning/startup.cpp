@@ -195,6 +195,7 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
             .mtp_physical_page_groups  = mtp_physical_pages,
             .kv_tail_tokens            = plan.kv_tail_tokens,
             .kv_tail_physical_page_groups = tail_physical_pages,
+            .kv_tail_ring_pages        = tail_ring_pages,
             .text_layer_rank           = std::move(attention_layer_rank),
         });
     // The Program binds this pool's own planned geometry, so the Host page cost the RAM budget

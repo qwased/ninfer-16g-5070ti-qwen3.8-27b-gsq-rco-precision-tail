@@ -159,6 +159,7 @@ DecoderStateLayout plan_decoder_state(std::span<LayoutBuilder* const> builders,
                                      .geometry         = std::move(tail_geometry)}),
             .retention = spec.kv_tail_tokens,
             .layers    = spec.full_attention_layers,
+            .ring_pages = spec.kv_tail_ring_pages,
         };
     }
     return layout;
@@ -208,6 +209,14 @@ PagedKVLayerView PagedKVCache::layer_view(std::uint32_t layer,
     // another device's memory.
     const Tensor block_table =
         row == nullptr ? Tensor() : execution_tables_.row(*row, layer_rank(layer));
+    PagedKVExactTailView tail;
+    if (exact_tail_ != nullptr && tail_retention_ > 0 && layer < layers_) {
+        const std::size_t tail_base = static_cast<std::size_t>(layer) * 2;
+        tail.k_pages    = exact_tail_->plane(tail_base);
+        tail.v_pages    = exact_tail_->plane(tail_base + 1);
+        tail.page_count = static_cast<std::int32_t>(tail_ring_pages_);
+        tail.retention  = tail_retention_;
+    }
     return PagedKVLayerView{
         .k_pages       = pages_.plane(base),
         .v_pages       = pages_.plane(base + 1),
@@ -217,6 +226,7 @@ PagedKVLayerView PagedKVCache::layer_view(std::uint32_t layer,
         .head_dim      = head_dim_,
         .num_kv_heads  = kv_heads_,
         .storage       = storage_,
+        .tail          = tail,
     };
 }
 
@@ -231,6 +241,7 @@ PagedKVBatchLayerView PagedKVCache::batch_layer_view(std::uint32_t layer) const 
         .head_dim      = direct.head_dim,
         .num_kv_heads  = direct.num_kv_heads,
         .storage       = direct.storage,
+        .tail          = direct.tail,
     };
 }
 
@@ -245,7 +256,18 @@ DecoderState::DecoderState(DeviceSpan backing, const DecoderStateLayout& layout)
 DecoderState::DecoderState(std::span<const DeviceSpan> backings, const DecoderStateLayout& layout)
     : text_kv(backings, layout.text_kv) {
     if (layout.mtp_kv) { mtp_kv.emplace(backings, *layout.mtp_kv); }
-    if (layout.exact_tail) { exact_tail.emplace(backings, layout.exact_tail->pages); }
+    if (layout.exact_tail) {
+        exact_tail.emplace(backings, layout.exact_tail->pages);
+        text_kv.attach_exact_tail(*exact_tail, layout.exact_tail->retention,
+                                  layout.exact_tail->ring_pages);
+    }
+}
+
+void PagedKVCache::attach_exact_tail(const DeviceKVPagePool& pool, std::int32_t retention,
+                                     std::uint32_t ring_pages) noexcept {
+    exact_tail_      = &pool;
+    tail_retention_  = retention;
+    tail_ring_pages_ = ring_pages;
 }
 
 PagedKVCache* DecoderState::mtp_cache() noexcept { return mtp_kv ? &*mtp_kv : nullptr; }

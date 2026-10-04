@@ -30,6 +30,8 @@ struct DecoderStateSpec {
     // extent, i.e. the per-sequence ring times max concurrency.
     std::int32_t kv_tail_tokens              = 0;
     std::uint32_t kv_tail_physical_page_groups = 0;
+    // The per-sequence ring length in pages; the pool holds this many for each concurrent sequence.
+    std::uint32_t kv_tail_ring_pages         = 0;
     // The rank holding each full-attention layer's KV planes; empty puts every layer on rank 0. The
     // MTP cache always lives on rank 0.
     std::vector<std::size_t> text_layer_rank;
@@ -96,6 +98,11 @@ public:
 
     [[nodiscard]] PagedKVCacheView execution_view(const KVExecutionRowLease& row) const;
 
+    // Binds the device-only exact tail pool this cache's layer views expose. The pool must outlive
+    // the cache. Without a binding the views carry a disabled tail.
+    void attach_exact_tail(const DeviceKVPagePool& pool, std::int32_t retention,
+                           std::uint32_t ring_pages) noexcept;
+
     [[nodiscard]] PagedKVBatchLayerView batch_layer_view(std::uint32_t layer) const;
     // The rank holding this layer's KV planes, which is also the rank whose block table it reads.
     [[nodiscard]] std::size_t layer_rank(std::uint32_t layer) const;
@@ -112,6 +119,9 @@ private:
     std::int32_t kv_heads_     = 0;
     std::int32_t head_dim_     = 0;
     KvCacheStorage storage_    = KvCacheStorage::BFloat16;
+    const DeviceKVPagePool* exact_tail_ = nullptr;
+    std::int32_t tail_retention_        = 0;
+    std::uint32_t tail_ring_pages_      = 0;
 };
 
 // Exact KV tail: BF16, HeadMajor, two planes (K, V) per full-attention layer, page 64. Device-only,
@@ -120,6 +130,7 @@ struct ExactTailCacheLayout {
     DeviceKVPagePoolLayout pages;
     std::int32_t retention = 0;
     std::uint32_t layers   = 0;
+    std::uint32_t ring_pages = 0;
 
     [[nodiscard]] std::size_t payload_bytes() const noexcept { return pages.payload_bytes(); }
 };
