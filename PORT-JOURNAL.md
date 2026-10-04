@@ -841,3 +841,13 @@ INT8 family only** -- a scope limitation to be stated in the docs, not a silent 
   (fused-path wiring, storage scope, and the `body_active` partition fix) (`08a77d9d`).
 
 - **Verified** (Step 27c): the `report.json` `memory` object compiles — `python .deps/check-host-tu.py apps/perplexity/main.cpp` returns `SYNTAX_EXIT 0` (`cl /Zs`, no object written, ninja state untouched). That closes the "compile-pending" gap above; a full link still happens with the M1 build. New untracked helper `.deps/check-host-tu.py` does per-TU host syntax checks the same way `vcheck.py` does for CUDA TUs.
+
+## Step 27d - WP9 config-calculator verified (was mis-audited as "untouched")
+
+`node docs/config-calculator.test.mjs` → `PASS`, 24/24 checks, including the tail ones:
+`tailRingPages` (0 disables; `ceil(N/64)+1` pages), `tailBytes` (N=0 exactly zero on both models,
+`(ceil(N/64)+1)` pages of the measured BF16 body cache per sequence, BF16 whatever the body format
+is, N=0 leaves the golden engine reservation untouched, a tail consumes context headroom
+page-consistently). So the calculator half of DoD 7.7 is **DONE and verified**, and the N=0 golden
+reservation check is additional real evidence for DoD 7.6. `PORT-DOD.md` corrected accordingly; the
+only outstanding 7.7 item is the measured `docs/performance.md` numbers.
