@@ -258,6 +258,26 @@ Both entries share `causal_small_t_tail_partition` and the tail-partial kernel, 
 one code path and the route family stays 0/1/2.
 
 
+## 5.8 WP4 resolution — the tail needs no graph-family change (verified in tree)
+
+`causal_softmax_attention_route_family` (`include/ninfer/ops/softmax_attention.h`) returns 0/1/2
+from the head geometry, the KV storage and the visible-key window — never from the tail — and
+`graph_profiles.cpp:108-111,175-185` derives each profile's `topology_class` from that family alone.
+The tail lives *inside* the small-T family, so a tailed call resolves to the same family and the
+class grouping is unchanged. Two invariants make this hold:
+
+- **Identical launch geometry.** The body partial is launched with `grid.y = splits` (unchanged
+  launch capacity); the tail kernel uses the same `grid.y`. Only the device-computed
+  `body_active`/`tail_active` decide which splits each writes. So no grid dimension, node count or
+  graph breakpoint changes versus a tail-free launch.
+- **Unconditional tail node.** The tail kernel is launched whenever `cache.tail.enabled()` (a
+  per-instance constant), so every captured small-T call has the same node sequence.
+
+`N` is a startup option, so a process has one tail setting (one graph per `N`), and the per-row tail
+length is computed on device from `positions` and never enters any graph key. The persisted
+hybrid-cache file key does carry `N` (`;kvt=`, `model_instance.cpp:178`).
+
+
 ## 6. Working protocol (how we operate here)
 
 1. One work package per branch/worktree. Subagents do the reading + editing; the main agent keeps
