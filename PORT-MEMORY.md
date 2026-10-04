@@ -30,6 +30,23 @@ Hard constraints from the user:
 - `D:\ninfer\llamacpp` — llama.cpp-family product (KVarN + KVCPT) used as M0/M1 external baseline.
 - `D:\ninfer\ninfer-package` — ninfer product (engine + model) used as M0/M1 baseline.
 
+### Baseline products — verified CLI surface (Step 3 evidence)
+- `D:\ninfer\ninfer-package\engine\ninfer-serve.exe`:
+  - `--kv-dtype T` accepts `bf16 (default), int8, fp8, rk8v4, rk4v4, rk4v4-e8, rk2v4-e8, nvfp4, k8v4`
+    → all three DoD §7.1 tiers (`rk8v4` / `rk4v4-e8` / `nvfp4`) are valid.
+  - `--spec mtp|dflash|dflash2`, `--max-concurrency N` (1..8), `--device-snapshot-slots N`.
+  - **The product ships only `ninfer-serve.exe` + `NInferManager.exe` — there is NO
+    `ninfer-perplexity.exe`.** So ninfer-side ppl (M1 quality, plan §5) requires building
+    `ninfer-perplexity` from this repo.
+- `D:\ninfer\llamacpp\llama-perplexity.exe` (baseline side):
+  - `--kv-tail-tokens SPEC` = `0 | auto | N | positional list | named group list`;
+    `--kv-tail-type TYPE` = `f16 | bf16` (default `bf16` for standard caches, **`f16` for KVarN**).
+  - KVarN cache types `kvarn2..kvarn8`; `--kvarn-window-chunk N` (default 65536).
+  - Note: "KVarN always retains an intrinsic 128-token exact suffix".
+  - → Confirms WP6 flag naming: mirror `--kv-tail-tokens` and (M2) `--kv-tail-type bf16|f16` exactly.
+- Both products contain the plan's baseline models
+  (`...IQ3_XXS-vision-bf16-mtp.ninfer` 11.09 GB; `...IQ3_XXS-mtp.gguf` 10.44 GB).
+
 ## 3. Hardware / build baseline (per plan §0.5)
 
 - GPU: RTX 5070 Ti 16 GB, sm_120a, CUDA 13.3 (`nvcc` on PATH).

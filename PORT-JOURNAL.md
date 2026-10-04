@@ -96,3 +96,25 @@ Next: task #2 get a working configure/build (in-workspace FFMPEG tree); in paral
 - Commit `cc77009a`: ignore `.worktrees/`.
 
 Next: on agent completion, review INCR1 diff, fold BUILD findings into §3, then compile and iterate.
+
+---
+
+## 2026-10-05 — Step 3: baseline product CLI evidence (WP6 naming / WP10 readiness)
+
+While the two background agents (BUILD, INCR1) ran, gathered read-only evidence from the two
+baseline products (no GPU used, no files changed in donor trees):
+
+- `D:\ninfer\ninfer-package\engine\ninfer-serve.exe --help`: `--kv-dtype` accepts
+  `bf16, int8, fp8, rk8v4, rk4v4, rk4v4-e8, rk2v4-e8, nvfp4, k8v4` → all three DoD tiers valid.
+  Also `--spec mtp|dflash|dflash2`, `--max-concurrency N` (1..8), `--device-snapshot-slots N`.
+- **The ninfer product has no `ninfer-perplexity` binary** (only `ninfer-serve.exe` +
+  `NInferManager.exe`). Consequence: M1 quality runs (plan §5) require building `ninfer-perplexity`
+  from this repo — the product alone cannot produce ppl. Recorded in PORT-MEMORY §2.
+- `D:\ninfer\llamacpp\llama-perplexity.exe --help` confirms the upstream KVCPT surface:
+  `--kv-tail-tokens` (`0|auto|N|positional list|named group list`) and `--kv-tail-type`
+  (`f16|bf16`; default `bf16` standard caches, `f16` for KVarN), KVarN types `kvarn2..kvarn8`,
+  `--kvarn-window-chunk` default 65536; KVarN always retains an intrinsic 128-token exact suffix.
+  → WP6 naming should mirror `--kv-tail-tokens` / `--kv-tail-type` exactly.
+- Both baseline models present as the plan states.
+
+Both agents still running at end of this step (WP1 worktree diff empty, `.deps` not yet created).
