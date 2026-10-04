@@ -839,3 +839,5 @@ INT8 family only** -- a scope limitation to be stated in the docs, not a silent 
   allocated-but-inert for `fp8`, `nvfp4`, `k8v4` (`11d67445`).
 - `PORT-DOD.md` refreshed to the run-verified state, including the three recorded plan deviations
   (fused-path wiring, storage scope, and the `body_active` partition fix) (`08a77d9d`).
+
+- **Verified** (Step 27c): the `report.json` `memory` object compiles — `python .deps/check-host-tu.py apps/perplexity/main.cpp` returns `SYNTAX_EXIT 0` (`cl /Zs`, no object written, ninja state untouched). That closes the "compile-pending" gap above; a full link still happens with the M1 build. New untracked helper `.deps/check-host-tu.py` does per-TU host syntax checks the same way `vcheck.py` does for CUDA TUs.
