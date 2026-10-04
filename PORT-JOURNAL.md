@@ -912,3 +912,17 @@ reduction error, and it would hit the routes whose `wave_splits`/tile differ fro
 `tokens` (the runtime width, i.e. `min(TokenTile, invocation.width)`) and the same `wave_splits`, and
 add a cheap static assert or a unit check that the three agree. This supersedes the `launch_tail`
 grid hypothesis -- `launch_tail` already uses the same `splits` grid (`small_t_i8_launch.cuh:108`).
+
+### Step 27g addendum - the 27g lead is partly refuted; do not apply it blindly
+
+- `small_t.cu:428` passes `Int8 ? wave_splits : 0` into the body, so the BF16 body's 4-arg call
+  (which defaults `wave_splits = 0`) is *consistent* with its own launcher -- not a bug. And the BF16
+  tail must pass 0 too, or the (passing) BF16 cases would fail.
+- The INT8 partials are instantiated per query width (`small_t_i8_w<N>.cu`, dispatched by width), so
+  `TokenTile == invocation.width == tokens` for the widths the oracle exercises; the `TokenTile` vs
+  `tokens` difference would then not diverge. So 27g is **not** the confirmed root cause.
+- Net: the remaining INT8/batched failures are still **unroot-caused**. The three `printf`s
+  (`DBGBODY`/`DBGTAIL`/`DBGRED`) are the intended instrument: run the failing INT8 `cached` case and
+  compare `win`/`sc`/`ws`/`bw`/`ba`/`ta` between the body and tail prints for one launch, and the
+  `DBGRED` per-split `(m, l)` against which splits the reducer actually merges. That comparison
+  distinguishes a partition mismatch from a wrong ring offset without needing a hypothesis.
