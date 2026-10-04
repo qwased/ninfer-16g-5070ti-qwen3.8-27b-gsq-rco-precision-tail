@@ -274,3 +274,14 @@ agent's full build finishes (incremental rebuild will recompile the touched TUs)
 - Done on `main` (docs are not touched by the pool agent and are not compiled), so no collision.
 - Remaining WP9: `config-calculator.html` tail rows, `docs/maintainer/paged-kv-cache.md §4.5`
   ownership boundary, `docs/performance.md` measured tail numbers.
+
+---
+
+## 2026-10-05 — Step 12: WP7/WP9 partial — exact-pool ownership boundary documented
+
+- `docs/maintainer/paged-kv-cache.md §4.5 Page payload` gains a paragraph defining the exact tail pool
+  (BF16, HeadMajor, 2 planes/layer, page 64, its own `PageBytes`) and its M1 ownership boundary: device
+  only — no host/disk tier, slab, LRU, prefix digest or COW; ring addressing by position, no block
+  table; capacity `round_up(N,64)+R` pages per sequence × `--max-concurrency`. `git diff --check` clean.
+- WP9 now: cli.md, serving.md, paged-kv-cache §4.5 done. Remaining: `config-calculator.html` tail rows
+  and `docs/performance.md` measured numbers (need the build + runs).

@@ -309,6 +309,13 @@ Startup physical bytes 由各 plane slab 的完整 span 与 alignment 得到。�
 metadata 和 bounded tail slack。Prefix hit granularity不参与 page-size 选择。改变 page size、grouping
 或 closed plane order 都是架构变更。
 
+**Exact tail pool。** `--kv-tail-tokens N` 启用第二个 pool：`KvCacheStorage::BFloat16`、
+`PagedKVPlaneOrder::HeadMajor`、每 full-attention layer 两个 plane（K/V，无 scale），page 仍为 64。
+它的 `PageBytes` 与对应 body pool 不同，但同样满足"一个 pool 内的所有 page groups 等价"。该 pool 在
+M1 只存在于 Device：不进入 host/disk tier、slab、LRU、prefix digest 或 COW，因此无需第二套 stride 的
+搬运与命中校验；其 page 由 position 环形寻址得到，不存 block table。容量为每序列
+`round_up(N,64)+R` 页（`R` 为 rollback reserve），总量再乘以 `--max-concurrency`。
+
 ---
 
 ## 5. Logical page 与 replicas
