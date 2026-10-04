@@ -886,3 +886,29 @@ So a take-over does not re-derive them:
   kernel must agree on which columns belong to which sequence).
 - The three debug `printf`s (`DBGBODY`, `DBGTAIL`, `DBGRED`) are still in the working tree
   (committed in `f19425f1` as instrumentation) and must be removed before the work is finished.
+
+## Step 27g - the body and the tail call the partition with DIFFERENT arguments (lead, unconfirmed)
+
+`causal_small_t_active_splits` is genuinely token-count-tiered for the INT8 family
+(`small_t.cuh:104-122`: `tokens == 5 && window in (128,512]` and `tokens >= 6 && window in
+(128,160]` and `... window in (5000,8198]` each take their own branch, else
+`causal_small_t_default_splits`), and `wave_splits` is a second live input (it rounds `splits` down
+to whole waves when positive). So the partition depends on both `tokens` and `wave_splits` -- yet the
+call sites do not agree:
+
+| site | call |
+|---|---|
+| `small_t_bf16.cuh:131` (body) | `tail_partition<Geometry, false>(window, tail_tokens, split_count, TokenTile)` -- omits `wave_splits` (defaults 0) |
+| `small_t_i8.cuh:219` (body) | `tail_partition<Geometry, true>(window, tail_tokens, split_count, TokenTile, wave_splits)` |
+| `small_t_tail.cuh:116` (tail) | `tail_partition<Geometry, Int8>(window, tail_tokens, split_count, tokens, wave_splits)` -- passes the runtime `tokens`, not `TokenTile` |
+
+The body passes the compile-time `TokenTile`; the tail passes the runtime width `tokens`; the BF16
+body also drops `wave_splits`. Whenever the route's `TokenTile` exceeds the step's actual width, or
+whenever the route's `wave_splits` is positive, the body and the tail compute different
+`total_active`/`body_active`, so the body fills splits `[0, body_active_body)` while the tail fills
+`[body_active_tail, total_active_tail)` -- overlapping or leaving a gap, which is exactly a gross
+reduction error, and it would hit the routes whose `wave_splits`/tile differ from the fused norm.
+**Unconfirmed** (no build was run for this); the fix is to make all three sites pass the same
+`tokens` (the runtime width, i.e. `min(TokenTile, invocation.width)`) and the same `wave_splits`, and
+add a cheap static assert or a unit check that the three agree. This supersedes the `launch_tail`
+grid hypothesis -- `launch_tail` already uses the same `splits` grid (`small_t_i8_launch.cuh:108`).
