@@ -187,8 +187,9 @@ touching the running ninja build. Harness: `.deps/ptcheck.py` -> `.deps/ptcheck.
 It rewrites the repo prefix to `.worktrees/wp1/`, drops the `/Fo...` and the `@...obj.modmap`
 response-file argument (absent until the module scan runs), adds the generated `build-port/apps`
 include, and compiles into `.deps/ptcheck/` under the VS2022 v143 vcvars environment.
-Result (Step 15): all changed TUs compile except `apps/cli/main.cpp`, which only lacks the
-build-generated `ninfer_build_id.h`. Two real errors were found and fixed this way
+The harness also handles CUDA TUs: for nvcc commands it only retargets `-o`, so individual `.cu`
+files (and the `.cuh` headers they include) can be compiled and checked too — this is how WP2 was
+verified. Invoke as `python .deps/ptcheck.py <repo-relative paths...>`. Two real errors were found and fixed this way
 (`kv_tail_tokens` missing from `cli::Options` / `serve::ServeOptions`).
 
 

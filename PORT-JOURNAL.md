@@ -390,3 +390,22 @@ Verified the capacity chain in `port/wp1`:
 - WP5 is complete for M1: the tail's memory is accounted in the capacity curve constant (verified, §5.5)
   and reported explicitly in `MemorySummary`.
 - Build still running (537 objects, ninja log active). No executables yet.
+
+---
+
+## 2026-10-05 — Step 19: CUDA per-TU verification + WP2 exact tail write
+
+- Extended `.deps/ptcheck.py` to handle CUDA TUs (nvcc: retarget only `-o`). Confirmed on an
+  unmodified `launch.cu`. **This gives per-kernel compile verification** without waiting for the
+  full build — recorded in PORT-MEMORY §5.
+- **WP2 (single-sequence) landed**, commit `52b36257` (2 files, +54):
+  - `kv_cache_append_tail_bf16_kernel` in `kernel.cuh`: reads the same unquantized BF16 source row
+    (no re-quantization) and stores it at ring page `(position/64) % ring_pages` using the same
+    `paged_kv_element_offset` addressing as the body.
+  - `launch_full` launches it right before the body dispatch when `cache.tail.enabled()`, guarded by
+    `if constexpr (requires(const CacheView& c) { c.block_table; })` so only the single-sequence view
+    runs it — batched launches need a per-row sequence base (deferred to M3).
+  - Known limitation documented in-code: the ring page is used directly as the physical page, which
+    is correct for one sequence (M1's C=1 target) and needs the per-sequence arena base for C>1.
+  - Verified: `launch.cu` (which includes `kernel.cuh`) compiles cleanly with the harness.
+- Build still running.
