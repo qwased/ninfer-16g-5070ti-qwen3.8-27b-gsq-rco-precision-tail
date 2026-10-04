@@ -1320,6 +1320,10 @@ struct MemorySummary {
     // after instantiating, uploading and launching every executable); 0 without CUDA Graphs.
     std::size_t cuda_graph_measured_bytes         = 0;
     std::size_t kv_payload_bytes                  = 0;
+    // Split of the exact KV tail, both zero when `--kv-tail-tokens` is off: the history pages that
+    // hold retained tokens, and the reserved pages the rollback window may consume.
+    std::size_t kv_exact_history_bytes            = 0;
+    std::size_t kv_rollback_reserve_bytes         = 0;
     std::uint32_t host_state_capacity_slots       = 0;
     std::uint32_t host_state_occupied_slots       = 0;
     std::size_t host_kv_capacity_bytes            = 0;

@@ -355,6 +355,13 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
     }
     out.kv_payload_bytes =
         out.decoder.kv_payload_bytes() + (out.dflash ? out.dflash->kv_payload_bytes() : 0);
+    const std::size_t tail_payload_bytes =
+        out.decoder.exact_tail ? out.decoder.exact_tail->payload_bytes() : std::size_t{0};
+    out.kv_rollback_reserve_bytes =
+        tail_physical_pages != 0
+            ? (tail_payload_bytes / tail_physical_pages) * plan.max_concurrency
+            : std::size_t{0};
+    out.kv_exact_history_bytes = tail_payload_bytes - out.kv_rollback_reserve_bytes;
     const auto plane_end = [](const qwen3_5::PagedKVCacheLayout& cache) {
         std::size_t end = 0;
         if (cache.pages.spec.geometry.device_plane_order != PagedKVPlaneOrder::PageMajor) {
