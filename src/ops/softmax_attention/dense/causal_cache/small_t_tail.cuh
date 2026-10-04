@@ -34,6 +34,19 @@ namespace ninfer::ops {
 template <int TokenTile>
 inline constexpr int kCausalSmallTTailWarps = TokenTile == 1 ? 2 : 4;
 
+// Host-side gate of the merge: the retention a partial launcher on this entry may actually use.
+// Only an entry whose ring already holds the newest keys may shorten its body. The fused-append
+// entry (CacheInput::writes_cache) writes the quantized body from inside the partial kernel and has
+// no exact shadow write of its own, so it stays untailed: shortening its body would drop the newest
+// keys from the body range while the ring never received them (PORT-MEMORY section 8).
+template <typename CacheInput>
+[[nodiscard]] inline std::int32_t
+causal_small_t_tail_retention(const PagedKVBatchLayerView& cache) noexcept {
+    return !CacheInput::writes_cache && cache.tail.enabled() && cache.tail.page_count > 0
+               ? cache.tail.retention
+               : 0;
+}
+
 template <typename Geometry, int TokenTile, int WarpsPerCta, bool Int8>
 __launch_bounds__(WarpsPerCta * 32, 2) __global__ void causal_attention_small_t_tail_bf16_kernel(
     const __nv_bfloat16* q, const std::int32_t* pos, const __nv_bfloat16* tail_k,

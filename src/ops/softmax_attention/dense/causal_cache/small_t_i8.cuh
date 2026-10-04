@@ -66,7 +66,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         const std::int32_t* block_tables, const std::int32_t* valid_columns,
         const std::int32_t* table_rows, std::int32_t table_stride, std::int32_t full_width,
         std::int32_t column_begin, std::int32_t logical_capacity, std::int32_t wave_splits,
-        float scale, float* partial_acc, float* partial_m, float* partial_l) {
+        std::int32_t tail_tokens, float scale, float* partial_acc, float* partial_m,
+        float* partial_l) {
     constexpr bool PackedKeys          = Keys != KvKeyCoding::Int8;
     constexpr int Wc                   = WarpsPerCta;
     constexpr int RowCount             = TokenTile * Geometry::GroupSize;
@@ -211,17 +212,23 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     }
 
     const int window = last_pos + 1;
-    const int active_split_count =
-        causal_small_t_active_splits<Geometry, true>(window, split_count, TokenTile, wave_splits);
+    // With an exact tail the body covers only the keys the tail does not: splits
+    // [0, body_active) read [0, body_window), and the tail kernel reproduces the same partition to
+    // write the splits above them. With no tail (tail_tokens == 0) this is total_active and window,
+    // exactly as before.
+    const CausalSmallTTailPartition tail_partition = causal_small_t_tail_partition<Geometry, true>(
+        window, tail_tokens, split_count, TokenTile, wave_splits);
+    const int active_split_count = tail_partition.body_active;
+    const int body_window        = tail_partition.body_window;
     if (split >= active_split_count) { return; }
 
-    const int logical_tiles = div_up(window, Bc);
+    const int logical_tiles = div_up(body_window, Bc);
     const bool tile_split   = logical_tiles >= active_split_count;
-    const int units_per_split =
-        tile_split ? div_up(logical_tiles, active_split_count) : div_up(window, active_split_count);
+    const int units_per_split = tile_split ? div_up(logical_tiles, active_split_count)
+                                           : div_up(body_window, active_split_count);
     const int split_start = split * units_per_split * (tile_split ? Bc : 1);
     const int split_limit = split_start + units_per_split * (tile_split ? Bc : 1);
-    const int split_end   = (split_limit < window) ? split_limit : window;
+    const int split_end   = (split_limit < body_window) ? split_limit : body_window;
     if (split_start >= split_end) {
         write_neutral();
         return;

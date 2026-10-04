@@ -7,6 +7,7 @@
 #include "ops/common/math.h"
 #include "ops/softmax_attention/dense/causal_cache/small_t.cuh"
 #include "ops/softmax_attention/dense/causal_cache/small_t_i8.cuh"
+#include "ops/softmax_attention/dense/causal_cache/small_t_tail.cuh"
 #include "ops/common/device_route.h"
 #include "ops/softmax_attention/dense/causal_cache/small_t_i8_launch.h"
 
@@ -41,6 +42,7 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
     // A U8 value plane is the packed signed int4 coding (rk8v4 and the packed-key storages); a
     // U8 key plane is a packed key coding, told apart by storage.
     const bool packed_values = cache_v.dtype == DType::U8;
+    const std::int32_t tail_tokens = causal_small_t_tail_retention<CacheInput>(cache);
     auto launch = [&]<int WarpsPerCta, int MinBlocksPerSm, int KeyBlock, bool DynamicArena,
                       int QkSplit = 1, bool EarlyFetch = false>() {
         const dim3 grid(Geometry::KVHeads, splits, invocation.batch_size);
@@ -74,8 +76,9 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
                     ? nullptr
                     : static_cast<const std::int32_t*>(invocation.table_rows->data),
                 cache.block_tables.ne[0], invocation.full_width, invocation.column_begin,
-                logical_capacity, wave_splits, scale, static_cast<float*>(partial_acc.data),
-                static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data));
+                logical_capacity, wave_splits, tail_tokens, scale,
+                static_cast<float*>(partial_acc.data), static_cast<float*>(partial_m.data),
+                static_cast<float*>(partial_l.data));
         };
         auto issue = [&]<bool PackedValues, KvKeyCoding Keys>() {
             if (small_t_pv_f16()) {
@@ -95,6 +98,28 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
         } else {
             issue.template operator()<false, KvKeyCoding::Int8>();
         }
+    };
+    // Exact-tail partial (WP3): the same grid, block and channel as the body partial, launched
+    // after it, so it fills exactly the splits [body_active, total_active) the body left free and
+    // the shared reducer merges both partials in one online-softmax pass.
+    auto launch_tail = [&]() {
+        if (tail_tokens <= 0 || cache.tail.page_count <= 0) { return; }
+        constexpr int kTailWarps = kCausalSmallTTailWarps<TokenTile>;
+        const dim3 grid(Geometry::KVHeads, splits, invocation.batch_size);
+        causal_attention_small_t_tail_bf16_kernel<Geometry, TokenTile, kTailWarps, true>
+            <<<grid, kTailWarps * 32, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(q.data),
+                static_cast<const std::int32_t*>(pos.data),
+                static_cast<const __nv_bfloat16*>(cache.tail.k_pages.data),
+                static_cast<const __nv_bfloat16*>(cache.tail.v_pages.data), cache.tail.page_count,
+                tail_tokens, wave_splits, invocation.width, invocation.full_width,
+                invocation.column_begin, logical_capacity, invocation.batch_size,
+                invocation.valid_columns == nullptr
+                    ? nullptr
+                    : static_cast<const std::int32_t*>(invocation.valid_columns->data),
+                scale, static_cast<float*>(partial_acc.data), static_cast<float*>(partial_m.data),
+                static_cast<float*>(partial_l.data));
+        CUDA_CHECK(cudaGetLastError());
     };
     // A device profile names the tier per window: "<warps>x<CTAs per SM>x<key block>", with a
     // trailing "d" for the dynamic-arena variant, "q" for split QK and "e" for EarlyFetch.
@@ -180,6 +205,7 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
         }
         if (taken) {
             CUDA_CHECK(cudaGetLastError());
+            launch_tail();
             return;
         }
     }
@@ -229,6 +255,7 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
         launch.template operator()<8, 2, 32, false>();
     }
     CUDA_CHECK(cudaGetLastError());
+    launch_tail();
 }
 
 } // namespace small_t_i8

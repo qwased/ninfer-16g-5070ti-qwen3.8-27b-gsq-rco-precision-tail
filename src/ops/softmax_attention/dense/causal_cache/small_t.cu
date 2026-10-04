@@ -206,10 +206,11 @@ template <typename Geometry, int TokenTile, int WarpsPerCta, bool MultiBatch, bo
 void launch_tc_partial_bf16(const Tensor& q, CacheInput input, const Tensor& pos, float scale,
                             PagedKVBatchLayerView cache, const CausalSmallTInvocation& invocation,
                             std::int32_t logical_capacity, std::int32_t splits,
-                            std::int32_t tail_tokens, Tensor& partial_acc, Tensor& partial_m,
-                            Tensor& partial_l, cudaStream_t stream) {
+                            Tensor& partial_acc, Tensor& partial_m, Tensor& partial_l,
+                            cudaStream_t stream) {
     constexpr int kBlock = 32 * WarpsPerCta;
     const dim3 grid(Geometry::KVHeads, splits, invocation.batch_size);
+    const std::int32_t tail_tokens = causal_small_t_tail_retention<CacheInput>(cache);
     Tensor& cache_k = cache.k_pages;
     Tensor& cache_v = cache.v_pages;
     const std::int32_t* valid_columns =
@@ -318,17 +319,6 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
             ? causal_small_t_wave_splits<Geometry>(invocation.width, implementation_window,
                                                     cache.storage)
             : 0;
-    // Exact tail (WP3). The tail partial reads the newest `retention` keys from the BF16 ring,
-    // which only the appending writers fill: the standalone append op writes it for a single-row
-    // view, while the fused-append entry (CacheInput::writes_cache) writes the quantized body from
-    // inside the partial kernel and has no exact shadow write at all. On that entry the newest keys
-    // are missing from the ring *and* the body range is shortened, so a merge there would silently
-    // drop them; retention 0 keeps that entry bit-identical to a tail-free launch. Wiring it needs
-    // the fused append to write its own new rows into the ring first.
-    const std::int32_t tail_tokens =
-        !CacheInput::writes_cache && cache.tail.enabled() && cache.tail.page_count > 0
-            ? cache.tail.retention
-            : 0;
 
     // BF16 keeps its row-tile warp count; INT8 selects its producer/consumer
     // geometry inside launch_tc_partial_i8.
@@ -343,7 +333,7 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
             } else {                                                                               \
                 launch_tc_partial_bf16<Geometry, (TOKENS), (WARPS), MultiBatch, Masked>(           \
                     q, input, pos, scale, cache, invocation, logical_capacity, splits,             \
-                    tail_tokens, partial_acc, partial_m, partial_l, stream);                       \
+                    partial_acc, partial_m, partial_l, stream);                                     \
             }                                                                                      \
         };                                                                                         \
         const bool masked = invocation.valid_columns != nullptr;                                   \
