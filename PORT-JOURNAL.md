@@ -511,3 +511,7 @@ Worktree `.worktrees/wp2`, branch `port/wp9-docs`. Docs + the self-contained cal
     combinations: 0 threw`, the three 35b speculation rows (`none`/`mtp3+head` 262,144 capped,
     `dflash-3` 240,192), then `PASS`, exit 0.
   - `git diff --check` clean.
+- Commit: `d8c5bdc89832f4c1ef667cc7aaccf9ac79f198e9` — "docs: add exact KV tail dimension to the
+  config calculator" (4 files: `docs/config-calculator.html`, its two test harnesses,
+  `PORT-JOURNAL.md`). The hash is recorded here in a following journal-only commit, because a commit
+  cannot contain its own hash.
