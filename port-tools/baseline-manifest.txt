@@ -1,0 +1,13 @@
+# precision-tail experiment manifest
+date=20261005-032336
+host_gpu=NVIDIA GeForce RTX 5070 Ti, 12.0, 617.14
+repo_head=271fa8fb8be72246b1cfcc0fb08781da67121098
+repo_dirty=2
+
+63f29a2189a6b4cc31f81e093d3856ad293a5583114439f41ae1ed7af4093262 *D:/ninfer/llamacpp/model/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf
+edb3279e3baa9a1e4a21d6965962de1f26fbda0b471396cd4fa5f9a9ec577a33 *D:/ninfer/ninfer-package/model/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-vision-bf16-mtp.ninfer
+b5be6783e078f20734fc8a720fad6b71bb435bfc1df8222ba8cefb9defa6b2e8 */d/ninfer/ninfer-precision-tail/eval/corpora/perplexity-1m/manifest.json
+4f153c210abf21b62a37ff8aca52066fab76ac4dcab69600d88db046981f1700 *D:/ninfer/llamacpp/llama-perplexity.exe
+31970509082e5106767b5fd3dc79a9179a2e309213046f3200dbfd0169ea69a1 *D:/ninfer/llamacpp/llama-server.exe
+MISSING: /d/ninfer/ninfer-precision-tail/build-port/apps/ninfer-perplexity.exe
+3e084bf8eb9c1c4ac55b347e78ecb4718946005a1519fc688ff34c5e26eb95f7 *D:/ninfer/ninfer-package/engine/ninfer-serve.exe

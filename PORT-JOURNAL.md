@@ -118,3 +118,45 @@ baseline products (no GPU used, no files changed in donor trees):
 - Both baseline models present as the plan states.
 
 Both agents still running at end of this step (WP1 worktree diff empty, `.deps` not yet created).
+
+---
+
+## 2026-10-05 — Step 4: experiment harness + verified beellama algorithm spec
+
+Two independent artifacts (read-only w.r.t. donor trees; no GPU compute used).
+
+### 4a. Reproducibility harness (WP10 / plan §0.5 item 6)
+- Added `port-tools/run-experiments.sh` (syntax-checked, `bash -n` OK). Subcommands:
+  `manifest` (hashes only, no GPU), `llamacpp-kvarn4` (baseline KVarN+tail perplexity),
+  `ninfer-tiers` (rk8v4 / rk4v4-e8 / nvfp4 × tail 0/N on our build), `all`.
+  Each run writes a timestamped dir with the exact argv and full stdout/stderr; `port-tools/results/`
+  is gitignored.
+- Ran the `manifest` cell successfully (no GPU compute). Pinned hashes committed to
+  `port-tools/baseline-manifest.txt`:
+  - GPU: RTX 5070 Ti, compute_cap 12.0, driver 617.14.
+  - llamacpp model `...IQ3_XXS-mtp.gguf` sha256 `63f29a21…93262`;
+    ninfer model `...IQ3_XXS-vision-bf16-mtp.ninfer` sha256 `edb3279e…77a33`.
+  - corpus `eval/corpora/perplexity-1m/manifest.json` sha256 `b5be6783…6b2e8`.
+  - llama-perplexity.exe `4f153c21…1700`, llama-server.exe `31970509…69a1`,
+    ninfer-serve.exe `3e084bf8…95f7`; ninfer-perplexity = MISSING (needs our build).
+- Fixed a path typo in the harness default (`infer-package` → `ninfer-package`).
+- Open items recorded in-script: KVarN target-cache use may require a model-backed speculative mode
+  on the llamacpp fork (the help text says so) — must be resolved empirically at M0, since plan §0.5
+  forbids MTP on that side. Corpus alignment between the two products is the plan §3.2 gap.
+
+### 4b. beellama KVCPT algorithm spec (`PORT-BEELLAMA-SPEC.md`, new)
+Read-only subagent verified `D:\ninfer\beellama.cpp` @ `58a162927`. Recorded as the authoritative
+reference for WP2/WP3/WP4/WP5. Highlights and **three corrections to our plan** (see PORT-MEMORY §5.2):
+1. Tail window is **host-selected** (newest-N finite/causal slot descriptor), not device-computed
+   from positions → contradicts plan §1.4.
+2. Upstream **includes `retention_tokens` (N) in the tail graph key** → contradicts plan WP4
+   ("长度不进 key"). Excluded is the *dynamic window* (runtime inputs, shape-validated).
+3. Memory accounting splits `native_exact_bytes` / `exact_tail_bytes` / `rollback_reserve_bytes` /
+   `transient_estimate_bytes` — our WP5 names align.
+4. Confirms risk R1 resolution: body FA dequantizes to FP32, tail dequantizes to FP32, merge is
+   FP32↔FP32 online-softmax `g=max(m_b,m_t); out=(O_b·l_b·e^{m_b-g}+O_t·l_t·e^{m_t-g})/(l_b·e^{m_b-g}+l_t·e^{m_t-g})`.
+   Boundary: body-empty → pure tail with sinks to the tail pass; tail covers all → body mask −∞.
+5. Write path: one fused `SET_ROWS`-style op writing body+shadow from the same F32 row;
+   `keep_last_writes` dedup; commit-after-attention; rollback reserve `R`, `history_stride=N+R`.
+
+BUILD and INCR1 agents still running at end of this step.

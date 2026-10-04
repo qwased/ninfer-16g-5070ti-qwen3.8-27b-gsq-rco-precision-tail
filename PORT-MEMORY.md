@@ -101,6 +101,22 @@ Key design decisions already fixed by the plan:
 - Test harness: `tests/ops/softmax_attention/causal_cache.cpp` (`run_a1_case` 2552-2640,
   FP64 `ideal_attention` 1519).
 
+## 5.2 Plan corrections (verified against beellama — see `PORT-BEELLAMA-SPEC.md`)
+
+Three plan assumptions were checked against the real upstream source and **corrected**:
+1. **§1.4 tail window:** upstream builds the per-query tail window on the **host** (newest-N finite,
+   causal slot list in a flat descriptor), NOT on device from `positions`. Our plan said the opposite
+   ("不能回读主机"). WP3 must decide host-descriptor vs device-window; host descriptor is proven.
+2. **§1.5/WP4 graph key:** upstream **includes** `retention_tokens` (N) in the tail graph identity.
+   Our plan said "长度不进 key" — wrong. Excluded is the *dynamic window* (n_tail, slot table, masks),
+   which are runtime inputs validated by shape. Startup-fixed N in the key costs nothing for us.
+3. **WP5 field names:** upstream splits `native_exact_bytes` / `exact_tail_bytes` /
+   `rollback_reserve_bytes` / `transient_estimate_bytes`; our `kv_exact_history_bytes` /
+   `kv_rollback_reserve_bytes` align with that split.
+Confirmed as planned: two-partial online-softmax merge in a common FP32 domain (risk R1 resolved:
+body FA already dequantizes to FP32), fused single-read dual write, `keep_last_writes` dedup,
+commit-after-attention + rollback reserve.
+
 ## 6. Working protocol (how we operate here)
 
 1. One work package per branch/worktree. Subagents do the reading + editing; the main agent keeps
