@@ -11,6 +11,7 @@
 #include "ops/common/device_route.h"
 #include "ops/softmax_attention/dense/causal_cache/small_t_i8_launch.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <string_view>
 
@@ -43,6 +44,12 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
     // U8 key plane is a packed key coding, told apart by storage.
     const bool packed_values = cache_v.dtype == DType::U8;
     const std::int32_t tail_tokens = causal_small_t_tail_retention<CacheInput>(cache);
+    if (tail_tokens > 0) {
+        std::fprintf(stderr,
+                     "HOSTI8 tok=%d implw=%d splits=%d wave=%d tt=%d lc=%d w=%d bs=%d pg=%d\n",
+                     TokenTile, implementation_window, splits, wave_splits, tail_tokens,
+                     logical_capacity, invocation.width, invocation.batch_size, cache.tail.page_count);
+    }
     auto launch = [&]<int WarpsPerCta, int MinBlocksPerSm, int KeyBlock, bool DynamicArena,
                       int QkSplit = 1, bool EarlyFetch = false>() {
         const dim3 grid(Geometry::KVHeads, splits, invocation.batch_size);

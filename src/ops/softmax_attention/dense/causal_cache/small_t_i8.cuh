@@ -155,6 +155,10 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         const int remaining = valid_columns[batch] - column_begin;
         valid_tokens        = remaining <= 0 ? 0 : (remaining < TokenTile ? remaining : TokenTile);
     }
+    if (kv_head == 0 && split == 0 && batch == 0 && tid == 0) {
+        printf("I8TOP tok=%d sc=%d tt=%d vt=%d lc=%d ws=%d\n", TokenTile, split_count,
+               tail_tokens, valid_tokens, logical_capacity, wave_splits);
+    }
     std::int64_t column_base = column_begin;
     if constexpr (MultiBatch) { column_base += static_cast<std::int64_t>(batch) * full_width; }
     q += static_cast<std::int64_t>(kCausalHeadDim) * Geometry::QHeads * column_base;
@@ -265,13 +269,6 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     const int append_start = split_start;
     const int append_end =
         (split_start < body_window && split_end == body_window) ? window : split_end;
-    if (kv_head == 0 && batch == 0 && tid == 0) {
-        printf("XDBGBODY win=%d bw=%d ba=%d ta=%d split=%d ss=%d se=%d aps=%d ape=%d "
-               "ft=%d kb=%d tok=%d ws=%d cap=%d tt=%d\n",
-               window, body_window, active_split_count, tail_partition.tail_active, split,
-               split_start, split_end, append_start, append_end, first_tile, key_blocks, TokenTile,
-               wave_splits, split_count, tail_tokens);
-    }
 
     if constexpr (CacheInput::writes_cache) {
         // Decompose H256 as H4 over four independently transformed H64 groups. The existing

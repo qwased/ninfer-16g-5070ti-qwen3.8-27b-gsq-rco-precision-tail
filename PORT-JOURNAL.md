@@ -1010,3 +1010,17 @@ this session pauses: before any new build, check `tasklist | grep -iE "ninja|nvc
 is gone, stop any orphan (`taskkill //F //T //PID <ninja-pid>`, then stray `nvcc`) so nothing is left
 filling CPU/RAM/VRAM. Do not `git clean`/`reset` -- the agent's later edits, if any, land on top of
 `96043f9a` in the working tree.
+
+## Step 28b - the fix subagent also exhausted its turn budget (150); its last lead
+
+The background fix agent **failed at the 150-turn cap**, so it did not finish. Its final direction was
+"The route for these cases is the answer" -- i.e. it suspected the INT8 tail cases fail because the
+device route the launch actually resolves for them differs from what the case assumes (e.g. the tail
+partial is not reached on that route, or the route's `splits`/`wave_splits` differ from the fused
+norm). That is unexplored. Combined with Step 27i (batched fixture bug), the next session should:
+1. log the resolved route per failing INT8 case (`small_t_i8_route_key` / `device_route_schedule`)
+   next to the body/tail `DBG*` prints and compare it with what the partition assumes;
+2. apply the Step 27i batched fixture fix;
+3. remove the `DBG*` printf blocks, rebuild, and rerun the oracle.
+Any edits it left after `96043f9a` are parked in the following commit. Its orphaned compiler
+processes were stopped by PID.

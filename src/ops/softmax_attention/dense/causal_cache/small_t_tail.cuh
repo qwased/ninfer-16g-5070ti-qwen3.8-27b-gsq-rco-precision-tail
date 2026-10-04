@@ -170,7 +170,7 @@ __launch_bounds__(WarpsPerCta * 32, 2) __global__ void causal_attention_small_t_
     // split_start. The ring page follows from the absolute key alone.
     const int first_key = body_window + split_start;
     const int limit_key = body_window + split_end;
-    if (tid == 0 && kv_head == 0 && batch == 0) {
+    if (tid == 0 && kv_head == 0 && batch == 0 && split_local == 0) {
         printf("XDBGTAIL split=%d/%d ss=%d se=%d first_key=%d limit_key=%d ft=%d kb=%d rp=%d\n",
                split_local, split, split_start, split_end, first_key, limit_key, first_tile,
                key_blocks, ring_pages);
