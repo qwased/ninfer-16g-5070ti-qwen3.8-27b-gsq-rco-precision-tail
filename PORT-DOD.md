@@ -10,20 +10,21 @@ packages, each mapped to concrete evidence. **Update on every step.** Status val
 
 | # | Requirement | Status | Evidence / gap |
 |---|---|---|---|
-| 1 | `--kv-tail-tokens 1024` starts / decodes / prefills on `rk8v4`, `rk4v4-e8`, `nvfp4` bodies | **PARTIAL** | Option exists (`port/wp1 64f32d3e`); tail pool attach in flight; no kernel yet → cannot run |
-| 2 | Tail merge passes an FP32 oracle (incl. `p+1<=N`, empty-body window, C>1 masked rows) | **TODO** | No merge kernel, no test. Test shape: extend `tests/ops/softmax_attention/causal_cache.cpp` `run_a1_case` (L2552-2640) + FP64 `ideal_attention` (L1519) with tail rows |
-| 3 | `apps/perplexity` shows ppl improvement vs `tail=0` on all three bodies | **BLOCKED** | Product ships no perplexity binary; needs our build. Published sm_86 tail=0 refs: `rk8v4` 4.346811, `nvfp4` 4.358924, `bf16` 4.343225 (PORT-MEMORY §5.3) |
-| 4 | `MemorySummary` within ±5% of plan §2; C=1 tail ≈ 64 MiB at N=1024 | **PARTIAL** | §2 arithmetic verified (§5.3); summary fields wired (`fc325aeb`). Needs a run to measure (build) |
-| 5 | CUDA Graph family sequence unchanged vs tail off | **TODO** | Design fixed (§1.5, PORT-MEMORY §5.4: merge inside small-T family); needs the WP4 assertion test |
-| 6 | `tail=0` output bit-identical to today (zero regression) | **PARTIAL** | All landed changes are default-disabled; needs a real tail=0 run to confirm |
-| 7 | Docs + `config-calculator.html` updated | **TODO** | WP9 untouched |
+| 1 | `--kv-tail-tokens 1024` starts / decodes / prefills on `rk8v4`, `rk4v4-e8`, `nvfp4` bodies | **PARTIAL** | Option (`64f32d3e`), pool attach, fused shadow write (`155fd1ab`) and tail partial all landed and compile-verified. Gap: no end-to-end run at N=1024 on the 27B artifact yet (runner ready, `.deps/run-m1-ppl.bat`) |
+| 2 | Tail merge passes an FP32 oracle (incl. `p+1<=N`, empty-body window, C>1 masked rows) | **PARTIAL** | Oracle cases run (was compile-only). **BF16 passes all five cases** (`.deps/oracle-run2*.txt`) after the `body_active` fix (Step 27). Still failing: INT8-family reductions (cached rk8v4/rk4v4-e8 grossly wrong; fused rk8v4 marginal) and the C>1 masked BF16 ring mismatch |
+| 3 | `apps/perplexity` shows ppl improvement vs `tail=0` on all three bodies | **BLOCKED** | Artifact + corpus + runner present; needs a GPU run. **Plan deviation (§5.10):** the tail is only merged for `bf16` + the INT8 family, so `nvfp4` is inert and *cannot* improve — this DoD row is narrowed to the wired storages and `nvfp4` is recorded as inert |
+| 4 | `MemorySummary` within ±5% of plan §2; C=1 tail ≈ 64 MiB at N=1024 | **PARTIAL** | §2 arithmetic verified (§5.3); fields wired (`fc325aeb`). Needs a startup reservation-log diff at tail 0 vs 1024 |
+| 5 | CUDA Graph family sequence unchanged vs tail off | **PARTIAL** | Reasoned in §5.8: the route family reads geometry/storage/window only, and `grid.y` is the full capacity either way, so the topology class and node count do not change with the tail. No dedicated assertion test |
+| 6 | `tail=0` output bit-identical to today (zero regression) | **PARTIAL** | `tail_tokens == 0` is the identity partition (unchanged `body_limit`), the N=0 oracle path is bit-exact by construction, and the tail-off regression subset passed 15/15. Needs a real tail=0 run |
+| 7 | Docs + `config-calculator.html` updated | **PARTIAL** | `docs/cli.md`, `docs/serving.md`, `docs/perplexity.md` document the option and its storage scope (`11d67445`); the calculator is untouched; `docs/performance.md` measured numbers pending the M1 runs |
 
 ## Milestones (plan §4)
 
 - **M0** (KVarN decision gate): `TODO` — harness ready (`port-tools/run-experiments.sh`), baseline
   hashes pinned. Open item: llamacpp `--cache-type-k kvarn4` may require a model-backed speculative
   mode, which plan §0.5 forbids — resolve empirically. GPU must be free (ask first).
-- **M1** (static BF16 tail functional closure): `IN PROGRESS` — see DoD above.
+- **M1** (static BF16 tail functional closure): `IN PROGRESS` — BF16 oracle cases pass; INT8-family
+  and the batched case open; ppl + memory measurement pending. See DoD above.
 - **M2** (F16 default + graph stability): `TODO`.
 - **M3** (concurrency + speculative, tier decision): `TODO`.
 - **M4** (optional tier): out of scope for now.
@@ -32,23 +33,39 @@ packages, each mapped to concrete evidence. **Update on every step.** Status val
 
 | WP | Status | Evidence / gap |
 |---|---|---|
-| WP1 storage/exact pool | **DONE (scaffolding)** | `PagedKVExactTailView` (`74297cba`); pool planned in `DecoderState` (`f15a4d72`); ctx plumbed (`d9c013fd`); views expose the pool (`75343cc2`). Compile-verified per TU. NOT done: per-sequence ring page leases at runtime |
-| WP2 fused dual write | **PARTIAL** | Single-sequence tail shadow write landed (`52b36257`), CUDA-compile-verified. Separate pass, not fused single-read (documented deviation). Batch path + per-sequence arena base TODO |
-| WP3 attention merge | **TODO** (design proven) | **No new merge kernel needed** — the existing split reducer already merges body+tail (PORT-MEMORY §5.6). Remaining: tail-partial kernel + workspace split sizing + dispatch wiring |
-| WP4 graph/route family | **TODO** | N goes in the tail identity (§5.2 correction 2); dynamic window excluded |
-| WP5 capacity/`MemorySummary` | **DONE (M1)** | Tail cost inside the curve constant + `kv_payload_bytes` (verified, PORT-MEMORY §5.5); split fields added (`fc325aeb`). Compile-verified |
-| WP6 config chain | **DONE** | Option + identity + help (`64f32d3e`, `2f010b36`); draft caches are tail-free by construction (`d9c013fd`) |
-| WP7 tier ownership | **TODO** | M1 decision: exact pool device-only; update `docs/maintainer/paged-kv-cache.md §4.5` |
-| WP8 transaction/rollback | **TODO** | Commit-after-attention + reserve `R` |
-| WP9 docs | **TODO** | `docs/cli.md`, `serving.md`, `config-calculator.html`, `paged-kv-cache.md §4.5`, `performance.md` |
-| WP10 verification/bench | **PARTIAL** | Harness + baseline manifest + oracle reference landed; oracle test + measurements TODO |
+| WP1 storage/exact pool | **DONE** | `PagedKVExactTailView` (`74297cba`); pool in `DecoderState` (`f15a4d72`); ctx plumbed (`d9c013fd`); views expose the pool (`75343cc2`). Runtime per-sequence ring *page leases* are not separately tracked — the ring is one contiguous per-sequence run sized by WP5, which is what the addressing assumes |
+| WP2 fused dual write | **DONE** | Fused-append shadow write `causal_attention_small_t_tail_shadow_kernel` (`155fd1ab`), storage-independent; the cached entry gets its ring from `ops::kv_cache_append`. The fused path is the one the main model uses (the §5.7 correction) |
+| WP3 attention merge | **PARTIAL** | The merge IS the existing split reducer (no new merge kernel, §5.6); tail-partial kernel `small_t_tail.cuh` + partition sizing + dispatch wiring landed. BF16 verified by the oracle; INT8-family and batched still failing (Step 27) |
+| WP4 graph/route family | **DONE** | §5.8: no graph-family change is needed and none was made (route family and node count are tail-independent) |
+| WP5 capacity/`MemorySummary` | **DONE** | Tail cost inside the curve constant + `kv_payload_bytes` (verified §5.5); split fields added (`fc325aeb`) |
+| WP6 config chain | **DONE** | Option + identity + help (`64f32d3e`, `2f010b36`); `--kv-tail-tokens` on the perplexity app (`16130914`); draft caches are tail-free by construction |
+| WP7 tier ownership | **DONE** | M1 decision: exact pool is device-only; `docs/maintainer/paged-kv-cache.md §4.5` updated |
+| WP8 transaction/rollback | **TODO** | Commit-after-attention + reserve `R`; `R = 1` exists in sizing only. Not required by DoD §7, but it is a plan §3 work package |
+| WP9 docs | **PARTIAL** | `docs/cli.md`, `serving.md`, `perplexity.md`, `paged-kv-cache.md §4.5` updated; `config-calculator.html` and `performance.md` measured numbers pending |
+| WP10 verification/bench | **PARTIAL** | Harness + oracle + `nvfp4`/`k8v4` reference quality landed; the oracle cases now RUN (Step 26/27); M1 measurements pending |
+
+## Plan deviations (allowed by the objective; each is recorded in PORT-MEMORY)
+
+1. **The tail must be wired on the fused-append path, not only the cached one** (§5.7). The plan
+   assumed decode uses the cached small-T entry; the main model uses the fused-append entry, so the
+   original WP2 shadow write (in `ops::kv_cache_append`) was inert. Corrected by adding the fused
+   shadow write and tailing both entries.
+2. **The exact tail is merged for `bf16` + the INT8 family only** (§5.10). `fp8`, `nvfp4` and `k8v4`
+   reach reduce kernels in a Hadamard-rotated frame; merging the raw BF16 tail rows there would need
+   the tail rows rotated first, which is not implemented. On those storages `--kv-tail-tokens`
+   allocates the ring but no route reads or writes it (inert). Plan DoD §7.3 assumed `nvfp4` would
+   improve; it cannot, so that row is narrowed.
+3. **`body_active` must stop the body one split short of the reducer range** (§5.10). The plan's
+   partition only clamped the body at `total_active`; the split-tier floor then dropped the newest
+   keys entirely. Found by *running* the oracle, not by compiling it.
 
 ## Required-scope items from the objective itself
 
 | Requirement | Status | Evidence |
 |---|---|---|
 | New project in `ninfer-precision-tail` | **DONE** | local clone at `D:\ninfer\ninfer-precision-tail` |
-| Git version control | **DONE** | `main` + `port/wp1`; commits `cc8c529a`, `3d91febd`, `271fa8fb`, `9cc18f50`, `43bb5565`, `fc6152e9`, `1a7d281d`, `f2b31336`, `9833368f` |
-| Memory doc written at every step | **DONE** | `PORT-MEMORY.md` + `PORT-JOURNAL.md` (Steps 0-9); `PORT-BEELLAMA-SPEC.md`; this file |
-| Subagents + worktree used to spare main context | **DONE** | 5 delegations; worktree `port/wp1` (manual — see journal Step 2) |
-| Original project/product not damaged | **DONE** | clone is separate, `origin` removed; donors only read; `.deps`/`build-port` inside our repo |
+| Git version control | **DONE** | `main` (+ merged `port/wp1`, `port/wp10-oracle`); commits through `11d67445` |
+| Memory doc written at every step | **DONE** | `PORT-MEMORY.md` (§5.1-5.10) + `PORT-JOURNAL.md` (Steps 0-27); `PORT-BEELLAMA-SPEC.md`; this file |
+| Subagents + worktree used to spare main context | **DONE** | multiple delegations; worktrees `port/wp1`, `port/wp10-oracle`; per-TU harness `.deps/vcheck.py` |
+| Original project/product not damaged | **DONE** | clone is separate, `origin` removed; donors (`ninfer-16g-...`, `ninfer-package`, `llamacpp`, `vcpkg`) only read; `.deps`/`build-port` inside our repo |
+| Test discipline (no leaked processes) | **DONE** | every build/test/agent stopped and confirmed (`tasklist` clean) before the next step; the one orphaned debug build was stopped by PID |
