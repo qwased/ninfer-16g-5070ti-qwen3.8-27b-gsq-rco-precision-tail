@@ -180,6 +180,17 @@ window (per-row tail length) must NOT be in the graph key; it is a runtime input
 **Open for implementation:** does the exact ring pool need its own `block_table` for tier/prefix paths
 (WP7 says device-only in M1, so no), and exact rollback reserve `R` page count (`history_stride = N+R`).
 
+
+### Per-TU compile verification (no need to wait for the whole build)
+`build-port/compile_commands.json` (897 entries) lets one TU be compiled against the worktree without
+touching the running ninja build. Harness: `.deps/ptcheck.py` -> `.deps/ptcheck.bat`.
+It rewrites the repo prefix to `.worktrees/wp1/`, drops the `/Fo...` and the `@...obj.modmap`
+response-file argument (absent until the module scan runs), adds the generated `build-port/apps`
+include, and compiles into `.deps/ptcheck/` under the VS2022 v143 vcvars environment.
+Result (Step 15): all changed TUs compile except `apps/cli/main.cpp`, which only lacks the
+build-generated `ninfer_build_id.h`. Two real errors were found and fixed this way
+(`kv_tail_tokens` missing from `cli::Options` / `serve::ServeOptions`).
+
 ## 6. Working protocol (how we operate here)
 
 1. One work package per branch/worktree. Subagents do the reading + editing; the main agent keeps

@@ -327,3 +327,22 @@ agent's full build finishes (incremental rebuild will recompile the touched TUs)
   521 objects. Still compiling, no executables yet.
 - Remaining immediately: `MemorySummary` fields + `kv_capacity` population (WP5), then merge the whole
   `port/wp1` branch into `main` for a real compile of everything.
+
+---
+
+## 2026-10-05 — Step 15: real per-TU compile verification (2 bugs found and fixed)
+
+- Built a per-TU compile harness (`.deps/ptcheck.py` + `.deps/ptcheck.bat`) that compiles individual
+  changed TUs from `build-port/compile_commands.json` retargeted at the worktree, without disturbing
+  the running ninja build. First attempt failed with `D8022 cannot open ....obj.modmap` (a MSVC
+  response-file argument that does not exist until the module scan runs) — stripping `@...modmap`
+  fixed the harness.
+- Result: **`decoder_state.cpp`, `startup.cpp`, `paged_kv_cache.cpp`, `options.cpp`, `serve_options.cpp`,
+  `generation_service.cpp`, `model_instance.cpp` all compile cleanly.** `main.cpp` is blocked only by the
+  build-generated `ninfer_build_id.h`.
+- **Two real bugs found and fixed** (commit `2f010b36`): `kv_tail_tokens` was added to `EngineOptions`
+  but not to the products' own option structs. Added to `apps/cli/options.h` (`cli::Options`) and
+  `src/serve/serve_options.h` (`serve::ServeOptions`), and mapped into `EngineOptions` in
+  `apps/cli/main.cpp` and `src/serve/generation_service.cpp`.
+- Technique recorded in PORT-MEMORY so later steps can verify without a full build.
+- Build still running (529 objects).
