@@ -35,8 +35,15 @@ Hard constraints from the user:
 - GPU: RTX 5070 Ti 16 GB, sm_120a, CUDA 13.3 (`nvcc` on PATH).
 - Note: repo `AGENTS.md` still claims sm_86/3090 (upstream fork text). Per plan §0.5 the test
   baseline is **pinned to sm_120a / 5070 Ti**; the doc contradiction is not a blocker.
-- Toolchain status: `nvcc` = CUDA 13.3 found. `cmake`/`ninja` **not on PATH**; VS 2022 installed
-  under `C:\Program Files\Microsoft Visual Studio`. Exact cmake path TO BE LOCATED (task #2).
+- Toolchain (resolved, Step 1): cmake 3.31.6 + ninja at
+  `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\`
+  (subdirs `CMake\bin\cmake.exe`, `Ninja\ninja.exe`); MSVC v143 14.44.35207 (VS2022 BuildTools only);
+  nvcc CUDA 13.3.33. Configure must override arch to `120a` + `NINFER_SM120_NATIVE=ON`.
+- **Build blocker:** Windows requires FFMPEG from a vcpkg triplet tree
+  (`$VCPKG_ROOT/installed/x64-windows`, see `cmake/FindFFMPEG.cmake`). No such tree exists on disk and
+  `D:\ninfer\vcpkg` is not bootstrapped. Plan: build a self-contained tree under
+  `D:\ninfer\ninfer-precision-tail\.deps\vcpkg-root\` (never bootstrap/modify the shared `D:\ninfer\vcpkg`).
+  CURL needed only if `NINFER_BUILD_PRODUCT_SUPPORT=ON`.
 
 ## 4. Plan shape (summary — authoritative text is `precision-tail-port-plan.md`)
 
@@ -58,7 +65,24 @@ Key design decisions already fixed by the plan:
 
 - **Step 0 (done):** scaffold — clone, remote removed, identity set, plan+report copied,
   task list created, memory docs created. See `PORT-JOURNAL.md`.
-- Next: task #2 build environment verification (baseline compile before touching code).
+- **Step 1 (done):** build env recon + WP1–3 code dossier (two read-only subagents).
+  Toolchain resolved; FFMPEG/vcpkg is the build blocker; plan anchors corrected
+  (`DeviceKVPagePoolSpec` and `PagedKVPlaneOrder` live in `src/core/paged_kv_cache.h`).
+- Next: task #2 get a working configure/build via an in-workspace FFMPEG triplet tree;
+  in parallel start WP1 storage and WP3 merge work.
+
+## 5.1 Corrected anchor map (from Step 1 dossier)
+
+- Merge primitives to reuse: `src/ops/softmax_attention/dense/causal_cache/small_t.cuh`
+  `causal_merge_split_statistics` (L183-210) + `causal_attention_small_t_reduce_output_kernel`
+  (L212-299). Partial writers: `small_t_i8.cuh:938-975`, `small_t_bf16.cuh:18-25`.
+  Workspace: `causal_softmax_attention.cpp:269-284`. Route: `causal_softmax_attention.cpp:347-402`.
+- Second-pool precedent: `startup.cpp:247-287`, `decoder_state.cpp:76-80`, `decoder_state.h:114,128`.
+- Write path: `src/ops/kv_cache/append/launch.cu` (201/219; template 16-121), `kernel.cuh` (BF16 69-104).
+- Storage types: `src/core/paged_kv_cache.h` (PagedKVLayerView 22-31, PagedKVPlaneOrder 58,
+  DeviceKVPagePoolSpec 71); `src/core/paged_kv_storage.h` (`paged_kv_storage_layout` 58-121).
+- Test harness: `tests/ops/softmax_attention/causal_cache.cpp` (`run_a1_case` 2552-2640,
+  FP64 `ideal_attention` 1519).
 
 ## 6. Working protocol (how we operate here)
 
