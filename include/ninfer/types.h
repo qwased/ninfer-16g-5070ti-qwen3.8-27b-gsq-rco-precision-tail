@@ -420,6 +420,10 @@ struct EngineOptions {
     // prompt-attention waves. Off keeps the default kernel and the requested chunk.
     bool fast_prefill_kernel           = false;
     KvCacheStorage kv_cache            = KvCacheStorage::BFloat16;
+    // Exact KV tail: the newest N tokens per sequence are kept unquantized in a second page pool
+    // so attention can merge a quantized body partial with an exact tail partial. Zero disables
+    // the tail and leaves behavior and memory as they are without it.
+    std::int32_t kv_tail_tokens        = 0;
     SpeculativeOptions speculative;
     std::size_t media_cache_bytes = kDefaultMediaCacheBytes;
     std::size_t media_live_bytes  = kDefaultMediaLiveBytes;

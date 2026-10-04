@@ -68,6 +68,10 @@ KvCacheStorage parse_kv_dtype(const char* text) {
     throw std::invalid_argument("invalid kv-dtype: " + value);
 }
 
+std::int32_t parse_kv_tail_tokens(const char* text) {
+    return static_cast<std::int32_t>(parse_nonnegative_int(text, "kv-tail-tokens"));
+}
+
 KvCapacityPolicy parse_kv_capacity(const char* text) {
     if (std::string_view(text) == "auto") { return KvCapacityPolicy::automatic(); }
     const int value = parse_nonnegative_int(text, "kv-capacity");
@@ -184,6 +188,9 @@ std::string serve_usage_text(const char* argv0) {
            "); alias --vram-headroom-mib\n"
            "  --kv-dtype T                  KV storage: bf16 (default), int8, fp8, rk8v4,\n"
            "                                rk4v4, rk4v4-e8, rk2v4-e8, nvfp4 or k8v4\n"
+           "  --kv-tail-tokens N            keep the newest N tokens of each sequence\n"
+           "                                unquantized as an exact KV tail that attention\n"
+           "                                merges with the quantized body (0 = off)\n"
            "\n"
            "CONTEXT CACHE\n"
            "  --no-prefix-reuse             disable compatible-prefix caching (on by\n"
@@ -792,6 +799,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.stage_layers = parse_stage_layers(require_value("--stage-layers"));
         } else if (arg == "--kv-dtype") {
             options.kv_cache = parse_kv_dtype(require_value("--kv-dtype"));
+        } else if (arg == "--kv-tail-tokens") {
+            options.kv_tail_tokens = parse_kv_tail_tokens(require_value("--kv-tail-tokens"));
         } else if (arg == "--spec") {
             options.speculative.backend =
                 product::parse_speculative_backend(require_value("--spec"));

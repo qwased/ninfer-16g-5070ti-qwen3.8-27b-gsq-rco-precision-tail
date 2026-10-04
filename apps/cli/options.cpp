@@ -129,6 +129,14 @@ KvCapacityPolicy parse_kv_capacity(const char* text) {
     return KvCapacityPolicy::explicit_capacity(parse_u32(text, "kv-capacity"));
 }
 
+std::int32_t parse_kv_tail_tokens(const char* text) {
+    const std::uint32_t value = parse_u32(text, "kv-tail-tokens", true);
+    if (value > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
+        throw std::invalid_argument(std::string("invalid kv-tail-tokens: ") + text);
+    }
+    return static_cast<std::int32_t>(value);
+}
+
 ReasoningEffort parse_reasoning_effort(std::string_view text) {
     if (text == "none") { return ReasoningEffort::None; }
     if (text == "minimal") { return ReasoningEffort::Minimal; }
@@ -182,6 +190,9 @@ std::string usage_text(const char* argv0) {
            "); alias --vram-headroom-mib\n"
            "  --kv-dtype T                  bf16 (default), int8, fp8, rk8v4, rk4v4,\n"
            "                                rk4v4-e8, rk2v4-e8, nvfp4 or k8v4\n"
+           "  --kv-tail-tokens N            keep the newest N tokens of each sequence\n"
+           "                                unquantized as an exact KV tail that attention\n"
+           "                                merges with the quantized body (0 = off)\n"
            "\n"
            "SPECULATIVE DECODING (off by default)\n"
            "  --spec mtp|dflash|dflash2     speculative decoding backend\n"
@@ -367,6 +378,8 @@ Options parse_options(int argc, char** argv) {
             options.stage_layers = parse_stage_layers(value(arg));
         } else if (arg == "--kv-dtype") {
             options.kv_cache = parse_kv_cache(value(arg));
+        } else if (arg == "--kv-tail-tokens") {
+            options.kv_tail_tokens = parse_kv_tail_tokens(value(arg));
         } else if (arg == "--spec") {
             options.speculative.backend = product::parse_speculative_backend(value(arg));
         } else if (arg == "--draft-tokens") {
