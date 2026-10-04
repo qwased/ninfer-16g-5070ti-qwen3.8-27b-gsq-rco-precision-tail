@@ -215,3 +215,22 @@ Agents still running (no BUILD/INCR1 completion notification at end of step).
 
 BUILD agent still running (`.deps/vcpkg-root/installed/x64-windows` now holds av*-63/61/10 ffmpeg
 libs+headers+DLLs, curl and zlib). Not yet a completion notification.
+
+---
+
+## 2026-10-05 — Step 8: WP1 view interface landed; build CONFIGURE SUCCEEDED
+
+- **Build blocker resolved (configure):** `build-port/CMakeCache.txt` (38 KB) and
+  `build-port/build.ninja` (2.4 MB) now exist, with `compile_commands.json`, `CTestTestfile.cmake`,
+  `apps/`, `src/`, `tests/`, `tools/` — i.e. the in-workspace FFMPEG triplet tree satisfied
+  `FindFFMPEG.cmake` and CMake configured the sm_120a Release build at 03:23. The BUILD agent is now
+  presumably compiling (CUDA build is long); no completion notification yet.
+- **WP1 interface landed** on `port/wp1`, commit `74297cba` (2 files, +18):
+  `PagedKVExactTailView` (BF16 k/v ring pages, implicit `(p/64)%page_count` addressing, `retention`
+  N, `enabled()`), added as a default-disabled trailing member of `PagedKVLayerView` and
+  `PagedKVBatchLayerView`; propagated in `single_row_paged_kv_batch_view`. All other construction
+  sites use designated initializers ending at `storage`, so they compile unchanged.
+  Tail design follows PORT-MEMORY §5.4 (device-side ring addressing, no stored block table).
+- Still open in WP1: attaching a real exact pool in `PagedKVCache`/`DecoderStateLayout`
+  (`decoder_state.cpp:191 kv_payload_bytes` sums text_kv + mtp_kv and must add the tail), the
+  `startup.cpp:247-287`-style pool planning, `MemorySummary` fields, and the draft tail=0 forcing.
