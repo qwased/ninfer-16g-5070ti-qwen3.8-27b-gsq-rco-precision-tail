@@ -234,3 +234,20 @@ libs+headers+DLLs, curl and zlib). Not yet a completion notification.
 - Still open in WP1: attaching a real exact pool in `PagedKVCache`/`DecoderStateLayout`
   (`decoder_state.cpp:191 kv_payload_bytes` sums text_kv + mtp_kv and must add the tail), the
   `startup.cpp:247-287`-style pool planning, `MemorySummary` fields, and the draft tail=0 forcing.
+
+---
+
+## 2026-10-05 — Step 9: delegated tail-pool attachment + accounting
+
+- Build still compiling at step start (446 `.obj`, `.ninja_log` growing, `ninfer_ops` target) — no
+  executables yet, no BUILD completion notification.
+- Launched a background agent in the **existing** `port/wp1` worktree (continuing from `74297cba`) for
+  the next increment: attach the exact tail pool (WP1) + capacity/`MemorySummary` accounting (WP5) +
+  the speculative-draft tail=0 forcing (WP6 leftover). Explicitly NOT the WP2/WP3 kernels.
+- Brief includes: verified anchors, PORT-MEMORY §5.4 ring-pool design, the §2 byte formula, and a
+  required syntax-check procedure using `build-port/compile_commands.json` with `/c`→`/Zs` so the agent
+  gets real compile feedback WITHOUT disturbing the running ninja build.
+- Isolated in `port/wp1` so it cannot conflict with the BUILD agent's work in the main checkout.
+
+Next: on completion, review + syntax/compile verify, then merge `port/wp1` → `main` once the BUILD
+agent's full build finishes (incremental rebuild will recompile the touched TUs).
