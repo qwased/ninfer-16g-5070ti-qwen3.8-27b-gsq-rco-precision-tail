@@ -496,6 +496,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
         domain_reports.push_back(std::move(item));
     }
 
+    const ninfer::MemorySummary memory = engine.memory_summary();
     json report{
         {"schema_version", 4},
         {"metric",
@@ -511,6 +512,13 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
           {"mode", corpus.mode},
           {"source", corpus.source.string()},
           {"stream_count", streams.size()}}},
+        {"memory",
+         {{"runtime_reservation_bytes", memory.runtime_reservation_bytes},
+          {"kv_payload_bytes", memory.kv_payload_bytes},
+          {"kv_exact_history_bytes", memory.kv_exact_history_bytes},
+          {"kv_rollback_reserve_bytes", memory.kv_rollback_reserve_bytes},
+          {"minimum_runtime_reservation_bytes", memory.minimum_runtime_reservation_bytes},
+          {"cuda_graph_measured_bytes", memory.cuda_graph_measured_bytes}}},
         {"execution",
          {{"purpose", "causal_scoring"},
           {"device", options.device},

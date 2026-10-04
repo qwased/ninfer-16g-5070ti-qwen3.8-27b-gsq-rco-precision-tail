@@ -823,3 +823,19 @@ INT8 family only** -- a scope limitation to be stated in the docs, not a silent 
   when the investigating subagent exhausted its turn budget; they are **instrumentation only** and
   must be deleted before this work is finished. The build it started was stopped and no compiler
   process was left alive.
+
+## Step 27b - DoD 7.4 evidence plumbing + doc scope notes
+
+- `apps/perplexity/main.cpp` now records a `memory` object in `report.json`
+  (`runtime_reservation_bytes`, `kv_payload_bytes`, `kv_exact_history_bytes`,
+  `kv_rollback_reserve_bytes`, `minimum_runtime_reservation_bytes`, `cuda_graph_measured_bytes`) from
+  `Engine::memory_summary()` (declared `include/ninfer/engine.h:110`). This turns DoD 7.4 from a log
+  scrape into a report diff between `--kv-tail-tokens 0` and `1024`. **Compile-pending**: the edit is
+  one `const ninfer::MemorySummary` copy plus one JSON key and it will be built with the next
+  `ninfer-perplexity` link, but it has not been compiled yet (a build is deliberately not started now
+  to avoid contending with the agent's build of `build-port`).
+- `docs/perplexity.md`, `docs/cli.md`, `docs/serving.md` now state the tail's real storage scope:
+  merged for `bf16` + the INT8 family (`int8`, `rk8v4`, `rk4v4`, `rk4v4-e8`, `rk2v4-e8`), and
+  allocated-but-inert for `fp8`, `nvfp4`, `k8v4` (`11d67445`).
+- `PORT-DOD.md` refreshed to the run-verified state, including the three recorded plan deviations
+  (fused-path wiring, storage scope, and the `body_active` partition fix) (`08a77d9d`).
