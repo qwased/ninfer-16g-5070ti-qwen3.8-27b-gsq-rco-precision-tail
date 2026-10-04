@@ -193,3 +193,25 @@ Resolved the main WP3 design fork before coding, from verified facts (no code ch
 - Recorded in PORT-MEMORY §5.4.
 
 Agents still running (no BUILD/INCR1 completion notification at end of step).
+
+---
+
+## 2026-10-05 — Step 7: WP6 config plumbing implemented (port/wp1), INCR1 agent stopped
+
+- **Stopped the INCR1 background agent**: after ~11 minutes its transcript file was still 0 bytes and
+  its worktree had zero changes — it was not producing. Took the increment over directly.
+- **Implemented WP6 (config subset)** on branch `port/wp1` in `.worktrees/wp1`, commit `64f32d3e`
+  (4 files, +27):
+  - `include/ninfer/types.h`: `std::int32_t kv_tail_tokens = 0;` on `EngineOptions`.
+  - `apps/cli/options.cpp`: `--kv-tail-tokens` parsed via a new `parse_kv_tail_tokens`
+    (`parse_u32(..., allow_zero=true)` → zero allowed, negatives rejected, range-checked) + help text.
+  - `src/serve/serve_options.cpp`: same flag via `parse_nonnegative_int` + help text.
+  - `src/runtime/engine/model_instance.cpp`: `hybrid_cache_fingerprint` gains `;kvt=<N>` so different
+    tail configurations cannot share one engine identity.
+- NOT yet done in WP6: forcing the speculative draft context to tail = 0 — belongs with the pool
+  planning in WP1 (noted as a TODO; plan §3 WP6 last bullet).
+- Code lives on `port/wp1`; memory docs stay on `main`. Merge to `main` once the BUILD agent confirms
+  the tree configures/compiles, so the change is actually compiled.
+
+BUILD agent still running (`.deps/vcpkg-root/installed/x64-windows` now holds av*-63/61/10 ffmpeg
+libs+headers+DLLs, curl and zlib). Not yet a completion notification.
