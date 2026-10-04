@@ -579,4 +579,7 @@ reads no `.tail` here); the cached entry is MTP-only. NVFP4/K8V4 have no complet
 the kernel evaluates in a Hadamard-rotated frame the raw tail rows are not expressed in — so they get
 the weaker no-worse-than-tail-off check, documented in `run_quantized_tail_case`.
 
-- Commit: recorded in the following journal-only commit (a commit cannot contain its own hash).
+- Commit: `3d6228a039356a27a5503f497d2927ecaadc541e` — "test(ops): exact KV tail oracle
+  coverage in causal-cache attention" (3 files: `tests/ops/softmax_attention/causal_cache.cpp`,
+  `PORT-JOURNAL.md`, `PORT-MEMORY.md`). The hash is recorded here in a following journal-only
+  commit, because a commit cannot contain its own hash.
