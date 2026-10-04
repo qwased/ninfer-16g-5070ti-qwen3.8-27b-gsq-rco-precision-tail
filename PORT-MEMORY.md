@@ -117,6 +117,29 @@ Confirmed as planned: two-partial online-softmax merge in a common FP32 domain (
 body FA already dequantizes to FP32), fused single-read dual write, `keep_last_writes` dedup,
 commit-after-attention + rollback reserve.
 
+## 5.3 Plan §2 memory model — verified + reference ppl (Step 5)
+
+`docs/performance.md:448-460` publishes (RTX 3090, Qwen3.8-27B, `--quick`, ctx/stride 4096/2048,
+261,167 scored tokens) — an independent check of plan §2:
+
+| KV | Bytes/token | KV @ 2048 tok | Perplexity |
+|---|---:|---:|---:|
+| `bf16` | 65,536 | 128.00 MiB | 4.343225 |
+| `int8` | 33,792 | 66.00 MiB | 4.343263 |
+| `fp8` | 33,024 | 64.50 MiB | 4.347181 |
+| `rk8v4` | 26,112 | 51.00 MiB | 4.346811 |
+| `k8v4` | 25,728 | 50.25 MiB | 4.347596 |
+| `nvfp4` | 18,432 | 36.00 MiB | 4.358924 |
+| `rk4v4` | 17,920 | 35.00 MiB | 4.352432 |
+
+- **§2 model CONFIRMED:** bf16 = 65,536 B/token (16 full-attn layers × 4096) ⇒ 1024 tokens = 64 MiB,
+  exactly the plan's N=1024/C=1 cell; 2048 tokens = 128.00 MiB matches the published table.
+- **DoD §7.3 reference:** the table's `rk8v4` (4.346811) and `nvfp4` (4.358924) are the `tail=0`
+  baselines our tail runs must improve toward `bf16` (4.343225), same protocol as our harness
+  (`--quick`, 4096/2048). `rk4v4-e8` has no published ppl — we measure it fresh.
+- Caveat: published on **RTX 3090/sm_86**; our pinned baseline is **5070 Ti/sm_120a**, so absolute
+  values will differ. Use as a sanity reference, not a gate.
+
 ## 6. Working protocol (how we operate here)
 
 1. One work package per branch/worktree. Subagents do the reading + editing; the main agent keeps

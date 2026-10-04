@@ -160,3 +160,18 @@ reference for WP2/WP3/WP4/WP5. Highlights and **three corrections to our plan** 
    `keep_last_writes` dedup; commit-after-attention; rollback reserve `R`, `history_stride=N+R`.
 
 BUILD and INCR1 agents still running at end of this step.
+
+---
+
+## 2026-10-05 — Step 5: plan §2 memory model verified against published numbers
+
+Read `docs/performance.md:448-460` (published KV-format table, RTX 3090, Qwen3.8-27B, same
+`--quick` 4096/2048 protocol our harness uses):
+- bf16 = **65,536 B/token** → independent confirmation of plan §2 (16 full-attn layers × 4096 B).
+  1024 tokens = 64 MiB (the plan's N=1024/C=1 cell) and 2048 tokens = 128.00 MiB as published.
+- Published tail=0 references for DoD §7.3: `rk8v4` ppl 4.346811, `nvfp4` 4.358924, `bf16` 4.343225
+  (target direction). `rk4v4-e8` unpublished — measure fresh.
+- Caveat recorded: values are sm_86/3090; our baseline is sm_120a/5070 Ti, so absolute numbers differ.
+- Recorded in PORT-MEMORY §5.3.
+
+Still no BUILD/INCR1 completion notification; `.deps` was at 184 MB with `vcpkg-root` underway.
