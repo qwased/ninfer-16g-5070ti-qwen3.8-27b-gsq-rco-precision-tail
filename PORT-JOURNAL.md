@@ -307,3 +307,23 @@ agent's full build finishes (incremental rebuild will recompile the touched TUs)
   are not yet attached (`PagedKVLayerView.tail`) — that lands with WP3, which consumes it; `MemorySummary`
   population still TODO.
 - Build at 519 objects, still compiling.
+
+---
+
+## 2026-10-05 — Step 14: tail tokens plumbed through planning; tail pool sized
+
+- Commit `d9c013fd` on `port/wp1` (2 files, +13):
+  - `SequencePlanningInputs` and `SequencePlanImpl` gain `kv_tail_tokens`
+    (`src/models/qwen3_5/program/planning/startup.h`).
+  - `startup.cpp`: `impl->kv_tail_tokens = inputs.kv_tail_tokens;` and the engine-options bridge sets
+    `.kv_tail_tokens = options.kv_tail_tokens`; the `DecoderStateSpec` now receives
+    `kv_tail_tokens` and `kv_tail_physical_page_groups`.
+  - Tail sizing: `round_up(N,64) + 1` pages per sequence (the `+1` is the rollback reserve R), times
+    `max_concurrency` — the plan §2 model, now expressed in code.
+  - Speculative draft contexts are tail-free **by construction**: the MTP cache and the DFlash pool
+    are planned through `plan_cache`/their own layout blocks and never receive the tail fields, so the
+    plan §3-WP6 "draft tail = 0" requirement holds without a special case.
+- Build progress: `ninfer_core.lib`, `ninfer_xgrammar.lib` linked; test dispatch sources generated;
+  521 objects. Still compiling, no executables yet.
+- Remaining immediately: `MemorySummary` fields + `kv_capacity` population (WP5), then merge the whole
+  `port/wp1` branch into `main` for a real compile of everything.
