@@ -458,6 +458,43 @@ Verified the capacity chain in `port/wp1`:
 
 ---
 
+## 2026-10-05 — Step 23: scope corrections, M1 assets, scoring-app option
+
+- **Regression run (tail subset).** 15 of 16 selected tests ran under the toolchain env
+  (`ctest -R` serial, single GPU owner): `kv_capacity`, `rmsnorm_pack_tail`, `paged_kv_window`,
+  `softmax_attention`, `_nvfp4`, `_k8v4`, `_rk4v4_e8`, `_rk2v4_e8`, `_dflash2` (195 s),
+  `_int8_prompt`, `_pack_gqa`, `kv_cache_append{,_nvfp4,_k8v4}` all **Passed**; the last,
+  `softmax_attention_wide_test`, is a long CPU-heavy sweep still running when this was written.
+  `ninfer_resident_memory_test` is a standalone exe not built by the `ninfer_tests` target.
+  Two environment facts fixed the earlier all-`0xc0000135` run: the test harness needs the CUDA
+  `bin` on PATH (source `.deps/env-port.bat`) and the `ninfer_stage_test_runtime_dlls` ALL target
+  must run to place ffmpeg/curl DLLs next to the exes.
+- **CRITICAL scope correction (PORT-MEMORY §5.7, commit `1999fe53`).** The main model's step
+  attention is the **fused-append** entry (`ops::causal_softmax_attention(q,k,v,…)`,
+  `text.cpp:965/974`); `causal_softmax_attention_cached` is MTP-only (`:571`). `ops::kv_cache_append`
+  — where WP2 put the exact shadow write — is called only for `mtp_kv_` (`:523`) and the draft
+  prefix, so **nothing writes `batch_text_kv_`'s ring** and a cached-only tail merge is inert for
+  the main model. Correction recorded in `PORT-MEMORY` §5.7: the fused entry must shadow-write its
+  step and run the tail partial (new keys from `input`, older from the ring).
+- **MTP/draft tail is 0 by construction.** `decoder_state.cpp:255-263` attaches the exact pool to
+  `text_kv` only; `mtp_kv` is a `PagedKVCache` with no tail, so its views carry `retention = 0`.
+  That satisfies the WP6 requirement without an explicit guard.
+- **WP7 (M1) is already satisfied.** The exact pool is a `DeviceKVPagePool` (no host/disk tier, slab,
+  LRU, prefix digest or COW), and `docs/maintainer/paged-kv-cache.md` §4.5 documents exactly that,
+  plus ring addressing and `round_up(N,64)+R` pages × `--max-concurrency`. The rollback reserve `R`
+  is already present as the `+1` in `tail_ring_pages = page_count(N)+1`.
+- **Scoring app had no tail switch** — the M1 quality gate (DoD 3) would have been unrunnable.
+  Added `--kv-tail-tokens N` to `apps/perplexity/main.cpp` (usage text, parse, `EngineOptions`,
+  `report.json`), verified by building target `ninfer-perplexity` (`BUILD_EXIT=0`), commit
+  `16130914`. `docs/perplexity.md` documents the flag and the tail quality protocol.
+- **M1 assets verified** (read-only): `ninfer-package/model/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-vision-bf16-mtp.ninfer`
+  (11.09 GB) and `eval/corpora/perplexity-1m/` (manifest + wikitext/pg19/zhwiki/ninfer streams).
+  Helper scripts prepared: `.deps/build-target.bat`, `.deps/run-m1-ppl.bat <fmt> <N>`.
+- **In flight.** `port/wp1` has the cached-path BF16 step committed (`80c00386`) and INT8
+  uncommitted (compile-verifying); `port/wp10-oracle` is adding the tail oracle cases.
+
+---
+
 ## 2026-10-05 — Step 23: WP9 — exact-tail dimension in the fit calculator
 
 Worktree `.worktrees/wp2`, branch `port/wp9-docs`. Docs + the self-contained calculator only; no
