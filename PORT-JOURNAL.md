@@ -851,3 +851,13 @@ is, N=0 leaves the golden engine reservation untouched, a tail consumes context 
 page-consistently). So the calculator half of DoD 7.7 is **DONE and verified**, and the N=0 golden
 reservation check is additional real evidence for DoD 7.6. `PORT-DOD.md` corrected accordingly; the
 only outstanding 7.7 item is the measured `docs/performance.md` numbers.
+
+## Step 27e - WP8 recorded as a deliberate deferral
+
+Read plan §3 WP7/WP8. WP7 was already satisfied (device-only pool, `§4.5` updated). WP8 asks that the
+exact-pool write commit after attention with rollback + degraded marking and reserve `R`; the plan's
+acceptance is a post-rollback exact-vs-body consistency test. This is **not in DoD §7** and **not
+reachable in M1**: the pool is device-only, `C=1`, and the functional closure exercises no failure
+path. `R = 1` page is already carried in the WP5 sizing (`startup.cpp:360-363`), so the accounting is
+in place for when the transactional layer lands. Recorded as deviation 4 in `PORT-DOD.md` rather than
+left as a silent gap.

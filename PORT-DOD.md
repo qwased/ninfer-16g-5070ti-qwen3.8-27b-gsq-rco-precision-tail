@@ -40,7 +40,7 @@ packages, each mapped to concrete evidence. **Update on every step.** Status val
 | WP5 capacity/`MemorySummary` | **DONE** | Tail cost inside the curve constant + `kv_payload_bytes` (verified §5.5); split fields added (`fc325aeb`) |
 | WP6 config chain | **DONE** | Option + identity + help (`64f32d3e`, `2f010b36`); `--kv-tail-tokens` on the perplexity app (`16130914`); draft caches are tail-free by construction |
 | WP7 tier ownership | **DONE** | M1 decision: exact pool is device-only; `docs/maintainer/paged-kv-cache.md §4.5` updated |
-| WP8 transaction/rollback | **TODO** | Commit-after-attention + reserve `R`; `R = 1` exists in sizing only. Not required by DoD §7, but it is a plan §3 work package |
+| WP8 transaction/rollback | **DEFERRED** | Plan §3 requires the exact-pool write to commit *after* attention, roll back and mark degraded on failure, with reserve `R` for it; `R = 1` page exists in sizing (`startup.cpp:360-363`). Not in DoD §7 and not reachable in M1: the pool is device-only, `C=1`, and the functional closure exercises no failure/rollback path. It belongs with the transactional layer (`src/models/qwen3_5/program/transactions/`), so it is a deliberate deferral, not a silently dropped requirement |
 | WP9 docs | **PARTIAL** | `docs/cli.md`, `serving.md`, `perplexity.md`, `paged-kv-cache.md §4.5` updated; `config-calculator.html` and `performance.md` measured numbers pending |
 | WP10 verification/bench | **PARTIAL** | Harness + oracle + `nvfp4`/`k8v4` reference quality landed; the oracle cases now RUN (Step 26/27); M1 measurements pending |
 
@@ -58,6 +58,11 @@ packages, each mapped to concrete evidence. **Update on every step.** Status val
 3. **`body_active` must stop the body one split short of the reducer range** (§5.10). The plan's
    partition only clamped the body at `total_active`; the split-tier floor then dropped the newest
    keys entirely. Found by *running* the oracle, not by compiling it.
+4. **WP8 (transaction/rollback) is deferred, not dropped.** The write ordering it protects
+   (commit-after-attention) and the degraded-on-failure marking only matter where a failure can
+   occur mid-step; M1's functional closure is device-only and `C=1` and exercises none. The reserve
+   `R` is already carried in the WP5 sizing, so the accounting is in place when the transactional
+   layer lands (M2/M3).
 
 ## Required-scope items from the objective itself
 
