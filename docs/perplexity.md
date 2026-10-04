@@ -26,7 +26,11 @@ KV representations are `bf16`, `int8`, `fp8`, `rk8v4`, `rk4v4`, `nvfp4`, and `k8
 unquantized (BF16) in a second pool and attention merges an exact tail partial with the quantized
 body. `N` defaults to 0 (off, no memory cost). The tail costs a fixed amount per sequence
 independent of context length, so the quality it buys is measured by scoring the same artifact and
-corpus twice, at `--kv-tail-tokens 0` and at the chosen `N`, and comparing the perplexity.
+corpus twice, at `--kv-tail-tokens 0` and at the chosen `N`, and comparing the perplexity. The merge
+is implemented for the storages whose decoded key plane is in original coordinates — `bf16` and the
+INT8 family (`int8`, `rk8v4`, `rk4v4`, `rk4v4-e8`, `rk2v4-e8`); the rotated-value formats `fp8`,
+`nvfp4` and `k8v4` allocate the pool but no attention route reads or writes it, so the tail is inert
+there and a tail-on run of those bytes is identical to tail-off.
 
 All seven have been measured on this corpus; the results, alongside each format's size and decode
 speed, are in [`docs/config-calculator.html`](config-calculator.html).

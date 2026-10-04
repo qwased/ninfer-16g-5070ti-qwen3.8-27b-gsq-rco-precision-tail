@@ -1221,7 +1221,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--response-store-max-records N` | maximum locally retained Responses objects | `1024` |
 | `--response-store-max-mib N` | total local Response envelope/Item/context budget | `256` |
 | `--kv-dtype bf16\|int8\|fp8\|rk8v4\|rk4v4\|rk4v4-e8\|nvfp4\|k8v4` | KV-cache storage. `rk8v4` is opt-in RotorQuant, `rk4v4` opt-in Lloyd-Max 4-bit keys and `rk4v4-e8` opt-in E8-lattice INT4 keys; all eight are accepted on this fork's sm_86/sm_89 targets | `bf16` |
-| `--kv-tail-tokens N` | keep the newest `N` tokens of each sequence unquantized in a device-only exact KV pool that attention merges with the quantized body; `0` disables the tail | `0` |
+| `--kv-tail-tokens N` | keep the newest `N` tokens of each sequence unquantized in a device-only exact KV pool that attention merges with the quantized body; `0` disables the tail; merged for `bf16` and the INT8 family (`int8`, `rk8v4`, `rk4v4`, `rk4v4-e8`, `rk2v4-e8`) only, and allocated-but-inert for `fp8`, `nvfp4`, `k8v4` | `0` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | `1..15` for MTP, DFlash and DFlash2 | unset |
 | `--lm-head-draft` | optimized proposal head | off |
