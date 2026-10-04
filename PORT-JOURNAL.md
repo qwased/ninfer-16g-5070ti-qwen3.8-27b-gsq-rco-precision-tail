@@ -937,3 +937,28 @@ instrument for the INT8 failures and it is the agent's work, so this session doe
 duplicate it. **Gap to note:** the model returns `cap` unchanged for `batch > 1` with `# not analysed
 here`, so the batched BF16 ring mismatch (Symptom B) is *outside* the model's coverage -- whichever
 session finishes this must root-cause the batched `cache-k/v` mismatch (`index 197376`) separately.
+
+## Step 27i - batched ring mismatch root-caused (test fixture models one ring, kernel addresses `batch`)
+
+Symptom B (`causal_softmax_attention batch ... B=2 W=8 valid={6,0} tail=2` →
+`cache-k/v: exact mismatch at index 197376`) is a **fixture/oracle-vs-kernel addressing mismatch**, not
+an attention bug:
+
+- The kernel (`small_t_tail_shadow.cuh:48`, and the tail read `small_t_tail.cuh:224-227`) addresses
+  `physical_page = batch * ring_pages + ((position >> 6) % ring_pages)`, where `ring_pages =
+  cache.tail.page_count`. So it needs a pool of `batch * ring_pages` pages.
+- The fixture exposes **one** ring: `tail_ring_elements = kHeadDim * 64 * kv_heads * page_count`
+  (`causal_cache.cpp:391-394`), the batched buffers are allocated at that size with no `* batch`
+  (`:2125-2126`), `view()` sets the tensor's page extent to `tail_page_count_` (`:2170-2177`), and the
+  oracle's own index helper `tail_ring_index` has **no batch term** (`ring = (position/64) %
+  page_count`, `:396-405`).
+- Therefore, for any `batch > 1`, sequence 1's shadow write targets pages
+  `[ring_pages, 2*ring_pages)` -- outside the allocated/viewed tensor -- and the oracle cannot
+  represent it. The shipped product is consistent (the pool is per-sequence, sized by
+  `max_concurrency`); the **fixture** is what is wrong.
+
+Fix (test side): size the batched tail buffers and the `tail.k_pages`/`v_pages` page extent as
+`rows_ * tail_page_count_` while keeping `tail.page_count = tail_page_count_` (pages per ring, which
+the kernel uses both for the modulo and as the per-sequence stride), and give the oracle a
+`(head, position, d, sequence)` index that adds the `sequence * page_count` page term. Confirm the
+mismatch index's unit while doing so. This is independent of the INT8 work the subagent is doing.
