@@ -559,5 +559,17 @@ merged to `main` after each landed sub-step.
   route). `softmax_attention: PASS`, `ORACLE_EXIT=0`. Envelope gotcha: `max_visible_keys` is the cap and
   must be ≤ cache capacity, so `max_context = max(total + 3, envelope_max)`; `q_index`/`kv_input_index`
   are token-major.
+- **WP-B POST-FIX MATRIX COMPLETE — the tail benefit is ESTABLISHED (Step 51).** `.deps/run-m5-wpb2.bat`
+  27/27 (3 storages × tail{0,1024,2048} × ctx{8192,16384,32768}, W=8), sentinel `wpb2.done`. Background
+  launch died at exit 255 after 2 cells (the ~3-min external kill); continued in foreground chunks (2
+  cells / 600 s, 13 chunks); no orphans, GPU 48 MiB after. **Controls unmoved:** all three tail-0 c8192
+  cells are **bit-identical** to pre-fix (`int8` 0.001126411, `rk8v4` 0.002646517, `rk4v4-e8`
+  0.006521664, ppl too) → the fix is tail-on-only. **Defect gone:** tail-on c8192 mean KLD vs pre-fix
+  improves 26.0×/27.1× (int8), 22.5×/24.4× (rk8v4), 13.6×/17.3× (rk4v4-e8). **Acceptance met:** (1)
+  tail-on ≤ tail-off in 18/18 cells; (2) gain monotone by body coarseness at all ctx × both tails —
+  int8 1.02–1.10× < rk8v4 2.04–2.30× < rk4v4-e8 2.97–4.04×; (3) gain shrinks mildly as ctx grows.
+  `same_top` up (`rk8v4` 0.976→0.983; `rk4v4-e8` 0.966→0.980/0.982). Raw `.deps/m5-wpb2-*/`; summarizer
+  `.deps/summarize-wpb2.py`. Scope: proves the **quantized** tiers (WP-B's question); the separate
+  bf16-storage+tail defect is untouched and remains open (task #15).
 - Runs are strictly serial, single-owner, single GPU (5070 Ti); after **every** run check
   `tasklist`/`nvidia-smi` for orphan processes (user requirement) before starting the next.

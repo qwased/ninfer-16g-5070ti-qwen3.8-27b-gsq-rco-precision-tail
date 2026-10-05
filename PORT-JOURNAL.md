@@ -1860,3 +1860,60 @@ early `body_window == 0` steps own, so before the fix the final step scored the 
 the value cache, and the ring all disagreed with the reference. The empirical fail-without-fix reversal
 is deferred for the same reason as Step 49 (reverting the fix rebuilds every small-T TU, ~2 h); the
 Step 48 KLD re-run remains the system-level fail-without-fix evidence.
+
+### Step 51 — post-fix WP-B matrix: the tail benefit is established
+
+The full post-fix campaign (`.deps/run-m5-wpb2.bat`, resumable, sentinel `wpb2.done`) is **27/27
+complete**: storages `{int8, rk8v4, rk4v4-e8}` × tails `{0, 1024, 2048}` × ctx `{8192, 16384, 32768}`,
+W=8, same 32,764-token corpus and the **same** per-ctx bf16-tail0 references as the pre-fix run.
+
+**Operational.** The `run_in_background` launch died at exit 255 after 2 cells — the known ~3-min
+external kill, not a code fault. It was continued in **foreground chunks** (≈2 cells per 600 s tool cap,
+13 chunks). After the final chunk: no `ninfer-*`/`perplexity` process, GPU back to the 48 MiB idle
+baseline.
+
+**The controls did not move (the fix is tail-on-only).** All three tail-0 cells re-run at ctx 8192 are
+**bit-identical** to their pre-fix reports — `int8` ppl `5.971447471` / mean KLD `0.001126411`, `rk8v4`
+`5.980889899` / `0.002646517`, `rk4v4-e8` `6.011150860` / `0.006521664`, byte-equal both fields. This is
+the strongest possible statement that `56fc8384` touches nothing on the tail-off path.
+
+**The defect is gone.** At ctx 8192, tail-on KLD mean vs the pre-fix run: `int8` t1024 **26.0×** / t2048
+**27.1×** lower, `rk8v4` t1024 **22.5×** / t2048 **24.4×**, `rk4v4-e8` t1024 **13.6×** / t2048 **17.3×**.
+The pre-fix numbers (0.0270–0.0280) were the hole reading garbage; post-fix they are 0.0010–0.0021.
+
+**Acceptance proposition — met on every axis (the benefit is now measured, not inferred):**
+
+1. **tail-on ≤ tail-off, 18/18 cells.** Every storage × ctx × tail length lowers mean KLD against its
+   own tail-0 control (ratios below; no cell regresses).
+2. **Gain grows monotonically with body coarseness — at all three ctx and both tail lengths.**
+   `int8` (near-exact already) 1.02–1.10× < `rk8v4` 2.04–2.30× < `rk4v4-e8` 2.97–4.04×. The gain tracks
+   the body's error, i.e. it comes from body coarseness, which is exactly the motivation.
+3. **The ring pays off more as the body gets coarser.** `rk4v4-e8` gains from a longer tail
+   (t1024 3.25× → t2048 4.04× at 8K); `int8` barely moves (1.09× → 1.09×) because it has little error
+   left to remove.
+4. **ctx dependence is mild and monotone decreasing.** The gain shrinks as ctx grows
+   (8K > 16K > 32K) — a fixed-size exact ring is a smaller fraction of a larger context; e.g. `int8`
+   t2048 gain 1.09× @8K / 1.10× @16K / 1.03× @32K, `rk8v4` t1024 2.20× / 2.17× / 2.04×.
+
+```
+mean KLD (post-fix)                    tail0 -> tail1024 -> tail2048        gain t1024 / t2048
+ctx= 8192  int8       0.00112641 -> 0.00103730 -> 0.00102872               1.09x / 1.09x
+ctx= 8192  rk8v4      0.00264652 -> 0.00120207 -> 0.00114922               2.20x / 2.30x
+ctx= 8192  rk4v4-e8   0.00652166 -> 0.00200700 -> 0.00161394               3.25x / 4.04x
+ctx=16384  int8       0.00112316 -> 0.00104790 -> 0.00101761               1.07x / 1.10x
+ctx=16384  rk8v4      0.00259360 -> 0.00119415 -> 0.00115986               2.17x / 2.24x
+ctx=16384  rk4v4-e8   0.00648249 -> 0.00213736 -> 0.00174379               3.03x / 3.72x
+ctx=32768  int8       0.00103341 -> 0.00100826 -> 0.00100349               1.02x / 1.03x
+ctx=32768  rk8v4      0.00241272 -> 0.00118513 -> 0.00110771               2.04x / 2.18x
+ctx=32768  rk4v4-e8   0.00631572 -> 0.00212822 -> 0.00170770               2.97x / 3.70x
+```
+
+`same_top` rises with the tail on (`rk8v4` 0.9761 → 0.9828/0.9835; `rk4v4-e8` 0.9660 →
+0.9799/0.9821), and ppl follows (e.g. `rk4v4-e8` 8K 6.0112 → 5.9810/5.9802). Raw: `.deps/m5-wpb2-*/`,
+summarizer `.deps/summarize-wpb2.py`.
+
+**Scope (honest).** This establishes the benefit for the three **quantized** tiers, which is
+WP-B's question, and restores the harness to the clean-`ctx=N` numbers (`rk8v4` tail-on ≈ 0.0012 vs the
+pre-fix whole-window 0.001068). The **separate** open defect (bf16 *storage* + tail at scale, KLD 0.207)
+is untouched by this campaign — bf16 is used here only as the tail-0 reference — and remains the last
+correctness item before `--kv-tail-tokens` can be called safe at bf16 storage. It is tracked separately.

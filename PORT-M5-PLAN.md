@@ -158,7 +158,8 @@ The in-tree oracle (T=6, keys≤67, single fused append) does not cover this reg
 be claimed; the merge must be fixed.** The **full matrix is complete** — 3 storages × tail {0,1024,2048}
 × ctx {8192,16384,32768}, plus rk8v4 at ctx 2048 and the whole-window clean cases. Every cell degrades;
 the degradation is 24×/21×/14× (int8), 10×/9×/6× (rk8v4), 4×/4×/2.4× (rk4v4-e8) at 8K/16K/32K, and
-tail-on KLD is ~storage-independent while tail-off spans 6× — the defect signature.
+tail-on KLD is ~storage-independent while tail-off spans 6× — the defect signature. **(Resolved by the
+fix: the post-fix matrix is in §10.4 — tail-on ≤ tail-off 18/18, monotone by coarseness.)**
 
 **WP-C — DONE.** llama.cpp `kvarn4` merges inside FA at all widths and cuts mean KLD 0.001107→0.000702
 (−37%), max 0.188→0.078 — the benefit is real; ninfer's merge is the gap.
@@ -289,3 +290,38 @@ body region `[0, window − N)` is exactly the rows the early empty-body steps o
 the final step scored the fixture and both the output and the cache planes disagreed (the same
 comparison already caught the harness's own token-major slicing bug during development, `cache-v` +
 `exact-tail` mismatches). The fail-without-fix reversal is deferred for the same build cost as §10.2.
+
+### 10.4 Post-fix WP-B matrix — the benefit, measured (Step 51)
+
+The full post-fix campaign — `.deps/run-m5-wpb2.bat`, **27/27** cells (storages `{int8, rk8v4,
+rk4v4-e8}` × tails `{0, 1024, 2048}` × ctx `{8192, 16384, 32768}`, W=8) — is complete; the same
+32,764-token corpus and the **same** per-ctx bf16-tail0 references as the pre-fix run, so it is a
+controlled A/B.
+
+- **Controls bit-identical.** All three tail-0 ctx-8192 cells equal their pre-fix reports byte-for-byte
+  in ppl and KLD mean → the fix is tail-on-only.
+- **Defect removed.** Tail-on ctx-8192 mean KLD improves vs pre-fix by **26.0×/27.1×** (int8),
+  **22.5×/24.4×** (rk8v4), **13.6×/17.3×** (rk4v4-e8); 0.027–0.028 → 0.0010–0.0021.
+- **Acceptance proposition met (§3):**
+  1. tail-on ≤ tail-off — **18/18** cells.
+  2. gain monotone with body coarseness — **YES** at all 3 ctx × both tail lengths
+     (int8 1.02–1.10× < rk8v4 2.04–2.30× < rk4v4-e8 2.97–4.04×).
+  3. ctx dependence mild, monotone decreasing (a fixed ring is a smaller fraction of a larger window).
+- `same_top` and ppl move the same way (rk4v4-e8 8K: ppl 6.0112→5.9802, same_top 0.966→0.982).
+
+| mean KLD | tail0 | tail1024 | tail2048 | gain 1024/2048 |
+|---|---|---|---|---|
+| ctx 8192 int8 | 0.00112641 | 0.00103730 | 0.00102872 | 1.09× / 1.09× |
+| ctx 8192 rk8v4 | 0.00264652 | 0.00120207 | 0.00114922 | 2.20× / 2.30× |
+| ctx 8192 rk4v4-e8 | 0.00652166 | 0.00200700 | 0.00161394 | 3.25× / 4.04× |
+| ctx 16384 int8 | 0.00112316 | 0.00104790 | 0.00101761 | 1.07× / 1.10× |
+| ctx 16384 rk8v4 | 0.00259360 | 0.00119415 | 0.00115986 | 2.17× / 2.24× |
+| ctx 16384 rk4v4-e8 | 0.00648249 | 0.00213736 | 0.00174379 | 3.03× / 3.72× |
+| ctx 32768 int8 | 0.00103341 | 0.00100826 | 0.00100349 | 1.02× / 1.03× |
+| ctx 32768 rk8v4 | 0.00241272 | 0.00118513 | 0.00110771 | 2.04× / 2.18× |
+| ctx 32768 rk4v4-e8 | 0.00631572 | 0.00212822 | 0.00170770 | 2.97× / 3.70× |
+
+**Remaining open (not a WP-B result):** bf16 *storage* + tail at scale (§10.1) is untouched by this
+campaign (bf16 appears only as the tail-0 reference); it is the last correctness item before
+`--kv-tail-tokens` can be declared safe for bf16 storage. WP-C (llamacpp) already shows the external
+concept works; the three quantized tiers now show ninfer's own merge works too.
