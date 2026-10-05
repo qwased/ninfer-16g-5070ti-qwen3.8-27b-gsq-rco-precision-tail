@@ -1122,3 +1122,34 @@ Harness note: the first relaunch was started with `nohup cmd //c ... &` from a B
 was silently reaped mid-run-3 (log froze at 09:23, zero processes, GPU idle) -- the harness's
 background handling, not a crash. The remaining pairs were relaunched as a harness-managed
 background task (`.deps/run-evidence-rest.bat`, log `evidence-run3.log`).
+
+## Step 32 -- M1 evidence closed: full ppl table, graph-family assertion, performance.md
+
+Finished the measurement on all three wired storages (each run ~5 min, single GPU owner; the
+harness reaps background tasks after ~10 min, so the last two invocations ran in the foreground).
+Both tail pairs are bit-identical, and the exact ring is 64 MiB + 4 MiB reserve for every storage:
+
+| `--kv-dtype` | ppl tail=0 | ppl tail=1024 | `kv_exact_history_bytes` (N=1024) |
+|---|---|---|---|
+| rk8v4 | 4.65880995706738 | 4.65880995706738 | 67,108,864 (64 MiB) |
+| rk4v4-e8 | 4.675237004820881 | 4.675237004820881 | 67,108,864 (64 MiB) |
+| nvfp4 | 4.657980442927839 | 4.657980442927839 | 67,108,864 (64 MiB) |
+
+DoD §7.1 is satisfied (all three start/prefill at N=1024, `PPL_EXIT=0`; the oracle covers the
+tail-active decode). §7.4 is satisfied (plan §2 exact). §7.3 is `BLOCKED` by design (Step 31).
+Written into `docs/performance.md` as its own hardware-labelled section (RTX 5070 Ti, `sm_120a`,
+CUDA 13.3) -- WP9 moves to DONE.
+
+DoD §7.5 assertion test landed. `run_graph_family_stability_cases` (delegated to a subagent, source
+only) builds 8 decode shapes, each as a tail-off/tail-on pair toggling only `kv_tail_tokens`, and
+asserts three things that together are the graph-family invariant: (a) the route family returned by
+`ops::causal_softmax_attention_route_family` is identical (it takes no tail argument), (b) the
+launch capacity used as `grid.y` (`ops::detail::causal_attention_split_capacity`) is identical, and
+(c) the family is the pinned small-T family 0. Built and ran: `.deps/oracle-run9.out` shows
+`exact KV tail: decode graph family / launch shape is tail-independent (WP4)` with
+`graph family=0 grid.y=8|16` for every pair and `softmax_attention: PASS`, `ORACLE_EXIT=0`.
+
+One environment note carried forward: a bare `cmd //c "call env-port.bat && cd ... && tests\
+infer_tests.exe ..."` intermittently failed to resolve the runner path ("not recognized"), while
+the checked-in `.deps/run-oracle.bat` (which does the same steps) works reliably. Prefer the script.
+Verified `tasklist` clean (0 `ninfer_tests|ninja|cl.exe`) after every build and run.

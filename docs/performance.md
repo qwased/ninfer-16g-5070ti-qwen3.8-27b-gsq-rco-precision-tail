@@ -519,3 +519,42 @@ and [Qwen3.8 DFlash2 outcomes](performance/qwen3.8-27b.md#dflash2-completion-out
 
 Model pages are the detailed result authority. README and model-card performance tables are
 excerpts linked to those pages; update them together when replacing an applicable measurement.
+
+## KV precision tail (`--kv-tail-tokens`) — RTX 5070 Ti, `sm_120a`, CUDA 13.3
+
+Measured 2026-10-05 on the `ninfer-precision-tail` port. Hardware: RTX 5070 Ti 16 GB, `sm_120a`,
+CUDA 13.3. Artifact: `Qwen3.8-27B-GSQ-RCO-IQ3_XXS-vision-bf16-mtp`. Corpus: `ninfer-ppl-1m-v1 /
+quick`, 261,223 scored tokens, context 4096, stride 2048. Runner: `.deps/run-evidence.bat`
+(single GPU owner). These numbers characterise **this port**, not the upstream/sm_86 tables above.
+
+### Memory (`MemorySummary`, C=1)
+
+| `--kv-dtype` | N | `kv_exact_history_bytes` | `kv_rollback_reserve_bytes` | `kv_payload_bytes` | `runtime_reservation_bytes` |
+|---|---|---|---|---|---|
+| rk8v4 | 0 | 0 | 0 | 106,954,752 | 1,818,071,808 |
+| rk8v4 | 1024 | 67,108,864 (64 MiB) | 4,194,304 (4 MiB) | 178,257,920 | 1,889,374,976 |
+| rk4v4-e8 | 1024 | 67,108,864 (64 MiB) | 4,194,304 (4 MiB) | 144,703,488 | 1,855,820,544 |
+| nvfp4 | 1024 | 67,108,864 (64 MiB) | 4,194,304 (4 MiB) | 146,800,640 | 1,857,917,696 |
+
+The exact ring is exactly the plan §2 figure (`round_up(N,64) × 65,536 × C` = 64 MiB at N=1024,
+C=1, 0% error); `runtime_reservation_bytes` grows by exactly 68 MiB (64 exact + 4 reserve). The
+rollback reserve is the single-page `R` from the WP5 sizing.
+
+### Perplexity is invariant to the tail here — and why
+
+`apps/perplexity` scores the **prefill phase** (`apps/perplexity/main.cpp:94-97`) in fixed 1024-wide
+query tiles, which resolve to the **prompt** attention route. By design (plan §1.5) the prompt route
+only *writes* the cache; the exact tail is merged only on the small-T **decode** route (width ≤ 8).
+The scored pass therefore never reads the ring:
+
+| `--kv-dtype` | ppl (tail 0) | ppl (tail 1024) |
+|---|---|---|
+| rk8v4 | 4.65880995706738 | 4.65880995706738 |
+| rk4v4-e8 | 4.675237004820881 | 4.675237004820881 |
+| nvfp4 | 4.657980442927839 | 4.657980442927839 |
+
+Bit-identical, as expected — the tail is not a defect, it is simply outside this harness's route.
+The tail's quality effect is exercised by the FP32 oracle
+(`tests/ops/softmax_attention/causal_cache.cpp`, `ninfer_softmax_attention_test`), which drives the
+small-T decode route with the ring on; its memory footprint is the table above. A decode-width
+scoring mode would be needed to show a ppl delta.

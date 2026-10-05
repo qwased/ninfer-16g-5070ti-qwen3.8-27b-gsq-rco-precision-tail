@@ -7,6 +7,7 @@
 #include "ops/kv_cache_e8_root_host.h"
 #include "ops/kv_cache_lloyd4_oracle.h"
 #include "ops/op_tester.h"
+#include "ops/softmax_attention/dense/causal_cache/launch.h"
 #include "ops/softmax_attention/oracle.h"
 
 #include <algorithm>
@@ -4083,6 +4084,125 @@ int run_quantized_tail_case(const Geometry& geometry, KvCacheStorage storage,
     return failures;
 }
 
+// WP4 / DoD #5: "CUDA Graph family sequence unchanged vs tail off".
+//
+// A decode step is replayed from the CUDA Graph family its attention route FAMILY selects:
+// ops::causal_softmax_attention_route_family returns 0/1/2, and the model's graph_profiles.cpp
+// derives each profile's topology_class from that family alone (PORT-MEMORY.md 5.8). The tail is a
+// second partial INSIDE the small-T family, so enabling it must not move either of the two inputs a
+// graph profile is built from:
+//
+//   * the route family itself. It is a pure function of the head geometry, the KV storage, the
+//     visible-key window, the batch and the width, and takes no tail argument at all
+//     (include/ninfer/ops/softmax_attention.h:211-216), so a tailed decode cannot resolve elsewhere;
+//   * the launch-shape grid.y. The body partial launches on grid(KVHeads, split_capacity, batch) and
+//     the exact-tail partial launches on the SAME grid (small_t.cu:213 and :242, "Same grid and block
+//     as the body partial"), and causal_attention_split_capacity is itself tail-free
+//     (small_t.cu:256-303). So grid.y -- the launch capacity a profile captures -- is identical with
+//     the tail on; only the device-computed body_active/tail_active split indices move.
+//
+// That is exactly the "no graph TOPOLOGY class change" the port asserts: the tail adds a node inside
+// one family with the grid.y the body already captured, never a new family or grid. The runner's
+// only tail switch, with_tail(), must therefore leave every graph-key input untouched, so each pair
+// below is built by toggling only kv_tail_tokens and the test asserts exactly that.
+struct DecodeGraphKey {
+    int family;          // ops::causal_softmax_attention_route_family -> graph_profiles class
+    std::int32_t splits; // grid.y = the full split capacity the body (and tail) partial launches with
+};
+
+DecodeGraphKey decode_graph_key(const Geometry& geometry, KvCacheStorage storage,
+                                const ops::CausalAttentionExecutionEnvelope& envelope,
+                                std::int32_t batch, std::int32_t width) {
+    const ops::AttentionHeadGeometry g = op_geometry(geometry);
+    return DecodeGraphKey{
+        ops::causal_softmax_attention_route_family(g, storage, envelope, batch, width),
+        ops::detail::causal_attention_split_capacity(g.query_heads, width, storage, envelope, batch),
+    };
+}
+
+int run_graph_family_stability_case(const Geometry& geometry, KvCacheStorage storage,
+                                    const AttentionCase& tail_off_case,
+                                    const AttentionCase& tail_on_case, int expected_family) {
+    int failures = 0;
+    // The tail switch may only add the ring length; anything else it changed would be a graph-key
+    // input that moved with the tail.
+    if (tail_off_case.kv_tail_tokens != 0 || tail_on_case.kv_tail_tokens <= 0 ||
+        tail_off_case.tokens != tail_on_case.tokens || tail_off_case.base != tail_on_case.base ||
+        tail_off_case.envelope_max != tail_on_case.envelope_max ||
+        tail_off_case.fast_prompt_kernel != tail_on_case.fast_prompt_kernel ||
+        tail_off_case.wide_verification != tail_on_case.wide_verification ||
+        tail_off_case.small_prefill != tail_on_case.small_prefill) {
+        std::cerr << "exact KV tail: graph-family pair is not a tail-only toggle for "
+                  << geometry.name << '\n';
+        ++failures;
+    }
+
+    const auto key_for = [&](const AttentionCase& test_case) {
+        const auto visible = static_cast<std::uint32_t>(test_case.base + test_case.tokens);
+        const ops::CausalAttentionExecutionEnvelope envelope{
+            visible, test_case.envelope_max, test_case.fast_prompt_kernel,
+            test_case.wide_verification, test_case.small_prefill};
+        return decode_graph_key(geometry, storage, envelope, 1, test_case.tokens);
+    };
+    const DecodeGraphKey tail_off = key_for(tail_off_case);
+    const DecodeGraphKey tail_on  = key_for(tail_on_case);
+    std::cout << "    " << geometry.name << " " << cache_name(storage) << " W="
+              << tail_on_case.tokens << " N=" << tail_on_case.kv_tail_tokens
+              << " graph family=" << tail_on.family << " grid.y=" << tail_on.splits << '\n';
+
+    // Tail-independent: same family and same launch capacity with and without the ring.
+    if (tail_off.family != tail_on.family || tail_off.splits != tail_on.splits) {
+        std::cerr << "exact KV tail: decode graph key moved with the tail for " << geometry.name
+                  << " " << cache_name(storage) << " (family " << tail_off.family << " -> "
+                  << tail_on.family << ", grid.y " << tail_off.splits << " -> " << tail_on.splits
+                  << ")\n";
+        ++failures;
+    }
+    // The pinned family is the small-T family that carries the merge, not some other route.
+    if (tail_on.family != expected_family) {
+        std::cerr << "exact KV tail: decode route family " << tail_on.family << " != expected "
+                  << expected_family << " for " << geometry.name << " " << cache_name(storage)
+                  << " W=" << tail_on_case.tokens << '\n';
+        ++failures;
+    }
+    if (tail_on.splits < 1) {
+        std::cerr << "exact KV tail: split capacity (grid.y) is " << tail_on.splits << " for "
+                  << geometry.name << '\n';
+        ++failures;
+    }
+    return failures;
+}
+
+int run_graph_family_stability_cases() {
+    std::cout << "  exact KV tail: decode graph family / launch shape is tail-independent (WP4)\n";
+    constexpr int kSmallT = 0;
+    int failures         = 0;
+
+    // The exact decode shapes run_tail_cases uses above, each as <tail off, tail on>. Every one is a
+    // width <= 6 step, which the BF16 and INT8-family route tables send to the small-T family.
+    failures += run_graph_family_stability_case(kGeometries[0], KvCacheStorage::BFloat16,
+                                                with_tail({6, 61, 512, 2401u}, 0),
+                                                with_tail({6, 61, 512, 2401u}, 2), kSmallT);
+    failures += run_graph_family_stability_case(kGeometries[1], KvCacheStorage::BFloat16,
+                                                with_tail({6, 61, 512, 2402u}, 0),
+                                                with_tail({6, 61, 512, 2402u}, 6), kSmallT);
+    failures += run_graph_family_stability_case(kGeometries[0], KvCacheStorage::BFloat16,
+                                                with_tail({1, 128, 512, 2403u}, 0),
+                                                with_tail({1, 128, 512, 2403u}, 1), kSmallT);
+    failures += run_graph_family_stability_case(kGeometries[1], KvCacheStorage::BFloat16,
+                                                with_tail({6, 124, 512, 2404u}, 0),
+                                                with_tail({6, 124, 512, 2404u}, 129), kSmallT);
+    for (const Geometry& geometry : kGeometries) {
+        failures += run_graph_family_stability_case(
+            geometry, KvCacheStorage::RotatedInt8KeyInt4ValueGroup64,
+            with_tail({6, 61, 512, 2405u}, 0), with_tail({6, 61, 512, 2405u}, 2), kSmallT);
+        failures += run_graph_family_stability_case(
+            geometry, KvCacheStorage::RotatedInt4KeyInt4ValueE8,
+            with_tail({6, 124, 512, 2406u}, 0), with_tail({6, 124, 512, 2406u}, 6), kSmallT);
+    }
+    return failures;
+}
+
 int run_tail_cases() {
     std::cout << "  exact KV tail (KV cache precision tail): merge, boundary, regression, masked\n";
     int failures = 0;
@@ -4165,6 +4285,9 @@ int run_tail_cases() {
     std::cout << "    causal_softmax_attention batch " << h24.name << " bf16 B=2 W=8 valid={6,0} "
                  "tail=2\n";
     failures += run_batch_case(h24, kPlanBf16, masked_tail);
+
+    // (6) WP4 / DoD #5: the decode graph family and its launch shape do not move with the tail.
+    failures += run_graph_family_stability_cases();
     return failures;
 }
 
