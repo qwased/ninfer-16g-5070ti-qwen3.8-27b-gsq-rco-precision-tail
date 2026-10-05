@@ -52,8 +52,11 @@ know why — empirically, not by inference:
   (`causal_attention_prompt_attention_launch`) **never references `cache.tail`**.
 - Trap: BF16 body with ≤128 visible keys still resolves to `Prompt` (`:366-367`) → the first ~128 keys
   of a window skip the tail. INT8-family/rk8v4 have prompt-limit 0, so no such gap. Document it.
+- **Empirical (Step 40, run):** ctx=N=1024 rk8v4, W=8 tail=0 ppl 6.496148968946205 vs tail=1024
+  6.464422630715829 → W=8 is still small-T. This model has **24 query heads**, so the small-T width
+  ceiling is **W=8**, and W=8 is the cheapest valid decode width for WP-B.
 
-### A3 KLD
+### A3 KLD — **WIP: implemented (`3037bb98`), awaiting the self-consistency run**
 - Today `ScoreAggregate::add(std::span<const float>)` gets the **target-token logprob only**
   (`program_impl.cpp:661-676`, via `ops::target_logprobs`, `target_logprobs.h:44`). But the full
   `[vocab,C]` BF16 logits are **already materialized on device** before the reduction → top-k is reachable.

@@ -1382,3 +1382,37 @@ Per run: ~39 s wall including the ~5 s load. Harness: `.deps/run-m5-a4b.bat <fmt
 typo was `CreateFileW: Win32 error 3` at artifact inspect. Fixed in the new scripts.
 
 **WP-A4 is DONE.** WP-A3 (KLD) is unblocked; the width<=8 instrument is proven.
+
+## Step 40 — M5/WP-A3: the KLD top-K instrument (landed, unverified)
+
+Delegated to a general-purpose subagent, which produced the whole change but hit its **150-turn cap**
+before committing or validating (a known failure mode: it kept iterating on a host test). The 22-file,
+~1300-line edit was **parked as a WIP** so it could not be lost, then rebased onto `main` and
+fast-forward-merged as `3037bb98`.
+
+**What the subagent built** (design reviewed by the main agent):
+- Public API (`include/ninfer/types.h`): `ScoreTopKEntry {token, logprob}`, `ScoredTarget {logprob,
+  topk}`, `kMaxScoreTopK = 128`, and `EngineOptions::score_topk` (default 0 = old behavior).
+  `Engine::score_tokens` now returns `std::vector<ScoredTarget>` (`engine.h`); the KLD/top-K
+  normalization contract is documented in the header (an entry's `logprob` and the target `logprob`
+  come from the same per-column log-softmax, so a shared token has the identical float).
+- Device side: top-K selection folded into the existing `target_logprobs` op
+  (`src/ops/kernel/target_logprobs.cuh`, launcher/wrapper), driven from `ProgramImpl::causal_score`.
+- App side (`apps/perplexity`): `--score-topk K` (device selection width), `--save-topk <path>`
+  (persist the reference per-target top-K) and `--kld-base <path>` (load a reference and report KLD).
+- KLD math (`apps/perplexity/evaluation.cpp`): support = **union of both top-K sets plus the target
+  token**, deduplicated; each side renormalized over the support; `KLD = Σ p·(ln p − ln q)`;
+  `Same-top%` = fraction of targets whose argmax matches. Percentiles computed from a sorted vector.
+
+**Verification done here (not by the failed subagent):**
+- Per-TU compile of all 8 touched TUs + the new kernel TU: **clean** (`DONE`, no SYNTAXFAIL/MISSING).
+- Design/semantics read by the main agent; the normalization contract and the union-support choice
+  are explicit.
+- **Not yet verified by run.** The decisive self-consistency check is next: score a reference against
+  **itself** (`--save-topk ref` then `--kld-base ref`) and require KLD ≈ 0 and Same-top% = 100 — the
+  KLD analogue of the A4 gate. Then, and only then, is the instrument trusted for WP-B.
+
+**Width finding (needed for WP-B, from A4 runs):** at ctx=N=1024, rk8v4:
+W=8 tail=0 6.496148968946205 vs tail=1024 6.464422630715829 → **W=8 is still small-T**, so this model
+has 24 query heads and **W=8 is the cheapest valid decode width** (8× fewer steps than W=1). WP-B will
+score at W=8 to bound cost (plan risk R-B).
