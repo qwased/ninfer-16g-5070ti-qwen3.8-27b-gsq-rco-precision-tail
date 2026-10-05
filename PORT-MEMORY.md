@@ -537,5 +537,15 @@ merged to `main` after each landed sub-step.
   split-order price, an improvement). **Still open:** `bf16` storage + tail is broken at scale for a
   *separate* reason (whole-window vs `bf16 tail0` = 0.207; not the hole, not the ring element type) --
   a second open defect, not a regression. `apps/perplexity` gained `--kv-tail-type bf16|f16`.
+- **Unit guard (Step 49).** The invariant "the quantized body cache holds `[0, window)` after an
+  empty-body fused step" is now a unit case, `run_fused_empty_body_append_case` in
+  `tests/ops/softmax_attention/causal_cache.cpp`. It reuses `run_a1_case` but drops the harness's
+  ring-priming `ops::kv_cache_append` (`prime_tail_body = false`), so the fused append is the *only*
+  writer of the six rows; `base=0, tokens=6, N=64` makes `body_window == 0`, and the case rides the
+  existing `verify_cache` device-plane-vs-host-fixture comparison. Wired over both geometries ×
+  `{bf16, rk8v4}` fragmented (four `TOPTEST fused-append empty-body cache write` lines). `ninfer_tests`
+  links and the full FP32 oracle re-runs green (`ORACLE_EXIT=0`, `softmax_attention: PASS`, `N=0` bit
+  parity included). The fail-without-fix reversal was deferred (reverting `small_t.cuh` costs a full
+  small-T rebuild ~2 h); Step 48's KLD re-run is the system-level fail-without-fix evidence.
 - Runs are strictly serial, single-owner, single GPU (5070 Ti); after **every** run check
   `tasklist`/`nvidia-smi` for orphan processes (user requirement) before starting the next.

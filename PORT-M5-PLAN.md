@@ -251,3 +251,18 @@ improvement). **One separate defect remains:** `bf16` storage + tail is broken a
 this hole and of the ring element type (whole-window vs `bf16 tail0` = 0.207) — tracked as a new open
 item, not a regression. `apps/perplexity` now exposes `--kv-tail-type bf16|f16`. See `PORT-JOURNAL.md`
 Step 48 for the raw numbers.
+
+### 10.2 Unit guard (Step 49)
+
+The plan's third verification bullet — the direct invariant check that the quantized body cache holds
+`[0, window)` after an empty-body fused step — landed as `run_fused_empty_body_append_case` in
+`tests/ops/softmax_attention/causal_cache.cpp`. It runs `run_a1_case` with the harness's ring-priming
+`ops::kv_cache_append` *dropped* (`prime_tail_body = false`), so the fused append is the only writer of
+the six rows, and reuses the existing `verify_cache` comparison of the device `k_`/`v_` planes against the
+host fixture. Wired over both geometries × `{bf16, rk8v4}`, fragmented mapping; four
+`TOPTEST fused-append empty-body cache write` lines. `ninfer_tests` links (`BUILD_EXIT=0`) and the full
+oracle re-runs green (`ORACLE_EXIT=0`, `softmax_attention: PASS`) with the new lines present. This
+completes the verification list (touched-TU build, FP32 oracle suite incl. `N=0` bit parity, new case).
+The empirical fail-without-fix reversal was deferred — reverting `small_t.cuh` forces a full small-T
+rebuild (~2 h); the Step 48 KLD re-run already is the system-level fail-without-fix evidence. See
+`PORT-JOURNAL.md` Step 49.

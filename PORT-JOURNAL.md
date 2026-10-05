@@ -1783,3 +1783,38 @@ a diagnostic probe here (the plan's tailed storages are int8/rk8v4/rk4v4-e8) and
 small-window bf16 tail cases pass, so this is recorded as a **second, separate open defect**, not a
 regression from this fix. `apps/perplexity` gained `--kv-tail-type bf16|f16` to make the ring precision
 selectable (used above). Raw reports: `.deps/m5-fix-*`.
+
+### Step 49 — the fix gets a unit guard, and the oracle re-runs green
+
+The Step 48 acceptance was E2E only. The plan's third verification bullet — "a direct invariant check
+that the quantized cache holds `[0, window)` after an empty-body fused step" — now has a unit case in
+`tests/ops/softmax_attention/causal_cache.cpp`: `run_fused_empty_body_append_case`.
+
+**Why the existing tail cases could not see the hole.** `run_a1_case` primes the body with a standalone
+`ops::kv_cache_append` before the fused call whenever a tail is on (it is there to populate the ring),
+and that op shadow-writes exactly the rows the fused append owns — so a missing fused append is masked.
+The new case is the same run with that priming dropped (`prime_tail_body = false`): `base == 0`,
+`tokens == 6`, `N == 64`, so the whole window is inside the exact tail (`body_window == 0`) and nothing
+precedes the step. The fused kernel's own write is then the only one in the body cache, and `run_a1_case`
+already ends by holding the device `k_`/`v_` planes to the host fixture (`verify_cache`: byte-for-byte for
+bf16, code+scale for the int8 family). Before the fix the empty body asked for no split, the append block
+never ran, and every row still held the fixture's un-appended contents; now the append-only split writes
+them and the planes match. Wired over `kGeometries` × `{bf16, rk8v4}` with `MappingPattern::Fragmented`
+(`with_tail({6, 0, 512, 2351u}, 64)`, envelope 512 keeps the small-T route), it prints four
+`TOPTEST fused-append empty-body cache write` lines.
+
+**Build and oracle.** `ninfer_tests` links (`BUILD_EXIT=0`) after three foreground chunks (the small-T
+objects are ~3 TUs/chunk at ~185 s each; the two earlier chunks ended `WRAP_EXIT=124` with only
+`warning #128-D` unreachable-loop notices and `FAILED=<n>`, the external-kill signature — zero real
+diagnostics, no orphan processes left behind). The oracle re-runs green:
+`ORACLE_EXIT=0`, `softmax_attention: PASS`, `packed_softmax_attention: PASS`,
+`context_softmax_attention: PASS`, with all four new TOPTEST lines present. This closes the plan's
+verification list: touched-TU build clean, FP32 oracle suite still PASS (tail-off `N=0` bit parity
+included), and the new invariant case present and passing. GPU returned to the 48 MiB idle baseline.
+
+**Discrimination note (honest).** The case is *structurally* discriminating — with priming off the fused
+append is the only writer, and `verify_cache` compares it — but the empirical fail-without-fix run was
+**not** executed: reverting the fix touches `small_t.cuh`, a header every small-T TU includes, so a
+reversal costs a full ~21-TU rebuild down and again back (~2 h at the observed rate). It is recorded as a
+deferred confirmation, not a gap in the fix (the Step 48 KLD re-run is the fail-without-fix evidence at
+the system level: 0.038912 → 0.000933 with the fix, on the identical protocol).

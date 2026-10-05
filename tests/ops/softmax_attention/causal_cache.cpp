@@ -2795,8 +2795,13 @@ void inject_codec_edges(const Geometry& geometry, std::int32_t tokens, std::vect
     v[kv_input_index(geometry, geometry.kv_heads - 1, 0, tokens - 1)] = 1.0f;
 }
 
+// `prime_tail_body` reproduces the harness's habit of pre-appending this step's rows with a
+// standalone ops::kv_cache_append before the fused entry runs. That call writes exactly the rows the
+// fused-append body owns, so it masks a missing fused append; the empty-body cache-hole case
+// (run_fused_empty_body_append_case) turns it off.
 int run_a1_case(const Geometry& geometry, const CachePlan& plan, const AttentionCase& test_case,
-                MappingPattern mapping, std::vector<std::uint16_t>* captured = nullptr) {
+                MappingPattern mapping, std::vector<std::uint16_t>* captured = nullptr,
+                bool prime_tail_body = true) {
     const std::int32_t total       = test_case.base + test_case.tokens;
     const std::int32_t max_context = static_cast<std::int32_t>(
         std::max<std::uint32_t>(static_cast<std::uint32_t>(total + 3), test_case.envelope_max));
@@ -2853,7 +2858,7 @@ int run_a1_case(const Geometry& geometry, const CachePlan& plan, const Attention
     Tensor tp(dp.data(), DType::I32, {test_case.tokens});
     Tensor ttable_row(dtable_row.data(), DType::I32, {1});
     Tensor tout(dout.data(), DType::BF16, {kHeadDim, geometry.q_heads, test_case.tokens});
-    if (tail_tokens > 0) {
+    if (tail_tokens > 0 && prime_tail_body) {
         // The append Op shadow-writes the ring when the view's tail is enabled; one standalone
         // append populates it (the body is rewritten idempotently, then again by the fused Op).
         ops::kv_cache_append(tk, tv, tp, cache.view(), nullptr);
@@ -4365,6 +4370,32 @@ int run_graph_family_stability_cases() {
     return failures;
 }
 
+// TOPTEST regression for the M5 body+tail cache hole (fixed in 56fc8384). A fused decode step whose
+// *entire* window the exact KV tail covers has window <= N, so the partition gives the body an empty
+// scoring range (body_window == 0) -- but the fused-append body kernel is what quantizes this step's
+// rows into the paged cache, and before the fix the empty body asked for no split at all, so the
+// append block never ran and those rows kept whatever the cache allocation held. A row is only ever
+// written at its own step and the window only grows, so the hole was permanent: once the window
+// passed N the body scored [0, window - N) out of the quantized cache and read garbage.
+//
+// run_a1_case cannot see this. Whenever a tail is on it primes the body with a standalone
+// ops::kv_cache_append before the fused call, and that op writes exactly the rows the fused append
+// owns (it is there to populate the ring). This case is the same run with that priming append
+// dropped -- base == 0 so nothing precedes the step, N >= the step width so the body spans no key --
+// so the fused kernel's own write is the only one in the cache when the device plane is read back
+// and held to the host fixture: byte-for-byte for bf16, and for the int8 family over the code and
+// scale planes, which is what the harness already compares for those storages. Before the fix every
+// one of those rows still holds the fixture's un-appended initial contents.
+//
+// The plan overload is the one used here: it is what builds rk8v4's HostCache (the KvCacheStorage
+// overload deliberately does not), and the fused tail cases already route rk8v4 through it.
+int run_fused_empty_body_append_case(const Geometry& geometry, const CachePlan& plan,
+                                     const AttentionCase& test_case, MappingPattern mapping) {
+    std::cout << "    TOPTEST fused-append empty-body cache write: "
+              << case_label("causal_softmax_attention", geometry, plan, test_case, mapping) << '\n';
+    return run_a1_case(geometry, plan, test_case, mapping, nullptr, false);
+}
+
 int run_tail_cases() {
     std::cout << "  exact KV tail (KV cache precision tail): merge, boundary, regression, masked\n";
     int failures = 0;
@@ -4395,6 +4426,19 @@ int run_tail_cases() {
     // the envelope above its 256-key prompt cutoff, because for width <= 8 a narrower envelope
     // selects Prompt; 512 is used throughout to keep that explicit.
     //
+    // (0) TOPTEST: the fused-append empty-body cache write. window = tokens = 6 (base 0) and N = 64
+    // put the whole window inside the exact tail, so body_window == 0 and the body's one split
+    // scores nothing -- it exists only to quantize the six rows. Envelope 512 keeps the small-T route
+    // for both geometries and both plans (bf16 and the int8-family rk8v4). See
+    // run_fused_empty_body_append_case.
+    for (const Geometry& geometry : kGeometries) {
+        for (const CachePlan& plan : {kPlanBf16, kPlanRk8v4}) {
+            failures += run_fused_empty_body_append_case(geometry, plan,
+                                                         with_tail({6, 0, 512, 2351u}, 64),
+                                                         MappingPattern::Fragmented);
+        }
+    }
+
     // (1) Primary merge formula: a BFloat16 body with N > 0. Body and tail are both exact, so the
     // engine result must equal the plain causal FP32 oracle within the existing BF16 criterion.
     // T=6 N=2 exercises p+1 > N (non-empty body window); T=6 N=6 nearly empties it; T=6 base=124 is
