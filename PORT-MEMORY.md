@@ -486,6 +486,14 @@ merged to `main` after each landed sub-step.
   tail key range (body scope not clamped to `[0, body_window)` on the fused path, §8 deviation #3) —
   reachable only when `body_window > 0`, which the oracle never tests. **Verdict: the tail benefit
   cannot be claimed; the mechanism is not closed; the port needs a fix.**
+- **WP-C DONE (Step 45) — the concept is proven externally:** llamacpp `kvarn4` mean KLD 0.001107
+  (tail 0) → **0.000702** (tail 1024), max 0.1879 → 0.0784, on the same model family; f16-vs-f16
+  self-KLD ≈ 0 validates the method. llamacpp merges the tail inside FA at **all widths**. So the
+  benefit is real; ninfer's broken merge (0.027) is ~40× worse than llamacpp's working tail.
+- **WP-F F3/F4 measured (Step 45):** tail 0 → 24.1% acceptance / 82.6 tok/s; tail ≥1024 → 20.3% / 70.8
+  tok/s (tail 1024 ≡ 2048 because prompt+gen < 1024 → whole-context case). The F3 hypothesis
+  (tail does not reduce acceptance) is refuted on this data, but the measurement is **confounded by the
+  Step 44 defect** (corrupted verifier attention) → repeat after the fix. Decode cost ~14%.
 - **Operational rule (learned the hard way):** long GPU batches must run in **foreground chunks**
   (≤600 s, ~3-4 runs), re-invoking the resumable batch each time. Both `run_in_background` and
   `start /b`-detached batches are **killed after ~3 min**. After every chunk verify

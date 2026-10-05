@@ -1626,3 +1626,43 @@ claimed; the mechanism is not closed."** WP-C (llamacpp) is still worth running:
 reference implementation that merges inside FA at all widths, so its incremental ΔKLD shows the
 magnitude a correct merge should recover. WP-E must flip the plan's premise and update the DoD
 accordingly.
+
+## Step 45 — M5/WP-C (llamacpp) and WP-F F3/F4 (spec × tail) measured
+
+**WP-C — the external reference proves the tail concept works.** `llama-perplexity.exe` on
+`Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf`, `-c 4096 --chunks 8 -b 2048 -ub 512`, baseline = default
+(f16) KV with `--save-all-logits`, then `--kl-divergence --kl-divergence-base`. Script
+`.deps/run-m5-wpc.sh`, raw `.deps/wpc/*.out`.
+
+| llamacpp KV | mean KLD | max KLD | p99.9 | same-top |
+|---|---:|---:|---:|---:|
+| f16 (vs f16 baseline) | 0.000000 | 0.000059 | 0.000049 | — (sanity: self-comparison ≈ 0) |
+| q8_0 | 0.000531 | 0.046475 | 0.014471 | — |
+| **kvarn4 tail 0** | **0.001107** | 0.187910 | 0.029845 | — |
+| **kvarn4 tail 1024** | **0.000702** | 0.078444 | 0.022121 | — |
+
+So llamacpp's tail (merged inside FA at **all widths**) cuts mean KLD 37% and max KLD 58% on the same
+model family. **The tail's benefit is real; ninfer's is not delivered because its body+tail merge is
+broken** (Step 44: 0.027, ~40x worse than llamacpp's tail-on). The f16-vs-f16 ≈ 0 row also validates
+the KLD methodology (the external analogue of the Step 41 self-check).
+
+**WP-F F3/F4 — speculation × tail** (`ninfer.exe --spec mtp --draft-tokens 7 --kv-dtype rk4v4-e8
+--max-new 256 --max-context 4096`, 5 prompts; `.deps/run-m5-wpf.sh`, raw `.deps/wpf/`):
+
+| tail | drafted | accepted | rate | acc length | decode |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 3303 | 795 | 24.1% | 2.774 tok/round | 82.6 tok/s |
+| 1024 | 2161 | 439 | 20.3% | 2.408 | 70.8 tok/s |
+| 2048 | 2161 | 439 | 20.3% | 2.408 | 70.9 tok/s |
+
+- tail 1024 and 2048 are **identical** because prompt+generation < 1024 tokens, so both cover the whole
+  context (a degenerate case) — noted so it is not over-read.
+- **F3 hypothesis (tail does not reduce acceptance) is REFUTED** on this data: acceptance drops 24.1% →
+  20.3% and decode is 14% slower. The acceptance drop is consistent with the broken verifier merge
+  (draft is tail-free, verifier's tail-on attention is corrupted → distributions diverge more), so it is
+  **not** evidence about a correct tail.
+- **F4**: the tail costs ~14% decode throughput here.
+- Correctness (F1/F2/F5) remains as analysed in Step 42: no ring pollution; the issue is merge quality,
+  not rollback.
+
+**WP-F F3/F4 verdict: measured, but confounded by the Step 44 defect — repeat after the fix.**
