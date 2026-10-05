@@ -1416,3 +1416,26 @@ fast-forward-merged as `3037bb98`.
 W=8 tail=0 6.496148968946205 vs tail=1024 6.464422630715829 → **W=8 is still small-T**, so this model
 has 24 query heads and **W=8 is the cheapest valid decode width** (8× fewer steps than W=1). WP-B will
 score at W=8 to bound cost (plan risk R-B).
+
+## Step 41 — M5/WP-A3: KLD instrument verified (deterministic AND discriminating)
+
+Built `ninfer-perplexity` with A3 (`BUILD_EXIT=0`, 157/157). Two gates, both on GPU (serial, clean after
+each — 0 `ninfer-perplexity`, 48 MiB):
+
+**Gate 1 — self-consistency.** `--save-topk ref` then `--kld-base ref` on the same config (bf16 tail0
+W=8 ctx1024): KLD **exactly 0.0** for median/mean/p99/p99.9/max, `same_top 1.0`, 2046 targets. The
+instrument is deterministic and the top-K/target-logprob normalization agrees, as the header claims.
+
+**Gate 2 — discrimination.** Same reference (bf16 tail0), candidate rk8v4 at W=8 ctx1024:
+
+| candidate | ppl | KLD median | KLD mean | KLD p99 | KLD p99.9 | KLD max | same-top | Δtarget-logprob |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| rk8v4 tail0 | 6.496149 | 0.0016290 | 0.0027383 | 0.0229380 | 0.0636017 | 0.0806178 | 0.9726 | −0.0031275 |
+| rk8v4 tail1024 | 6.464423 | 0.0005137 | 0.0009117 | 0.0067325 | 0.0128469 | 0.0176697 | 0.9853 | +0.0017683 |
+
+The tail cuts mean KLD **~3.0×** and raises same-top from 97.3% to 98.5% — a sharp, consistent signal,
+matching the ppl direction. **WP-A3 is DONE and the instrument is trusted for WP-B.**
+
+Harnesses: `.deps/run-m5-save.bat <fmt> <tail> <width> <ctx> <text> <ref>` and
+`.deps/run-m5-kld.bat <fmt> <tail> <width> <ctx> <text> <ref> <outdir>`; KLD lands in `report.json`'s
+`kld` block (`direction: KLD(candidate || reference)`). Default top-K is 100 (matches llama.cpp).

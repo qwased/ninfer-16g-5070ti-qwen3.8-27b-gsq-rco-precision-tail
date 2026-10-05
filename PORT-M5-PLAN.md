@@ -56,7 +56,10 @@ know why — empirically, not by inference:
   6.464422630715829 → W=8 is still small-T. This model has **24 query heads**, so the small-T width
   ceiling is **W=8**, and W=8 is the cheapest valid decode width for WP-B.
 
-### A3 KLD — **WIP: implemented (`3037bb98`), awaiting the self-consistency run**
+### A3 KLD — **DONE** (`3037bb98`, verified Step 41)
+Verified two ways: self-comparison gives KLD exactly 0 / same-top 1.0; rk8v4 vs a bf16-tail0 reference
+at W=8 ctx1024 gives mean KLD 0.002738 (tail0) → 0.000912 (tail1024), same-top 0.9726 → 0.9853.
+Report `kld` block; default K=100.
 - Today `ScoreAggregate::add(std::span<const float>)` gets the **target-token logprob only**
   (`program_impl.cpp:661-676`, via `ops::target_logprobs`, `target_logprobs.h:44`). But the full
   `[vocab,C]` BF16 logits are **already materialized on device** before the reduction → top-k is reachable.

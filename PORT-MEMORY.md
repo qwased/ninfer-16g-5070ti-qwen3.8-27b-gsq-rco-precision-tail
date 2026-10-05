@@ -438,9 +438,17 @@ merged to `main` after each landed sub-step.
 - **Path note:** the donor product directory is `D:\ninfer\ninfer-package` (the `n`). The first
   drafts of the new M5 harness scripts had `infer-package`; wrong path → `CreateFileW: Win32 error 3`
   at artifact inspect. Fixed. (The pre-existing `run-m1-ppl.bat` and §2 above were already correct.)
-- **WP-A3 (in progress, parked WIP in `.worktrees/m5a`):** a subagent implemented the device top-K +
-  `--save-topk`/`--kld-base` KLD path (22 files, ~1300 lines) but hit its 150-turn cap before
-  committing/validating; the edits are preserved as an uncommitted WIP on branch `port/m5-instrument`
-  and must be verified/committed separately.
+- **WP-A3 DONE (`3037bb98`, Step 41):** the KLD top-K instrument. A subagent wrote it (22 files) but
+  hit its 150-turn cap before validating; it was parked, rebased, merged, then verified by the main
+  agent. `EngineOptions::score_topk` (default 0); `Engine::score_tokens` now returns
+  `std::vector<ScoredTarget{logprob, topk}>` (`ScoredTarget`/`ScoreTopKEntry`/`kMaxScoreTopK=128` in
+  `types.h`); device top-K folded into the `target_logprobs` op; app flags `--score-topk K` (default
+  100), `--save-topk <path>`, `--kld-base <path>`. KLD support = union of both top-K sets + the
+  target token, renormalized; `report.json` `kld` block = median/mean/p99/p99.9/max/same_top/
+  mean_target_logprob_delta, `direction: KLD(candidate || reference)`. **Verified:** self-comparison
+  → KLD exactly 0, same-top 1.0; rk8v4 vs bf16-tail0 ref at W=8 ctx1024: mean KLD 0.002738 (tail0)
+  → 0.000912 (tail1024). Harnesses `.deps/run-m5-save.bat` / `.deps/run-m5-kld.bat`.
+- **Small-T width ceiling (measured):** this 27B model has 24 query heads, so `W≤8` is small-T and
+  **W=8 is the cheapest valid decode width** (8× fewer steps than W=1). Use W=8 for the campaigns.
 - Runs are strictly serial, single-owner, single GPU (5070 Ti); after **every** run check
   `tasklist`/`nvidia-smi` for orphan processes (user requirement) before starting the next.
