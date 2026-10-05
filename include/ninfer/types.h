@@ -72,6 +72,14 @@ enum class KvCacheStorage : std::uint8_t {
     RotatedE8RootKeyInt4Value,
 };
 
+// Element type of the exact KV tail's unquantized ring. Both are 16-bit, so the tail's page
+// geometry, capacity and memory are identical whichever is chosen; only the precision of the
+// retained rows differs. F16 is the tuned default.
+enum class KvTailType : std::uint8_t {
+    BFloat16,
+    Float16,
+};
+
 enum class EnginePurpose : std::uint8_t {
     Generation,
     CausalScoring,
@@ -424,6 +432,8 @@ struct EngineOptions {
     // so attention can merge a quantized body partial with an exact tail partial. Zero disables
     // the tail and leaves behavior and memory as they are without it.
     std::int32_t kv_tail_tokens        = 0;
+    // Element type of that unquantized pool: F16 (default) or BF16.
+    KvTailType kv_tail_type            = KvTailType::Float16;
     SpeculativeOptions speculative;
     std::size_t media_cache_bytes = kDefaultMediaCacheBytes;
     std::size_t media_live_bytes  = kDefaultMediaLiveBytes;

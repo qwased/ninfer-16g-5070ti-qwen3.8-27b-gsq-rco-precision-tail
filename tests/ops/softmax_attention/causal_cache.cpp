@@ -227,6 +227,9 @@ struct AttentionCase {
     // BFloat16 ring the cache view exposes as PagedKVExactTailView. 0 (the default) disables the
     // tail and leaves the pre-tail code path byte-for-byte unchanged.
     std::int32_t kv_tail_tokens = 0;
+    // Element type of that exact ring (DType::BF16 or DType::FP16); both are 16-bit so the ring
+    // bytes and addressing are identical. Selects the kernel instantiation and the fixture rounding.
+    DType tail_dtype = DType::BF16;
 };
 
 enum class MappingPattern { Identity, Offset, Fragmented };
@@ -550,6 +553,20 @@ float f16_bits_to_f32(std::uint16_t bits) {
 
 float round_to_f16(float value) { return f16_bits_to_f32(f32_to_f16_bits(value)); }
 
+const char* tail_dtype_name(DType dtype) {
+    return dtype == DType::FP16 ? "f16" : "bf16";
+}
+
+// Encodes/decodes one exact-tail element in the ring's element type. Both are 16-bit; only the
+// rounding and the read-back differ.
+std::uint16_t encode_tail_elem(DType dtype, float value) {
+    return dtype == DType::FP16 ? f32_to_f16_bits(value) : f32_to_bf16(value);
+}
+
+float decode_tail_elem(DType dtype, std::uint16_t bits) {
+    return dtype == DType::FP16 ? f16_bits_to_f32(bits) : bf16_to_f32(bits);
+}
+
 std::vector<std::uint16_t> to_f16_bits(const std::vector<float>& values) {
     std::vector<std::uint16_t> bits(values.size());
     for (std::size_t i = 0; i < values.size(); ++i) { bits[i] = f32_to_f16_bits(values[i]); }
@@ -655,13 +672,14 @@ struct HostCache {
     std::vector<float> rotated_k_quantized;
     std::vector<float> rotated_v_quantized;
     // Exact KV tail fixture (KV cache precision tail): the newest tail_retention positions as
-    // unquantized BF16 in the ring layout the attention Op reads. Kept only when a tail case
-    // requested it; the independent oracle uses it for the newest positions, and DeviceCache
-    // uploads or shadows it into the device ring.
+    // unquantized 16-bit codes in the ring layout the attention Op reads, in `tail_dtype` (BF16 or
+    // FP16). Kept only when a tail case requested it; the independent oracle uses it for the newest
+    // positions, and DeviceCache uploads or shadows it into the device ring.
     std::int32_t tail_retention  = 0;
     std::int32_t tail_page_count = 0;
-    std::vector<std::uint16_t> tail_k_bf16;
-    std::vector<std::uint16_t> tail_v_bf16;
+    DType tail_dtype             = DType::BF16;
+    std::vector<std::uint16_t> tail_k_bits;
+    std::vector<std::uint16_t> tail_v_bits;
 
     [[nodiscard]] bool tail_enabled() const { return tail_retention > 0; }
 
@@ -1558,13 +1576,17 @@ double cache_value(const HostCache& cache, bool key, std::int32_t head, std::int
 // Builds the exact-tail fixture from the same BF16 k/v rows append_cache consumes. Every appended
 // position is written into the ring (as the append Op does); only the newest `retention` are ever
 // read back (tail_covers). The k/v layout is the append input layout, [kHeadDim, kv_heads, tokens].
+// The ring element type is `tail_dtype` (BF16 or FP16); the source rows are BF16 either way, so an
+// F16 ring rounds each source element on the way in exactly as the device kernel does.
 void populate_tail(HostCache& cache, const std::vector<float>& k, const std::vector<float>& v,
-                   const std::vector<std::int32_t>& positions, std::int32_t retention) {
+                   const std::vector<std::int32_t>& positions, std::int32_t retention,
+                   DType tail_dtype = DType::BF16) {
     const Geometry& geometry = cache.geometry;
+    cache.tail_dtype         = tail_dtype;
     cache.tail_retention     = std::max(retention, 0);
     cache.tail_page_count    = tail_page_count(cache.tail_retention);
-    cache.tail_k_bf16.assign(tail_ring_elements(geometry, cache.tail_page_count), 0);
-    cache.tail_v_bf16.assign(tail_ring_elements(geometry, cache.tail_page_count), 0);
+    cache.tail_k_bits.assign(tail_ring_elements(geometry, cache.tail_page_count), 0);
+    cache.tail_v_bits.assign(tail_ring_elements(geometry, cache.tail_page_count), 0);
     if (cache.tail_retention <= 0) { return; }
     // Ascending token order means the newest position wins any ring-slot collision, matching the
     // single-sequence append. Tail cases keep tokens <= 64 * page_count, so none occur.
@@ -1575,8 +1597,8 @@ void populate_tail(HostCache& cache, const std::vector<float>& k, const std::vec
                 const std::size_t index =
                     tail_ring_index(geometry, cache.tail_page_count, head, position, d);
                 const std::size_t source = kv_input_index(geometry, head, d, token);
-                cache.tail_k_bf16[index] = f32_to_bf16(k[source]);
-                cache.tail_v_bf16[index] = f32_to_bf16(v[source]);
+                cache.tail_k_bits[index] = encode_tail_elem(tail_dtype, k[source]);
+                cache.tail_v_bits[index] = encode_tail_elem(tail_dtype, v[source]);
             }
         }
     }
@@ -1609,7 +1631,8 @@ double cache_value_with_tail(const HostCache& cache, bool key, std::int32_t head
         const std::size_t index =
             tail_ring_index(cache.geometry, cache.tail_page_count, head, position, d);
         return static_cast<double>(
-            bf16_to_f32(key ? cache.tail_k_bf16[index] : cache.tail_v_bf16[index]));
+            decode_tail_elem(cache.tail_dtype,
+                             key ? cache.tail_k_bits[index] : cache.tail_v_bits[index]));
     }
     return cache_value(cache, key, head, position, d);
 }
@@ -1695,7 +1718,8 @@ std::vector<T> copy_from_guarded(const GuardedDeviceBuffer& buffer, std::size_t 
 
 class DeviceCache {
 public:
-    DeviceCache(const HostCache& cache, MappingPattern mapping, std::int32_t kv_tail_tokens = 0)
+    DeviceCache(const HostCache& cache, MappingPattern mapping, std::int32_t kv_tail_tokens = 0,
+                DType tail_dtype = DType::BF16)
         : geometry_(cache.geometry), storage_(cache.storage), layout_(test_cache_layout(storage_)),
           max_context_(cache.max_context), logical_capacity_(cache.logical_capacity),
           logical_pages_(logical_capacity_ / kPagedKVPageSize),
@@ -1721,6 +1745,7 @@ public:
           block_table_(block_table_host_.size() * sizeof(std::int32_t)),
           tail_retention_(std::max(kv_tail_tokens, 0)),
           tail_page_count_(tail_page_count(tail_retention_)),
+          tail_dtype_(tail_dtype),
           k_tail_(tail_ring_elements(geometry_, tail_page_count_) * sizeof(std::uint16_t)),
           v_tail_(tail_ring_elements(geometry_, tail_page_count_) * sizeof(std::uint16_t)) {
         block_table_.copy_from_host(block_table_host_.data(),
@@ -1865,10 +1890,10 @@ public:
                                            geometry_.kv_heads, physical_pages_});
         }
         if (tail_page_count_ > 0) {
-            result.tail.k_pages    = Tensor(k_tail_.data(), DType::BF16,
+            result.tail.k_pages    = Tensor(k_tail_.data(), tail_dtype_,
                                             {kHeadDim, kPagedKVPageSize, geometry_.kv_heads,
                                              tail_page_count_});
-            result.tail.v_pages    = Tensor(v_tail_.data(), DType::BF16,
+            result.tail.v_pages    = Tensor(v_tail_.data(), tail_dtype_,
                                             {kHeadDim, kPagedKVPageSize, geometry_.kv_heads,
                                              tail_page_count_});
             result.tail.page_count = tail_page_count_;
@@ -1910,11 +1935,11 @@ public:
     void upload_tail(const HostCache& cache) {
         if (tail_page_count_ <= 0) { return; }
         const std::size_t elements = tail_ring_elements(geometry_, tail_page_count_);
-        if (cache.tail_k_bf16.size() != elements || cache.tail_v_bf16.size() != elements) {
+        if (cache.tail_k_bits.size() != elements || cache.tail_v_bits.size() != elements) {
             throw std::invalid_argument("exact KV tail fixture ring size mismatch");
         }
-        k_tail_.copy_from_host(cache.tail_k_bf16.data(), elements * sizeof(std::uint16_t));
-        v_tail_.copy_from_host(cache.tail_v_bf16.data(), elements * sizeof(std::uint16_t));
+        k_tail_.copy_from_host(cache.tail_k_bits.data(), elements * sizeof(std::uint16_t));
+        v_tail_.copy_from_host(cache.tail_v_bits.data(), elements * sizeof(std::uint16_t));
     }
 
     // Checks the device ring against the exact-tail fixture. For the fused entry this holds the
@@ -1925,12 +1950,12 @@ public:
         int failures = 0;
         failures += verify_exact(
             (label + " exact-tail-k").c_str(),
-            copy_from_guarded<std::uint16_t>(k_tail_, expected.tail_k_bf16.size()),
-            expected.tail_k_bf16);
+            copy_from_guarded<std::uint16_t>(k_tail_, expected.tail_k_bits.size()),
+            expected.tail_k_bits);
         failures += verify_exact(
             (label + " exact-tail-v").c_str(),
-            copy_from_guarded<std::uint16_t>(v_tail_, expected.tail_v_bf16.size()),
-            expected.tail_v_bf16);
+            copy_from_guarded<std::uint16_t>(v_tail_, expected.tail_v_bits.size()),
+            expected.tail_v_bits);
         failures += k_tail_.verify_guards((label + " exact-tail-k guard").c_str());
         failures += v_tail_.verify_guards((label + " exact-tail-v guard").c_str());
         return failures;
@@ -2087,6 +2112,7 @@ private:
     GuardedDeviceBuffer block_table_;
     std::int32_t tail_retention_;
     std::int32_t tail_page_count_;
+    DType tail_dtype_;
     GuardedDeviceBuffer k_tail_;
     GuardedDeviceBuffer v_tail_;
 };
@@ -2094,7 +2120,7 @@ private:
 class BatchDeviceCache {
 public:
     BatchDeviceCache(std::span<const HostCache> rows, MappingPattern mapping,
-                     std::int32_t kv_tail_tokens = 0)
+                     std::int32_t kv_tail_tokens = 0, DType tail_dtype = DType::BF16)
         : geometry_(rows.front().geometry), storage_(rows.front().storage),
           layout_(test_cache_layout(storage_)), rows_(rows.size()),
           logical_capacity_(rows.front().logical_capacity),
@@ -2123,6 +2149,7 @@ public:
           block_tables_(block_tables_host_.size() * sizeof(std::int32_t)),
           tail_retention_(std::max(kv_tail_tokens, 0)),
           tail_page_count_(tail_page_count(tail_retention_)),
+          tail_dtype_(tail_dtype),
           k_tail_(tail_ring_elements(geometry_, tail_page_count_) * sizeof(std::uint16_t)),
           v_tail_(tail_ring_elements(geometry_, tail_page_count_) * sizeof(std::uint16_t)) {
         for (std::size_t row = 0; row < rows_; ++row) {
@@ -2169,10 +2196,10 @@ public:
                                            geometry_.kv_heads, physical_pages_});
         }
         if (tail_page_count_ > 0) {
-            result.tail.k_pages    = Tensor(k_tail_.data(), DType::BF16,
+            result.tail.k_pages    = Tensor(k_tail_.data(), tail_dtype_,
                                             {kHeadDim, kPagedKVPageSize, geometry_.kv_heads,
                                              tail_page_count_});
-            result.tail.v_pages    = Tensor(v_tail_.data(), DType::BF16,
+            result.tail.v_pages    = Tensor(v_tail_.data(), tail_dtype_,
                                             {kHeadDim, kPagedKVPageSize, geometry_.kv_heads,
                                              tail_page_count_});
             result.tail.page_count = tail_page_count_;
@@ -2195,11 +2222,11 @@ public:
     void upload_tail(const HostCache& cache) {
         if (tail_page_count_ <= 0) { return; }
         const std::size_t elements = tail_ring_elements(geometry_, tail_page_count_);
-        if (cache.tail_k_bf16.size() != elements || cache.tail_v_bf16.size() != elements) {
+        if (cache.tail_k_bits.size() != elements || cache.tail_v_bits.size() != elements) {
             throw std::invalid_argument("batch exact KV tail fixture ring size mismatch");
         }
-        k_tail_.copy_from_host(cache.tail_k_bf16.data(), elements * sizeof(std::uint16_t));
-        v_tail_.copy_from_host(cache.tail_v_bf16.data(), elements * sizeof(std::uint16_t));
+        k_tail_.copy_from_host(cache.tail_k_bits.data(), elements * sizeof(std::uint16_t));
+        v_tail_.copy_from_host(cache.tail_v_bits.data(), elements * sizeof(std::uint16_t));
     }
 
     int verify(const std::string& label, std::span<const HostCache> expected) const {
@@ -2533,6 +2560,7 @@ private:
     GuardedDeviceBuffer block_tables_;
     std::int32_t tail_retention_;
     std::int32_t tail_page_count_;
+    DType tail_dtype_;
     GuardedDeviceBuffer k_tail_;
     GuardedDeviceBuffer v_tail_;
 };
@@ -2696,7 +2724,9 @@ std::string case_label(const char* entry, const Geometry& geometry, const CacheP
            " mapping=" + mapping_name(mapping) + " T=" + std::to_string(test_case.tokens) +
            " keys=" + std::to_string(test_case.base + test_case.tokens) +
            " envelope_max=" + std::to_string(test_case.envelope_max) +
-           (test_case.kv_tail_tokens > 0 ? " tail=" + std::to_string(test_case.kv_tail_tokens) : "") +
+           (test_case.kv_tail_tokens > 0 ? " tail=" + std::to_string(test_case.kv_tail_tokens) + "/" +
+                                               tail_dtype_name(test_case.tail_dtype)
+                                         : "") +
            (test_case.graph_replay ? " graph-replay" : "");
 }
 
@@ -2706,7 +2736,9 @@ std::string case_label(const char* entry, const Geometry& geometry, KvCacheStora
            " mapping=" + mapping_name(mapping) + " T=" + std::to_string(test_case.tokens) +
            " keys=" + std::to_string(test_case.base + test_case.tokens) +
            " envelope_max=" + std::to_string(test_case.envelope_max) +
-           (test_case.kv_tail_tokens > 0 ? " tail=" + std::to_string(test_case.kv_tail_tokens) : "") +
+           (test_case.kv_tail_tokens > 0 ? " tail=" + std::to_string(test_case.kv_tail_tokens) + "/" +
+                                               tail_dtype_name(test_case.tail_dtype)
+                                         : "") +
            (test_case.graph_replay ? " graph-replay" : "") +
            (test_case.fast_prompt_kernel ? " fast-prompt" : "");
 }
@@ -2791,9 +2823,11 @@ int run_a1_case(const Geometry& geometry, const CachePlan& plan, const Attention
     const HostCache initial = make_cache(geometry, plan, max_context, test_case.seed + 10u);
     HostCache expected      = initial;
     append_cache(expected, k, v, positions);
-    if (tail_tokens > 0) { populate_tail(expected, k, v, positions, tail_tokens); }
+    if (tail_tokens > 0) {
+        populate_tail(expected, k, v, positions, tail_tokens, test_case.tail_dtype);
+    }
     const std::vector<double> reference = ideal_attention(q, expected, positions);
-    DeviceCache cache(initial, mapping, tail_tokens);
+    DeviceCache cache(initial, mapping, tail_tokens, test_case.tail_dtype);
 
     const std::vector<std::uint16_t> q_bits = to_bf16_bits(q);
     const std::vector<std::uint16_t> k_bits = to_bf16_bits(k);
@@ -2894,9 +2928,11 @@ int run_a1_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
     HostCache expected      = initial;
     append_cache(expected, k, v, positions);
     const std::int32_t tail_tokens = std::max(test_case.kv_tail_tokens, 0);
-    if (tail_tokens > 0) { populate_tail(expected, k, v, positions, tail_tokens); }
+    if (tail_tokens > 0) {
+        populate_tail(expected, k, v, positions, tail_tokens, test_case.tail_dtype);
+    }
     const std::vector<double> reference = ideal_attention(q, expected, positions);
-    DeviceCache cache(initial, mapping, tail_tokens);
+    DeviceCache cache(initial, mapping, tail_tokens, test_case.tail_dtype);
 
     const std::vector<std::uint16_t> q_bits = to_bf16_bits(q);
     const std::vector<std::uint16_t> k_bits = to_bf16_bits(k);
@@ -3036,10 +3072,11 @@ int run_a3_case(const Geometry& geometry, const CachePlan& plan, const Attention
     if (tail_tokens > 0) {
         const TailFixture tail =
             make_tail_fixture(geometry, positions, tail_tokens, test_case.seed + 40u);
-        populate_tail(cache_host, tail.k, tail.v, tail.positions, tail_tokens);
+        populate_tail(cache_host, tail.k, tail.v, tail.positions, tail_tokens,
+                      test_case.tail_dtype);
     }
     const std::vector<double> reference = ideal_attention(q, cache_host, positions);
-    DeviceCache cache(cache_host, mapping, tail_tokens);
+    DeviceCache cache(cache_host, mapping, tail_tokens, test_case.tail_dtype);
     if (tail_tokens > 0) { cache.upload_tail(cache_host); }
 
     const std::vector<std::uint16_t> q_bits = to_bf16_bits(q);
@@ -3111,10 +3148,11 @@ int run_a3_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
     if (tail_tokens > 0) {
         const TailFixture tail =
             make_tail_fixture(geometry, positions, tail_tokens, test_case.seed + 40u);
-        populate_tail(cache_host, tail.k, tail.v, tail.positions, tail_tokens);
+        populate_tail(cache_host, tail.k, tail.v, tail.positions, tail_tokens,
+                      test_case.tail_dtype);
     }
     const std::vector<double> reference = ideal_attention(q, cache_host, positions);
-    DeviceCache cache(cache_host, mapping, tail_tokens);
+    DeviceCache cache(cache_host, mapping, tail_tokens, test_case.tail_dtype);
     if (tail_tokens > 0) { cache.upload_tail(cache_host); }
 
     const std::vector<std::uint16_t> q_bits = to_bf16_bits(q);
@@ -3999,6 +4037,13 @@ AttentionCase with_tail(AttentionCase test_case, std::int32_t tokens) {
     return test_case;
 }
 
+// Same as with_tail, plus the tail ring element type (M2: BF16 or F16).
+AttentionCase with_tail_type(AttentionCase test_case, std::int32_t tokens, DType dtype) {
+    test_case.kv_tail_tokens = tokens;
+    test_case.tail_dtype     = dtype;
+    return test_case;
+}
+
 // Tail-off zero regression: an exact-tail case with kv_tail_tokens == 0 is the pre-tail path. Run
 // it with the field left at its default and with it set explicitly to 0, and assert the BF16
 // outputs are bit-for-bit identical (the tail branch is guarded by kv_tail_tokens > 0, so the
@@ -4090,7 +4135,8 @@ int run_quantized_tail_case(const Geometry& geometry, KvCacheStorage storage,
 // quantized rows with exact BF16 rows, so tail-on must land strictly closer to the exact oracle.
 template <typename PlanT>
 int run_tail_quality_gain(const Geometry& geometry, KvCacheStorage storage, PlanT plan,
-                          const AttentionCase& test_case, MappingPattern mapping) {
+                          const AttentionCase& test_case, MappingPattern mapping,
+                          DType tail_dtype = DType::BF16) {
     const std::int32_t total       = test_case.base + test_case.tokens;
     const std::int32_t max_context = static_cast<std::int32_t>(
         std::max<std::uint32_t>(static_cast<std::uint32_t>(total + 3), test_case.envelope_max));
@@ -4115,14 +4161,15 @@ int run_tail_quality_gain(const Geometry& geometry, KvCacheStorage storage, Plan
     const std::vector<double> reference =
         unit_value_scale(ideal_attention(q, exact, positions), test_case);
 
+    AttentionCase tail_case = with_tail(test_case, test_case.kv_tail_tokens);
+    tail_case.tail_dtype    = tail_dtype;
+    const AttentionCase off_case = with_tail(test_case, 0);
     std::vector<std::uint16_t> tail_bits;
     std::vector<std::uint16_t> no_tail_bits;
-    std::cout << "    " << case_label("causal_softmax_attention", geometry, plan,
-                                      with_tail(test_case, test_case.kv_tail_tokens), mapping)
+    std::cout << "    " << case_label("causal_softmax_attention", geometry, plan, tail_case, mapping)
               << " (quality gain vs exact oracle)\n";
-    int failures = run_a1_case(geometry, plan, with_tail(test_case, test_case.kv_tail_tokens),
-                               mapping, &tail_bits);
-    failures += run_a1_case(geometry, plan, with_tail(test_case, 0), mapping, &no_tail_bits);
+    int failures = run_a1_case(geometry, plan, tail_case, mapping, &tail_bits);
+    failures += run_a1_case(geometry, plan, off_case, mapping, &no_tail_bits);
 
     const std::vector<double> tail_output =
         unit_value_scale(bf16_bits_to_double(tail_bits), test_case);
@@ -4132,9 +4179,10 @@ int run_tail_quality_gain(const Geometry& geometry, KvCacheStorage storage, Plan
         tail_output.data(), reference.data(), static_cast<std::int64_t>(tail_output.size()));
     const ReductionStats no_tail_stats = compute_reduction_stats(
         no_tail_output.data(), reference.data(), static_cast<std::int64_t>(no_tail_output.size()));
-    std::printf("TAILGAIN\trel_l2_tail=%.4e\trel_l2_tail_off=%.4e\t%s %s T=%d N=%d\n",
+    std::printf("TAILGAIN\trel_l2_tail=%.4e\trel_l2_tail_off=%.4e\t%s %s T=%d N=%d tail=%s\n",
                 tail_stats.relative_l2, no_tail_stats.relative_l2, geometry.name,
-                cache_name(storage), test_case.tokens, test_case.kv_tail_tokens);
+                cache_name(storage), test_case.tokens, test_case.kv_tail_tokens,
+                tail_dtype_name(tail_dtype));
     if (!std::isfinite(tail_stats.relative_l2) || !std::isfinite(no_tail_stats.relative_l2)) {
         std::cerr << "exact KV tail " << geometry.name << " " << cache_name(storage)
                   << ": quality-gain result is not finite\n";
@@ -4331,6 +4379,18 @@ int run_tail_cases() {
                            with_tail({6, 124, 512, 2326u}, 129), MappingPattern::Fragmented);
     }
 
+    // (3b) M2: the same complete hybrid oracle with an F16 exact ring. The merged result must match
+    // the F16-reading oracle under the existing criterion, so the F16 kernel dispatch and the F16
+    // ring read-back are pinned independently of the quality-gain check below.
+    failures += fused(h24, kPlanRk8v4, with_tail_type({6, 61, 512, 2327u}, 2, DType::FP16),
+                      MappingPattern::Fragmented);
+    failures += fused(h24, kPlanRk8v4, with_tail_type({6, 124, 512, 2328u}, 6, DType::FP16),
+                      MappingPattern::Fragmented);
+    failures += cached(h24, kPlanRk8v4, with_tail_type({6, 61, 512, 2329u}, 6, DType::FP16),
+                       MappingPattern::Identity);
+    failures += cached(h16, kPlanRk8v4, with_tail_type({6, 122, 512, 2330u}, 65, DType::FP16),
+                       MappingPattern::Offset);
+
     // (4) NVFP4 has no complete hybrid oracle (rotated frame), so the weaker production check
     // applies: the tail result is produced and no worse than tail-off relative to the exact oracle.
     // That storage's small-T route is not tailed at all (see tail_merge_wired), so the case also
@@ -4356,6 +4416,23 @@ int run_tail_cases() {
                                           KvCacheStorage::RotatedInt4KeyInt4ValueE8,
                                           with_tail({6, 61, 67, 2334u}, 2),
                                           MappingPattern::Fragmented);
+    }
+
+    // (4c) M2: the same quality-gain checks with an F16 exact tail, on the same seeds as the BF16
+    // rows above so the printed TAILGAIN rel-L2 numbers are directly comparable. The newest rows are
+    // now exact only to half precision, but still closer to the exact oracle than the quantized body
+    // alone, so tail-on must beat tail-off exactly as in (4b).
+    for (const Geometry& geometry : kGeometries) {
+        failures += run_tail_quality_gain(geometry, KvCacheStorage::RotatedInt8KeyInt4ValueGroup64,
+                                          kPlanRk8v4, with_tail({6, 61, 67, 2332u}, 2),
+                                          MappingPattern::Fragmented, DType::FP16);
+        failures += run_tail_quality_gain(geometry, KvCacheStorage::RotatedInt8KeyInt4ValueGroup64,
+                                          kPlanRk8v4, with_tail({6, 61, 67, 2333u}, 6),
+                                          MappingPattern::Fragmented, DType::FP16);
+        failures += run_tail_quality_gain(geometry, KvCacheStorage::RotatedInt4KeyInt4ValueE8,
+                                          KvCacheStorage::RotatedInt4KeyInt4ValueE8,
+                                          with_tail({6, 61, 67, 2334u}, 2),
+                                          MappingPattern::Fragmented, DType::FP16);
     }
 
     // (5) C>1 masked batched rows with the tail on. The view carries a single per-sequence ring,

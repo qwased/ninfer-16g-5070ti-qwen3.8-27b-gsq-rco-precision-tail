@@ -20,8 +20,10 @@
 // boundary.
 
 #include <cuda_bf16.h>
+#include <cuda_fp16.h>
 #include <math_constants.h>
 
+#include "ops/common/kv_tail_element.cuh"
 #include "ops/softmax_attention/dense/causal_cache/small_t.cuh"
 
 #include <cstdint>
@@ -46,14 +48,13 @@ causal_small_t_tail_retention(const PagedKVBatchLayerView& cache) noexcept {
     return cache.tail.enabled() && cache.tail.page_count > 0 ? cache.tail.retention : 0;
 }
 
-template <typename Geometry, int TokenTile, int WarpsPerCta, bool Int8>
+template <typename Geometry, int TokenTile, int WarpsPerCta, bool Int8, typename Elem>
 __launch_bounds__(WarpsPerCta * 32, 2) __global__ void causal_attention_small_t_tail_bf16_kernel(
-    const __nv_bfloat16* q, const std::int32_t* pos, const __nv_bfloat16* tail_k,
-    const __nv_bfloat16* tail_v, std::int32_t ring_pages, std::int32_t tail_tokens,
-    std::int32_t wave_splits, std::int32_t tokens, std::int32_t full_width,
-    std::int32_t column_begin, std::int32_t logical_capacity, std::int32_t batch_size,
-    const std::int32_t* valid_columns, float scale, float* partial_acc, float* partial_m,
-    float* partial_l) {
+    const __nv_bfloat16* q, const std::int32_t* pos, const Elem* tail_k, const Elem* tail_v,
+    std::int32_t ring_pages, std::int32_t tail_tokens, std::int32_t wave_splits, std::int32_t tokens,
+    std::int32_t full_width, std::int32_t column_begin, std::int32_t logical_capacity,
+    std::int32_t batch_size, const std::int32_t* valid_columns, float scale, float* partial_acc,
+    float* partial_m, float* partial_l) {
     static_assert(TokenTile >= 1 && TokenTile * Geometry::GroupSize <= 48);
     static_assert(WarpsPerCta >= 1 && WarpsPerCta <= 4);
 
@@ -72,10 +73,10 @@ __launch_bounds__(WarpsPerCta * 32, 2) __global__ void causal_attention_small_t_
 
     static_assert(QkvRows >= Br);
 
-    __shared__ __align__(16) __nv_bfloat16 qkv_s[QkvRows * D];
-    __shared__ __align__(16) __nv_bfloat16 p_s[Wc * 16 * Bc];
-    __nv_bfloat16* k_s = qkv_s;
-    __nv_bfloat16* v_s = qkv_s + Bc * D;
+    __shared__ __align__(16) Elem qkv_s[QkvRows * D];
+    __shared__ __align__(16) Elem p_s[Wc * 16 * Bc];
+    Elem* k_s = qkv_s;
+    Elem* v_s = qkv_s + Bc * D;
 
     const int kv_head     = static_cast<int>(blockIdx.x);
     const int split_local = static_cast<int>(blockIdx.y);
@@ -172,9 +173,9 @@ __launch_bounds__(WarpsPerCta * 32, 2) __global__ void causal_attention_small_t_
         int q_head    = 0;
         int token     = 0;
         causal_small_t_tc_row_to_qt<Geometry>(row, tokens, kv_head, q_head, token);
-        __nv_bfloat16 value = __float2bfloat16(0.0f);
+        Elem value = KvTailElement<Elem>::zero();
         if (row < row_count && causal_valid_q_head<Geometry>(kv_head, q_head)) {
-            value = q[causal_q_index<Geometry>(q_head, d, token)];
+            value = KvTailElement<Elem>::from_source(q[causal_q_index<Geometry>(q_head, d, token)]);
         }
         qkv_s[row * D + causal_small_t_tc_swz(row, d)] = value;
     }
@@ -191,7 +192,7 @@ __launch_bounds__(WarpsPerCta * 32, 2) __global__ void causal_attention_small_t_
     const int b_koff   = ((lane >> 3) & 1) << 3;
 
     const int warp_row0 = warp * 16;
-    __nv_bfloat16* p_sw = &p_s[warp * 16 * Bc];
+    Elem* p_sw = &p_s[warp * 16 * Bc];
 
     unsigned af_q[QKKs][4];
 #pragma unroll
@@ -218,8 +219,8 @@ __launch_bounds__(WarpsPerCta * 32, 2) __global__ void causal_attention_small_t_
             const int key_l      = chunk / (D / 8);
             const int d          = (chunk - key_l * (D / 8)) * 8;
             const int key        = tile_first_key + key_l;
-            __nv_bfloat16* k_dst = &k_s[key_l * D + causal_small_t_tc_swz(key_l, d)];
-            __nv_bfloat16* v_dst = &v_s[key_l * D + causal_small_t_tc_swz(key_l, d)];
+            Elem* k_dst          = &k_s[key_l * D + causal_small_t_tc_swz(key_l, d)];
+            Elem* v_dst          = &v_s[key_l * D + causal_small_t_tc_swz(key_l, d)];
             if (key >= first_key && key < limit_key) {
                 const int physical_page =
                     batch * ring_pages + ((key >> kPagedKVPageShift) % ring_pages);
@@ -247,9 +248,9 @@ __launch_bounds__(WarpsPerCta * 32, 2) __global__ void causal_attention_small_t_
                 const int bcol = k * 16 + b_koff;
                 ldmatrix_x2(bf[0], bf[1],
                             smem_addr(&k_s[brow * D + causal_small_t_tc_swz(brow, bcol)]));
-                mma_bf16(score[nt][0], score[nt][1], score[nt][2], score[nt][3], af_q[k][0],
-                         af_q[k][1], af_q[k][2], af_q[k][3], bf[0], bf[1]);
-            }
+                KvTailElement<Elem>::mma(score[nt][0], score[nt][1], score[nt][2], score[nt][3],
+                                         af_q[k][0], af_q[k][1], af_q[k][2], af_q[k][3], bf[0],
+                                         bf[1]);            }
         }
 
         const int row0 = warp_row0 + gid;
@@ -313,10 +314,14 @@ __launch_bounds__(WarpsPerCta * 32, 2) __global__ void causal_attention_small_t_
                                   : 0.0f;
             bl0 += p00 + p01;
             bl1 += p10 + p11;
-            p_sw[gid * Bc + causal_small_t_tc_swz32(gid, col0)]           = __float2bfloat16(p00);
-            p_sw[gid * Bc + causal_small_t_tc_swz32(gid, col1)]           = __float2bfloat16(p01);
-            p_sw[(gid + 8) * Bc + causal_small_t_tc_swz32(gid + 8, col0)] = __float2bfloat16(p10);
-            p_sw[(gid + 8) * Bc + causal_small_t_tc_swz32(gid + 8, col1)] = __float2bfloat16(p11);
+            p_sw[gid * Bc + causal_small_t_tc_swz32(gid, col0)] =
+                KvTailElement<Elem>::from_float(p00);
+            p_sw[gid * Bc + causal_small_t_tc_swz32(gid, col1)] =
+                KvTailElement<Elem>::from_float(p01);
+            p_sw[(gid + 8) * Bc + causal_small_t_tc_swz32(gid + 8, col0)] =
+                KvTailElement<Elem>::from_float(p10);
+            p_sw[(gid + 8) * Bc + causal_small_t_tc_swz32(gid + 8, col1)] =
+                KvTailElement<Elem>::from_float(p11);
         }
         bl0 = warp_sum<4>(bl0, FullMask);
         bl1 = warp_sum<4>(bl1, FullMask);
@@ -348,8 +353,8 @@ __launch_bounds__(WarpsPerCta * 32, 2) __global__ void causal_attention_small_t_
                 const int vcol = n * 8;
                 ldmatrix_x2_t(vf[0], vf[1],
                               smem_addr(&v_s[vrow * D + causal_small_t_tc_swz(vrow, vcol)]));
-                mma_bf16(acc[n][0], acc[n][1], acc[n][2], acc[n][3], pf[0], pf[1], pf[2], pf[3],
-                         vf[0], vf[1]);
+                KvTailElement<Elem>::mma(acc[n][0], acc[n][1], acc[n][2], acc[n][3], pf[0], pf[1],
+                                         pf[2], pf[3], vf[0], vf[1]);
             }
         }
         __syncthreads();

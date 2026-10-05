@@ -106,19 +106,21 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
         if (tail_tokens <= 0 || cache.tail.page_count <= 0) { return; }
         constexpr int kTailWarps = kCausalSmallTTailWarps<TokenTile>;
         const dim3 grid(Geometry::KVHeads, splits, invocation.batch_size);
-        causal_attention_small_t_tail_bf16_kernel<Geometry, TokenTile, kTailWarps, true>
-            <<<grid, kTailWarps * 32, 0, stream>>>(
-                static_cast<const __nv_bfloat16*>(q.data),
-                static_cast<const std::int32_t*>(pos.data),
-                static_cast<const __nv_bfloat16*>(cache.tail.k_pages.data),
-                static_cast<const __nv_bfloat16*>(cache.tail.v_pages.data), cache.tail.page_count,
-                tail_tokens, wave_splits, invocation.width, invocation.full_width,
-                invocation.column_begin, logical_capacity, invocation.batch_size,
-                invocation.valid_columns == nullptr
-                    ? nullptr
-                    : static_cast<const std::int32_t*>(invocation.valid_columns->data),
-                scale, static_cast<float*>(partial_acc.data), static_cast<float*>(partial_m.data),
-                static_cast<float*>(partial_l.data));
+        with_kv_tail_element(cache.tail.k_pages.dtype, [&]<typename Elem>() {
+            causal_attention_small_t_tail_bf16_kernel<Geometry, TokenTile, kTailWarps, true, Elem>
+                <<<grid, kTailWarps * 32, 0, stream>>>(
+                    static_cast<const __nv_bfloat16*>(q.data),
+                    static_cast<const std::int32_t*>(pos.data),
+                    static_cast<const Elem*>(cache.tail.k_pages.data),
+                    static_cast<const Elem*>(cache.tail.v_pages.data), cache.tail.page_count,
+                    tail_tokens, wave_splits, invocation.width, invocation.full_width,
+                    invocation.column_begin, logical_capacity, invocation.batch_size,
+                    invocation.valid_columns == nullptr
+                        ? nullptr
+                        : static_cast<const std::int32_t*>(invocation.valid_columns->data),
+                    scale, static_cast<float*>(partial_acc.data),
+                    static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data));
+        });
         CUDA_CHECK(cudaGetLastError());
     };
     // A device profile names the tier per window: "<warps>x<CTAs per SM>x<key block>", with a

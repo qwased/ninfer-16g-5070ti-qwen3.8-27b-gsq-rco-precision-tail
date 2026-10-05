@@ -27,12 +27,15 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
             constexpr int Warps       = kBlock / 32;
             const std::int64_t units  = static_cast<std::int64_t>(tokens) * Geometry::KVHeads;
             const int tail_grid       = static_cast<int>(div_up(units, static_cast<std::int64_t>(Warps)));
-            kv_cache_append_tail_bf16_kernel<Geometry, Metadata><<<tail_grid, kBlock, 0, stream>>>(
-                static_cast<const __nv_bfloat16*>(k.data),
-                static_cast<const __nv_bfloat16*>(v.data),
-                static_cast<const std::int32_t*>(positions.data), metadata,
-                static_cast<__nv_bfloat16*>(cache.tail.k_pages.data),
-                static_cast<__nv_bfloat16*>(cache.tail.v_pages.data), cache.tail.page_count, tokens);
+            with_kv_tail_element(cache.tail.k_pages.dtype, [&]<typename Elem>() {
+                kv_cache_append_tail_bf16_kernel<Geometry, Metadata, Elem>
+                    <<<tail_grid, kBlock, 0, stream>>>(
+                        static_cast<const __nv_bfloat16*>(k.data),
+                        static_cast<const __nv_bfloat16*>(v.data),
+                        static_cast<const std::int32_t*>(positions.data), metadata,
+                        static_cast<Elem*>(cache.tail.k_pages.data),
+                        static_cast<Elem*>(cache.tail.v_pages.data), cache.tail.page_count, tokens);
+            });
             CUDA_CHECK(cudaGetLastError());
         }
     }

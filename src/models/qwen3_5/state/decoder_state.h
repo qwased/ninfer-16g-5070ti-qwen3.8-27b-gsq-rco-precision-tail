@@ -29,6 +29,8 @@ struct DecoderStateSpec {
     // second BF16 pool. Zero disables it. `kv_tail_physical_page_groups` is the whole pool's page-group
     // extent, i.e. the per-sequence ring times max concurrency.
     std::int32_t kv_tail_tokens              = 0;
+    // Element type of the tail's unquantized planes (BF16 or FP16; both 16-bit).
+    DType kv_tail_dtype                      = DType::BF16;
     std::uint32_t kv_tail_physical_page_groups = 0;
     // The per-sequence ring length in pages; the pool holds this many for each concurrent sequence.
     std::uint32_t kv_tail_ring_pages         = 0;

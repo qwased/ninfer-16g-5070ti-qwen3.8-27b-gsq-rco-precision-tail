@@ -72,6 +72,13 @@ std::int32_t parse_kv_tail_tokens(const char* text) {
     return static_cast<std::int32_t>(parse_nonnegative_int(text, "kv-tail-tokens"));
 }
 
+KvTailType parse_kv_tail_type(const char* text) {
+    const std::string_view value(text);
+    if (value == "bf16") { return KvTailType::BFloat16; }
+    if (value == "f16") { return KvTailType::Float16; }
+    throw std::invalid_argument("invalid kv-tail-type: " + std::string(text));
+}
+
 KvCapacityPolicy parse_kv_capacity(const char* text) {
     if (std::string_view(text) == "auto") { return KvCapacityPolicy::automatic(); }
     const int value = parse_nonnegative_int(text, "kv-capacity");
@@ -191,6 +198,7 @@ std::string serve_usage_text(const char* argv0) {
            "  --kv-tail-tokens N            keep the newest N tokens of each sequence\n"
            "                                unquantized as an exact KV tail that attention\n"
            "                                merges with the quantized body (0 = off)\n"
+           "  --kv-tail-type bf16|f16       element type of that exact tail (default f16)\n"
            "\n"
            "CONTEXT CACHE\n"
            "  --no-prefix-reuse             disable compatible-prefix caching (on by\n"
@@ -801,6 +809,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.kv_cache = parse_kv_dtype(require_value("--kv-dtype"));
         } else if (arg == "--kv-tail-tokens") {
             options.kv_tail_tokens = parse_kv_tail_tokens(require_value("--kv-tail-tokens"));
+        } else if (arg == "--kv-tail-type") {
+            options.kv_tail_type = parse_kv_tail_type(require_value("--kv-tail-type"));
         } else if (arg == "--spec") {
             options.speculative.backend =
                 product::parse_speculative_backend(require_value("--spec"));

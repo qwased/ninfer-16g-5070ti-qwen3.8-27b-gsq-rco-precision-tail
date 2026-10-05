@@ -176,6 +176,7 @@ std::string hybrid_cache_fingerprint(const EngineOptions& options, const std::st
     out += ";signature=" + signature;
     out += ";kv=" + std::to_string(static_cast<int>(options.kv_cache));
     out += ";kvt=" + std::to_string(options.kv_tail_tokens);
+    out += options.kv_tail_type == KvTailType::Float16 ? ";kvtt=f16" : ";kvtt=bf16";
     out += ";speculative=" + std::to_string(static_cast<int>(options.speculative.backend));
     out += ";yarn=" + std::to_string(options.rope_yarn_factor);
     out += ";interpolation=" + std::to_string(options.rope_scaling_factor) + "@" +

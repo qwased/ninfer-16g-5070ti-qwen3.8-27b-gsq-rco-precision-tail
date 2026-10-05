@@ -194,6 +194,8 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
             .text_physical_page_groups = physical_pages,
             .mtp_physical_page_groups  = mtp_physical_pages,
             .kv_tail_tokens            = plan.kv_tail_tokens,
+            .kv_tail_dtype             = plan.kv_tail_type == KvTailType::Float16 ? DType::FP16
+                                                                                  : DType::BF16,
             .kv_tail_physical_page_groups = tail_physical_pages,
             .kv_tail_ring_pages        = tail_ring_pages,
             .text_layer_rank           = std::move(attention_layer_rank),
@@ -1089,6 +1091,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->context_cache       = inputs.context_cache;
     impl->kv_storage          = inputs.kv_storage;
     impl->kv_tail_tokens      = inputs.kv_tail_tokens;
+    impl->kv_tail_type        = inputs.kv_tail_type;
     impl->persistent          = persistent_layout(*impl);
     if (impl->context_cache.enabled && impl->context_cache.mode == ContextCacheMode::Hybrid) {
         // The whole Host budget is the hybrid slab pool that KV blocks and state snapshots share
@@ -1368,6 +1371,7 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .speculative_backend        = options.speculative.backend,
         .kv_storage                 = options.kv_cache,
         .kv_tail_tokens             = options.kv_tail_tokens,
+        .kv_tail_type               = options.kv_tail_type,
         .proposal_head              = options.speculative.proposal_head,
         .rope_yarn                  = planned_rope_yarn(parameters, options),
         .mtp_attention_window       = options.speculative.mtp_attention_window,

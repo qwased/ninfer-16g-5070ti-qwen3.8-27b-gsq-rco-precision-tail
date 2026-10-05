@@ -10,17 +10,19 @@
 // no-ops for CacheInput::writes_cache == false.
 
 #include <cuda_bf16.h>
+#include <cuda_fp16.h>
 
+#include "ops/common/kv_tail_element.cuh"
 #include "ops/softmax_attention/dense/causal_cache/small_t.cuh"
 
 #include <cstdint>
 
 namespace ninfer::ops {
 
-template <typename Geometry, typename CacheInput>
+template <typename Geometry, typename CacheInput, typename Elem>
 __global__ void causal_attention_small_t_tail_shadow_kernel(
-    CacheInput input, const std::int32_t* __restrict__ pos, __nv_bfloat16* __restrict__ tail_k,
-    __nv_bfloat16* __restrict__ tail_v, std::int32_t ring_pages, std::int32_t tokens,
+    CacheInput input, const std::int32_t* __restrict__ pos, Elem* __restrict__ tail_k,
+    Elem* __restrict__ tail_v, std::int32_t ring_pages, std::int32_t tokens,
     std::int32_t full_width, std::int32_t column_begin,
     const std::int32_t* __restrict__ valid_columns) {
     if constexpr (!CacheInput::writes_cache) { return; }
@@ -49,12 +51,10 @@ __global__ void causal_attention_small_t_tail_shadow_kernel(
     const std::int64_t src_off = static_cast<std::int64_t>(d) +
                                  static_cast<std::int64_t>(D) *
                                      (kv_head + static_cast<std::int64_t>(Geometry::KVHeads) * token);
-    const int4 k_value = load_vec<int4>(&input.k[src_off]);
-    const int4 v_value = load_vec<int4>(&input.v[src_off]);
     const std::int64_t dst = paged_kv_element_offset<D, Geometry::KVHeads>(
         ring, kv_head, position & kPagedKVPageMask, d);
-    store_vec(&tail_k[dst], k_value);
-    store_vec(&tail_v[dst], v_value);
+    store_tail_vec8(&tail_k[dst], &input.k[src_off]);
+    store_tail_vec8(&tail_v[dst], &input.v[src_off]);
 }
 
 } // namespace ninfer::ops

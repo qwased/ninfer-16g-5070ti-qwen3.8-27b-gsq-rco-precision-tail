@@ -32,6 +32,7 @@ struct Options {
 
     KvCacheStorage kv_cache = KvCacheStorage::BFloat16;
     std::int32_t kv_tail_tokens = 0;
+    KvTailType kv_tail_type = KvTailType::Float16;
     SpeculativeOptions speculative;
     bool enable_vision  = false;
     VisionResidency vision_residency       = VisionResidency::Resident;

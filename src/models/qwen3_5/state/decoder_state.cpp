@@ -120,18 +120,16 @@ DecoderStateLayout plan_decoder_state(std::span<LayoutBuilder* const> builders,
             throw std::invalid_argument("exact KV tail is enabled with no page groups");
         }
         // Same geometry as the body, but unquantized: two planes (K, V) per full-attention layer on
-        // the layer's own rank, page-major order replaced by head-major, and no execution table.
-        const PagedKVStorageLayout tail_storage =
-            paged_kv_storage_layout(KvCacheStorage::BFloat16, spec.attention_head_dim);
+        // the layer's own rank, page-major order replaced by head-major, and no execution table. The
+        // element type is the configured tail dtype (BF16 or FP16, both 16-bit so the geometry and
+        // page cost are identical).
         KVPageGeometry tail_geometry{
             .page_tokens        = kPagedKVPageSize,
             .device_plane_order = PagedKVPlaneOrder::HeadMajor,
             .planes =
                 {
-                    {tail_storage.key.data_dtype, tail_storage.key.data_leading_extent, spec.kv_heads,
-                     256},
-                    {tail_storage.value.data_dtype, tail_storage.value.data_leading_extent,
-                     spec.kv_heads, 256},
+                    {spec.kv_tail_dtype, spec.attention_head_dim, spec.kv_heads, 256},
+                    {spec.kv_tail_dtype, spec.attention_head_dim, spec.kv_heads, 256},
                 },
         };
         const auto tail_planes = tail_geometry.planes;

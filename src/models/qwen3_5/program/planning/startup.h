@@ -110,6 +110,8 @@ struct SequencePlanningInputs {
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
     // Exact KV tail retention in tokens; zero disables the tail.
     std::int32_t kv_tail_tokens             = 0;
+    // Element type of the exact tail's unquantized ring.
+    KvTailType kv_tail_type                 = KvTailType::Float16;
     ProposalHead proposal_head              = ProposalHead::Full;
     ops::RopeYarn rope_yarn;
     std::uint32_t mtp_attention_window = 0;
@@ -144,6 +146,7 @@ struct SequencePlanImpl {
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
     std::int32_t kv_tail_tokens             = 0;
+    KvTailType kv_tail_type                 = KvTailType::Float16;
     ProposalHead proposal_head              = ProposalHead::Full;
     ops::RopeYarn rope_yarn;
     std::uint32_t mtp_attention_window = 0;

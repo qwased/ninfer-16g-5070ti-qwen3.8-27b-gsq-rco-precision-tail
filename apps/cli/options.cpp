@@ -137,6 +137,13 @@ std::int32_t parse_kv_tail_tokens(const char* text) {
     return static_cast<std::int32_t>(value);
 }
 
+KvTailType parse_kv_tail_type(const char* text) {
+    const std::string_view value(text);
+    if (value == "bf16") { return KvTailType::BFloat16; }
+    if (value == "f16") { return KvTailType::Float16; }
+    throw std::invalid_argument("invalid kv-tail-type: " + std::string(text));
+}
+
 ReasoningEffort parse_reasoning_effort(std::string_view text) {
     if (text == "none") { return ReasoningEffort::None; }
     if (text == "minimal") { return ReasoningEffort::Minimal; }
@@ -193,6 +200,7 @@ std::string usage_text(const char* argv0) {
            "  --kv-tail-tokens N            keep the newest N tokens of each sequence\n"
            "                                unquantized as an exact KV tail that attention\n"
            "                                merges with the quantized body (0 = off)\n"
+           "  --kv-tail-type bf16|f16       element type of that exact tail (default f16)\n"
            "\n"
            "SPECULATIVE DECODING (off by default)\n"
            "  --spec mtp|dflash|dflash2     speculative decoding backend\n"
@@ -380,6 +388,8 @@ Options parse_options(int argc, char** argv) {
             options.kv_cache = parse_kv_cache(value(arg));
         } else if (arg == "--kv-tail-tokens") {
             options.kv_tail_tokens = parse_kv_tail_tokens(value(arg));
+        } else if (arg == "--kv-tail-type") {
+            options.kv_tail_type = parse_kv_tail_type(value(arg));
         } else if (arg == "--spec") {
             options.speculative.backend = product::parse_speculative_backend(value(arg));
         } else if (arg == "--draft-tokens") {

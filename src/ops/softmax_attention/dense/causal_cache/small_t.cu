@@ -237,17 +237,19 @@ void launch_tc_partial_bf16(const Tensor& q, CacheInput input, const Tensor& pos
     if (tail_tokens <= 0 || cache.tail.page_count <= 0) { return; }
     // Same grid and block as the body partial: grid.y is the launch capacity the reducer takes as
     // its split count, so the tail's split indices line up with the ones the body left free.
-    causal_attention_small_t_tail_bf16_kernel<Geometry, TokenTile,
-                                              kCausalSmallTTailWarps<TokenTile>, false>
-        <<<grid, kBlock, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(q.data),
-            static_cast<const std::int32_t*>(pos.data),
-            static_cast<const __nv_bfloat16*>(cache.tail.k_pages.data),
-            static_cast<const __nv_bfloat16*>(cache.tail.v_pages.data), cache.tail.page_count,
-            tail_tokens, 0, invocation.width, invocation.full_width, invocation.column_begin,
-            logical_capacity, invocation.batch_size, valid_columns, scale,
-            static_cast<float*>(partial_acc.data), static_cast<float*>(partial_m.data),
-            static_cast<float*>(partial_l.data));
+    with_kv_tail_element(cache.tail.k_pages.dtype, [&]<typename Elem>() {
+        causal_attention_small_t_tail_bf16_kernel<Geometry, TokenTile,
+                                                  kCausalSmallTTailWarps<TokenTile>, false, Elem>
+            <<<grid, kBlock, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(q.data),
+                static_cast<const std::int32_t*>(pos.data),
+                static_cast<const Elem*>(cache.tail.k_pages.data),
+                static_cast<const Elem*>(cache.tail.v_pages.data), cache.tail.page_count,
+                tail_tokens, 0, invocation.width, invocation.full_width, invocation.column_begin,
+                logical_capacity, invocation.batch_size, valid_columns, scale,
+                static_cast<float*>(partial_acc.data), static_cast<float*>(partial_m.data),
+                static_cast<float*>(partial_l.data));
+    });
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -333,15 +335,17 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
             const int shadow_grid = static_cast<int>(
                 div_up(units, static_cast<std::int64_t>(kShadowThreads)));
             const dim3 shadow_dims(shadow_grid, invocation.batch_size);
-            causal_attention_small_t_tail_shadow_kernel<Geometry, CacheInput>
-                <<<shadow_dims, kShadowThreads, 0, stream>>>(
-                    input, static_cast<const std::int32_t*>(pos.data),
-                    static_cast<__nv_bfloat16*>(cache.tail.k_pages.data),
-                    static_cast<__nv_bfloat16*>(cache.tail.v_pages.data), cache.tail.page_count,
-                    invocation.width, invocation.full_width, invocation.column_begin,
-                    invocation.valid_columns == nullptr
-                        ? nullptr
-                        : static_cast<const std::int32_t*>(invocation.valid_columns->data));
+            with_kv_tail_element(cache.tail.k_pages.dtype, [&]<typename Elem>() {
+                causal_attention_small_t_tail_shadow_kernel<Geometry, CacheInput, Elem>
+                    <<<shadow_dims, kShadowThreads, 0, stream>>>(
+                        input, static_cast<const std::int32_t*>(pos.data),
+                        static_cast<Elem*>(cache.tail.k_pages.data),
+                        static_cast<Elem*>(cache.tail.v_pages.data), cache.tail.page_count,
+                        invocation.width, invocation.full_width, invocation.column_begin,
+                        invocation.valid_columns == nullptr
+                            ? nullptr
+                            : static_cast<const std::int32_t*>(invocation.valid_columns->data));
+            });
             CUDA_CHECK(cudaGetLastError());
         }
     }

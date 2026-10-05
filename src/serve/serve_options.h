@@ -67,6 +67,7 @@ struct ServeOptions {
     std::vector<std::uint32_t> stage_layers;
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
     std::int32_t kv_tail_tokens            = 0;
+    KvTailType kv_tail_type                = KvTailType::Float16;
     SpeculativeOptions speculative;
     bool ngram_native_sessions = false;
     ContextCacheOptions context_cache;
