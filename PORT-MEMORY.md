@@ -374,8 +374,22 @@ oracle's `tail_merge_wired(storage)` gate reflects it. Still open at Step 27: th
   uses the uniform split mapping (`units_per_split` over `tail_keys`), not nvfp4's proportional
   variant -- any partition of the tail key range is correct because the reducer weights each split
   by its own `exp(m_i - max)`.
-- Not wired: the fused-append entry (`CacheInput::writes_cache`), the launch that both attends and
-  appends. Its append range follows the split range, so a shortened body would never write the
-  newest N rows to the quantized body cache, and the ring is not written on that path at all.
-  Retention 0 keeps the entry bit-identical. Wiring it requires the fused append to shadow-write its
-  new rows into the ring and to decouple its write range from its read range.
+- Wired on both entries. The cached small-T entry reads the ring. The fused-append entry
+  (`CacheInput::writes_cache`) is the one the main model uses (plan deviation #1, §5.7): it
+  shadow-writes its new rows into the ring with `causal_attention_small_t_tail_shadow_kernel`
+  (`155fd1ab`) and decouples its append range from its scoring range -- the body scores
+  `[0, body_window)` while the append still covers the whole `[0, window)` so the newest N rows are
+  not lost from the quantized body cache (the `body_window` clamp, §5.10 deviation #3). Retention 0
+  keeps both entries bit-identical.
+
+## 5.11 The ppl harness scores prefill, so it cannot see the tail (Step 31)
+
+`apps/perplexity` scores the **prefill phase** (`main.cpp:94-97`) in fixed 1024-wide query tiles
+(`score_tile_tokens`, `main.cpp:534`, not configurable). `causal_attention_resolve_route` sends a
+1024-wide tile to the **prompt** route, and per plan §1.5 the prompt route "only writes, decode
+merges". The tail is therefore never read during scoring: measured rk8v4 `overall.perplexity` is
+bit-identical at tail=0 and tail=1024 (`4.65880995706738`). This is a property of the harness plus
+the merge-route decision, not a defect. The tail's *quality* effect lives on the small-T decode
+route (width <= 8) and is evidenced by the FP32 oracle; its *memory* footprint is evidenced by
+`MemorySummary` (64 MiB exact + 4 MiB reserve at N=1024, C=1). A ppl delta would require a
+decode-width scoring mode the app does not have.

@@ -1085,3 +1085,40 @@ check (`rel_l2_tail == rel_l2_tail_off == 9.2616e-02`), and the batched masked c
 `B=2 W=8 valid={6,0} tail=2`. The earlier "batched masked BF16 ring mismatch" was also a
 stale-object artifact of the same interrupted build -- no fixture change was needed. DoD §7.2 is
 therefore satisfied for the wired storages (BF16 + INT8 family) at C=1 and C>1.
+
+## Step 31 -- M1 evidence run: a stale perplexity binary, and the ppl-invariance finding
+
+First M1 evidence pass (`.deps/evidence-run1.log`) produced `report.json` files with **no `memory`
+key at all**, contradicting DoD §7.4. Root cause is the *same stale-binary class* as Step 29:
+`build-port/apps/ninfer-perplexity.exe` carried mtime 04:46 while `apps/perplexity/main.cpp` (which
+builds the whole `{"memory", {...}}` object at `main.cpp:499-521`) was 05:47 -- the app edit that
+wired the fields was never rebuilt into the binary. Rebuilt `ninfer-perplexity`: `BUILD_EXIT=0`,
+0 stray compilers. The relaunched pass emits `memory`; `dump-report.py` needed no change.
+
+rk8v4 measured pair (`N=0` vs `N=1024`, C=1, context 4096, stride 2048, 261,223 scored tokens):
+
+| field | tail=0 | tail=1024 | delta |
+|---|---|---|---|
+| `kv_exact_history_bytes` | 0 | 67,108,864 (64 MiB) | +64 MiB |
+| `kv_rollback_reserve_bytes` | 0 | 4,194,304 (4 MiB) | +4 MiB |
+| `kv_payload_bytes` | 106,954,752 | 178,257,920 | +68 MiB |
+| `runtime_reservation_bytes` | 1,818,071,808 | 1,889,374,976 | **+71,303,168 = +68 MiB exactly** |
+| `overall.perplexity` | 4.65880995706738 | 4.65880995706738 | **0** |
+
+- **DoD §7.4 matches.** Plan §2: `round_up(N,64) × 65,536 × C = 1024 × 65,536 = 64 MiB` at C=1.
+  Measured `kv_exact_history_bytes` is *exactly* 67,108,864 -> 0% error, well inside ±5%. The
+  rollback reserve R = 4 MiB (one page) sits inside the plan's "+16 MiB/C" allowance; plan's ~0.86
+  MiB figure was the beellama-scale estimate. The reservation delta is exactly 64+4 MiB.
+- **DoD §7.3 cannot move through this harness, by design.** The perplexity app scores the
+  **prefill phase** (`apps/perplexity/main.cpp:94-97`: "--mlp-a8-decode is inert here ... scoring
+  runs the prefill phase"), i.e. a 1024-wide query tile that `causal_attention_resolve_route`
+  sends to the **prompt** route. Plan §1.5 says the prompt route "only writes, decode merges", so
+  the tail is never read during scoring and the ppl is bit-identical whether the ring is on or off.
+  This is not a defect: the wiring only merges on the small-T **decode** route (width <= 8), which
+  the ppl harness never drives. `score_tile_tokens` is hard-coded 1024 (`main.cpp:534`), so a
+  decode-width ppl is not reachable without new app work. Recorded as plan deviation #5.
+
+Harness note: the first relaunch was started with `nohup cmd //c ... &` from a Bash tool call and
+was silently reaped mid-run-3 (log froze at 09:23, zero processes, GPU idle) -- the harness's
+background handling, not a crash. The remaining pairs were relaunched as a harness-managed
+background task (`.deps/run-evidence-rest.bat`, log `evidence-run3.log`).
