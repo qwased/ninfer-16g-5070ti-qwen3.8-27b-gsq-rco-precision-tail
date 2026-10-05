@@ -1439,3 +1439,30 @@ matching the ppl direction. **WP-A3 is DONE and the instrument is trusted for WP
 Harnesses: `.deps/run-m5-save.bat <fmt> <tail> <width> <ctx> <text> <ref>` and
 `.deps/run-m5-kld.bat <fmt> <tail> <width> <ctx> <text> <ref> <outdir>`; KLD lands in `report.json`'s
 `kld` block (`direction: KLD(candidate || reference)`). Default top-K is 100 (matches llama.cpp).
+
+## Step 42 — M5/WP-F (F1/F2/F5): structural + correctness analysis — no ring pollution
+
+Read-only code analysis (delegated; no edits, no GPU). Answers, with the plan's R-D question resolved.
+
+- **F1 — confirmed.** `layout.mtp_kv` is a `PagedKVCacheLayout` with **no tail member**
+  (`decoder_state.h:42-53,142`). `attach_exact_tail` is called **once**, on `text_kv` only
+  (`decoder_state.cpp:257-261`); `mtp_kv` is built at `:256` with no attachment, so every draft layer
+  view is a default tail view with `retention 0` (gate `decoder_state.cpp:211-217`,
+  `paged_kv_cache.h:27-33`, `small_t_tail.cuh:44-49`). Draft attention reads only `mtp_kv`/`batch_mtp_kv`
+  (`text.cpp:386,400,523,577`). So the draft's tail=0 is **by construction, not a flag**.
+- **F2 — NO ring pollution (correctness holds).** The verifier's exact rows are written by the fused
+  shadow kernel (`small_t.cu:326-351`, `small_t_tail_shadow.cuh:49-50`) against the tailed
+  `batch_text_kv_`. Acceptance is a **frontier advance only** (`prefill.cpp:966,969`); the ring is
+  **never rolled back** — the 4 MiB reserve is allocated/accounted only (`startup.cpp:146-151,362-366`),
+  WP8 rollback is a recorded deferral. Pollution is nevertheless impossible: the tail kernel masks
+  causally (`key <= qabs`, `small_t_tail.cuh:272-286`) and the reading round rewrites
+  `[frontier, frontier+w-1]` before reading, so every readable ring row belongs to the reading round;
+  rejected rows sit at positions `> frontier` and are overwritten or masked. Only the reading round
+  can be observed. **R-D does not trigger** — tail × spec needs no WP8 rollback.
+- **F5 — confirmed.** `--mtp-attention-window` (`text.cpp:387-388,401-402`) routes through
+  `window_mtp_attention` → `ops::paged_kv_window_rows` (`paged_kv_window.cuh:8-34`), which remaps block
+  tables/positions only and never touches `cache.tail`. The draft's forced tail=0 holds.
+- **Quality caveat found (not correctness):** MTP verification width = `verify_window+1` can exceed 8,
+  in which case that step takes the Prompt/wide route and the tail is not read. Relevant to F3/F4.
+
+F3 (acceptance) and F4 (perf) are GPU runs on the `ninfer` cli and follow WP-B.

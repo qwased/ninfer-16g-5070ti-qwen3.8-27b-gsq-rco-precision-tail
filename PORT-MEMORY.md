@@ -450,5 +450,12 @@ merged to `main` after each landed sub-step.
   → 0.000912 (tail1024). Harnesses `.deps/run-m5-save.bat` / `.deps/run-m5-kld.bat`.
 - **Small-T width ceiling (measured):** this 27B model has 24 query heads, so `W≤8` is small-T and
   **W=8 is the cheapest valid decode width** (8× fewer steps than W=1). Use W=8 for the campaigns.
+- **WP-F F1/F2/F5 DONE by code analysis (Step 42):** the MTP draft cache `mtp_kv` has no tail member
+  and `attach_exact_tail` runs once on `text_kv` only → the draft's tail=0 is structural. On draft
+  rejection the exact ring is **not** rolled back (WP8 deferred; the 4 MiB reserve is allocate-only),
+  but there is **no pollution**: causal masking + the reading round's same-round shadow rewrite means
+  only rows written by the reading round can be observed. Plan risk R-D does **not** trigger. Caveat:
+  MTP verification width `verify_window+1` can exceed 8 → those steps take Prompt and skip the tail.
+  F3 (acceptance) / F4 (perf) are GPU runs still to do.
 - Runs are strictly serial, single-owner, single GPU (5070 Ti); after **every** run check
   `tasklist`/`nvidia-smi` for orphan processes (user requirement) before starting the next.

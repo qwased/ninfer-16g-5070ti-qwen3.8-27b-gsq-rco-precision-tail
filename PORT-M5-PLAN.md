@@ -113,6 +113,15 @@ Report `kld` block; default K=100.
 **Question**: does the tail affect MTP speculative decoding — both *quality/acceptance* and
 *correctness* (does a rejected draft pollute the exact ring?).
 
+**Status (Step 42):** **F1, F2, F5 DONE by code analysis (read-only).** F1 confirmed (mtp_kv has no
+tail member; attach happens once on text_kv only → draft tail=0 by construction). **F2: NO ring
+pollution** — acceptance is a frontier advance only, the ring is never rolled back (the 4 MiB reserve
+is allocated only; WP8 deferred), but causal masking + same-round shadow rewrite means only the reading
+round's rows are observable. **R-D does not trigger.** F5 confirmed (`paged_kv_window_rows` remaps
+block tables only; never touches `cache.tail`). Caveat: MTP verification width = `verify_window+1` can
+exceed 8, so those steps take the Prompt route and skip the tail. **F3 (acceptance) and F4 (perf)
+remain** — GPU runs on the `ninfer` cli, after WP-B.
+
 - **F1 structural**: the draft cache `layout.mtp_kv` has **no tail member** (asserted in M3); re-confirm
   the draft reads only `mtp_kv` and can never read the exact ring.
 - **F2 correctness (the sharp one)**: verification writes `k+1` exact rows and the tail merge reads them.
