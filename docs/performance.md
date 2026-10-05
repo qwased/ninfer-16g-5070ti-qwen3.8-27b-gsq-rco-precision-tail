@@ -661,6 +661,21 @@ rk4v4-e8 0.0273) despite very different tail-off errors (0.0011 / 0.0026 / 0.006
 storage-independent corruption signature, consistent with the tail path itself (not the body) being
 mis-read when a body coexists.
 
+Context dependence (rk8v4, W=8, 32,764 scored tokens, bf16-tail0 reference per ctx):
+
+| ctx | tail 0 | tail 1024 | tail 2048 |
+|---:|---:|---:|---:|
+| 1024 (short text) | 0.002647 | **0.000912** (whole window; *improves*) | — |
+| 2048 | 0.002838 | **0.022539** | 0.001068 (whole window; *improves*) |
+| 8192 | 0.002647 | **0.027096** | **0.028044** |
+| 16384 | 0.002594 | **0.023840** | **0.021882** |
+| 32768 | 0.002413 | **0.014577** | **0.014910** |
+
+The defect is present at every context where a body contributes; its KLD magnitude falls as the tail
+becomes a smaller fraction of the window (10x at 8K → 6x at 32K), consistent with a roughly
+fixed-cost corruption. The two clean rows are exactly the cases where the tail spans the whole window
+and the body is empty.
+
 The tell is `bf16` body + tail 1024 against a bf16-tail0 reference: same precision on both sides, so a
 correct merge would give KLD ≈ 0, but it gives **0.137** (same-top 0.896). The fault reproduces at
 `W=1` and `W=8`, at ctx 2048 and 8192, for `bf16`, `int8` and `rk8v4` — it is **general to any

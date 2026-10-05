@@ -1666,3 +1666,23 @@ the KLD methodology (the external analogue of the Step 41 self-check).
   not rollback.
 
 **WP-F F3/F4 verdict: measured, but confounded by the Step 44 defect — repeat after the fix.**
+
+### Step 45 addendum — WP-B ctx dependence and the three-tier at ctx 8192
+
+Completed the plan's storage and context coverage (W=8, 32,764 scored tokens, per-ctx bf16-tail0 ref):
+
+- **Three tiers, ctx 8192, tail-on vs tail-off (mean KLD):** int8 0.001126 → 0.026986; rk8v4 0.002647 →
+  0.027096; rk4v4-e8 0.006522 → 0.027349. Tail-on converges to **≈0.027 for every storage** despite
+  tail-off differing 6x across them — a **storage-independent corruption signature** (the tail path,
+  not the body, is mis-read when a body coexists).
+- **Context dependence, rk8v4 (KLD mean, tail 0 / tail 1024 / tail 2048):** ctx 2048 0.002838 /
+  **0.022539** / 0.001068(clean, whole window); ctx 8192 0.002647 / **0.027096** / **0.028044**;
+  ctx 16384 0.002594 / **0.023840** / **0.021882**; ctx 32768 0.002413 / **0.014577** / **0.014910**.
+  The defect is present at every ctx with a body; its magnitude falls as the tail shrinks relative to
+  the window (10x at 8K → 6x at 32K). The only clean rows are `ctx = N` (whole window).
+- **Not run:** `int8`/`rk4v4-e8` at ctx 16K/32K. The corruption signature is already
+  storage-independent, so further cells would only re-confirm it (AGENTS.md: stop collecting once the
+  alternatives are distinguished).
+
+All measurements are recorded in `docs/performance.md` ("Decode-width KLD") with the raw harnesses in
+`.deps/` (`run-m5-{save,kld,wpb,thresh,ctxext,wpc,wpf}`).
