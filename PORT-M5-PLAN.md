@@ -203,3 +203,40 @@ recommended.
   pragmatic path.
 - **R-D**: if **F2** exposes ring pollution on rejection, tail × spec needs WP8 rollback first — a
   product change; treat as a stop-and-decide.
+
+## 10. Fix plan — close the body+tail cache hole (Step 47+)
+
+**Defect.** The fused-append small-T kernel writes the quantized body cache only from *body* splits;
+with `body_window == 0` the partition sets `body_active = 0` and both body kernels return before their
+fused-append block, so while the exact tail covers the whole window (`window ≤ N`) no row is quantized
+into the body cache. Rows are appended only at their own step, so they are a permanent hole that a
+later `window > N` body reads from `[0, window−N)`.
+
+**Design (minimal, 3 files, no new kernel):**
+
+1. `small_t.cuh` — `causal_small_t_tail_partition`: floor `body_active` at 1 whenever `tail_keys > 0`,
+   including `body_window == 0`, so one body split always exists to own the append. It scores nothing
+   (neutral partial) and the tail takes `total_active − 1`.
+2. `small_t_bf16.cuh` + `small_t_i8.cuh` — hoist the fused-append block above the
+   `if (split_start >= split_end) { write_neutral(); return; }` early return, and change the
+   append-owner predicate from `(split_start < body_window && split_end == body_window)` to
+   `split == active_split_count - 1` (the last body split). The two are equivalent for
+   `body_window > 0`; the new form also fires for the append-only split when `body_window == 0`.
+
+**Invariants to hold:** exactly one split appends each current-step row exactly once; the union of
+append ranges is `[0, window)`; `tail_tokens == 0` stays bit-identical; the cached entry
+(`writes_cache == false`), the prompt route, and fp8/nvfp4/k8v4 are untouched; `grid.y` is unchanged
+(DoD #5).
+
+**Accepted cost:** tail-on `window ≤ N` loses bit-identity (one split moves tail→body, fp32 reduction
+order); bounded ~`S·ε` ≈ 1e-6…8e-6, three-to-four orders below the defect — see Step 47.
+
+**Verification:**
+- `ptcheck` syntax on the touched TUs; full build of the small-T objects.
+- Existing FP32 oracle suite (`tests/ops/softmax_attention/causal_cache.cpp`) must stay `PASS`,
+  including the tail-off bit-exact regression and the empty-body-window tail cases.
+- New case: a fused-append sequence whose earliest rows are built while `window ≤ N` and which then
+  crosses `window > N`; the attention output must match the exact/quantized reference (today it
+  reads the hole). Plus a direct invariant check that the quantized cache holds `[0, window)` after
+  an empty-body fused step.
+- Re-run WP-B/C/F only after the fix lands and the oracle passes.

@@ -1720,3 +1720,27 @@ route — `program_impl.cpp:740-792` loops `cursor = 0` in `score_tile` incremen
 sequence whose first N tokens are decoded at width ≤ 8 before a `width > 8` prefill. A normal prefill
 writes `[0, prefill)` and hides it. Recorded in `PORT-MEMORY.md` §5.13 and `PORT-M5-PLAN.md` §9; the fix
 is to make the append own the newest rows independent of the body split count, then re-run WP-B/C/F.
+
+### Step 47 — fix scope, side effects and plan
+
+Re-derived the fix's exact blast radius from the partition code:
+
+- **Steady state (`window > N`) is untouched.** `causal_small_t_tail_partition` already floors
+  `body_active` at 1 whenever `body_window > 0` (the floor lives inside the `if (body_window > 0)`
+  guard), and the append-owner predicate `(split_start < body_window && split_end == body_window)` is
+  *provably* the last body split (the last non-empty split always has `split_end == body_window`, and
+  it is unique). So for `window > N` both the split partition and the append write pattern are
+  unchanged by the fix.
+- **Only the `window ≤ N` phase changes**, and only by moving one split from the tail to the body:
+  `body_active 0 → 1`, `tail_active total_active → total_active−1`. The append-only body split scores
+  nothing (neutral partial, weight 0 in the reducer) and owns `[0, window)` for this step's rows.
+- **Numerical side effect of that move:** the tail is repartitioned from `S` to `S−1` splits, so the
+  fp32 split-K softmax reduction changes order. The merge is exact in real arithmetic; the fp32
+  difference is bounded by ~`S·ε` (ε = 2⁻²⁴ ≈ 5.96e-8): ≤ ~1e-6 for `window ≤ N ≤ 1024` (S ≤ 16) and
+  ≤ ~8e-6 at N = 8192 (S ≤ ~128); typically 1e-7–1e-6 after softmax weighting. Downstream logprob
+  perturbation ~1e-6 → KLD ~1e-6, i.e. **3-4 orders below the 2.7e-2 defect and below the ~1e-3
+  instrument resolution**. Not bit-identical for tail-on in that phase only; **`tail=0` stays
+  bit-identical** (partition and append owner unchanged), so DoD #6 and the N=0 oracle hold.
+- **Fix plan** → `PORT-M5-PLAN.md` §10. Two files change behaviour (`small_t.cuh`,
+  `small_t_bf16.cuh`, `small_t_i8.cuh`); `append_end` (tail-aware fused append) exists in exactly those
+  two kernels, so fp8/nvfp4/k8v4 (untailed) and the prompt route are out of scope.
