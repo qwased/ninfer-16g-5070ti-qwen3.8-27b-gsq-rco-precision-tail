@@ -651,6 +651,15 @@ gives KLD 0, same-top 1.0).
 | 8192 | int8 | 2048 | 6.049234 | **0.027912** | 0.9425 |
 | 8192 | rk8v4 | 0 | 5.980890 | 0.002647 | 0.9760 |
 | 8192 | rk8v4 | 1024 | 6.046884 | **0.027096** | 0.9371 |
+| 8192 | rk8v4 | 2048 | 6.050781 | **0.028044** | 0.9423 |
+| 8192 | rk4v4-e8 | 0 | 6.011151 | 0.006522 | 0.9660 |
+| 8192 | rk4v4-e8 | 1024 | 6.044898 | **0.027349** | 0.9354 |
+| 8192 | rk4v4-e8 | 2048 | 6.048284 | **0.027848** | 0.9424 |
+
+Note that the tail-on KLD converges to **≈0.027 for every storage** (int8 0.0270, rk8v4 0.0271,
+rk4v4-e8 0.0273) despite very different tail-off errors (0.0011 / 0.0026 / 0.0065) — a
+storage-independent corruption signature, consistent with the tail path itself (not the body) being
+mis-read when a body coexists.
 
 The tell is `bf16` body + tail 1024 against a bf16-tail0 reference: same precision on both sides, so a
 correct merge would give KLD ≈ 0, but it gives **0.137** (same-top 0.896). The fault reproduces at
