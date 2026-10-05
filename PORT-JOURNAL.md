@@ -1599,3 +1599,30 @@ result and does not establish app-level correctness. Recommended next: a targete
 window > body_window and a real multi-round ring (or a body+tail case at window ≫ 67 keys); then fix
 the body/tail combination and re-run WP-B. Until then, do **not** claim the tail benefit and do **not**
 call the mechanism fully closed.
+
+### Step 44 addendum 2 — the defect is GENERAL, not INT8-specific
+
+Two further probes settle the character:
+
+| probe (ctx 2048 unless noted) | KLD mean | same-top | verdict |
+|---|---:|---:|---|
+| rk8v4 tail1024, **W=1** (short text) | 0.038912 | 0.9453 | broken (so not a W/split artifact) |
+| **bf16** body tail1024 (long text) vs bf16-tail0 ref | **0.137362** | 0.8958 | **grossly broken** |
+
+The bf16-body case is the tell: the candidate and the reference are the **same precision**, so a correct
+tail merge would give KLD ≈ 0. Getting 0.137 means **turning the tail on with a non-empty body
+grossly changes attention** — for every storage family, at W=1 and W=8, at ctx 2048 and 8192. It is not
+a quantization-domain issue and not the split partition (the all-tail and tail-off cases are both
+clean). The leading hypothesis is that when the body is present the body and tail **double-count** the
+tail's key range (body scoring more than `[0, body_window)`, so `[body_window, window)` enters the
+softmax twice), i.e. the body-scope clamp (§8 deviation #3, "the body scores `[0, body_window)`") is not
+in effect on the path the app actually uses (the fused-append entry across many rounds). This is only
+reachable once `body_window > 0` — exactly what the oracle never tests (T=6 / keys ≤ 67; the fused case
+is a single append step).
+
+**Consequence for M5:** the campaign's answer is neither "tail helps" nor "tail is worthless" — it is
+**"the tail is not correctly merged whenever a quantized/any body coexists, so the benefit cannot be
+claimed; the mechanism is not closed."** WP-C (llamacpp) is still worth running: it is the external
+reference implementation that merges inside FA at all widths, so its incremental ΔKLD shows the
+magnitude a correct merge should recover. WP-E must flip the plan's premise and update the DoD
+accordingly.

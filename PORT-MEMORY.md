@@ -479,6 +479,13 @@ merged to `main` after each landed sub-step.
   windows, a regime the oracle never exercises (T=6/keys≤67). The M1 TAILGAIN line is a small-window
   result and does **not** establish app-level correctness. Fix + targeted oracle case needed before any
   benefit claim; the mechanism is **not** fully closed.
+- **WP-B defect is GENERAL (Step 44 addendum 2):** `bf16` body + tail1024 vs bf16-tail0 reference at
+  ctx 2048 gives KLD mean **0.137** / same-top 0.896 — the candidate and reference are the *same
+  precision*, so a correct merge would be ≈0. It reproduces at W=1 (0.0389) and 2048/8192, for int8,
+  rk8v4 and bf16. Leading hypothesis: with a non-empty body the body and tail **double-count** the
+  tail key range (body scope not clamped to `[0, body_window)` on the fused path, §8 deviation #3) —
+  reachable only when `body_window > 0`, which the oracle never tests. **Verdict: the tail benefit
+  cannot be claimed; the mechanism is not closed; the port needs a fix.**
 - **Operational rule (learned the hard way):** long GPU batches must run in **foreground chunks**
   (≤600 s, ~3-4 runs), re-invoking the resumable batch each time. Both `run_in_background` and
   `start /b`-detached batches are **killed after ~3 min**. After every chunk verify
