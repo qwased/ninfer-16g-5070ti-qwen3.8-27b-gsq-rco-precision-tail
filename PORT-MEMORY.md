@@ -460,8 +460,17 @@ merged to `main` after each landed sub-step.
 - **WP-B IN PROGRESS (resumable):** `.deps/run-m5-wpb.bat` skips completed runs and writes
   `.deps/wpb.done`. Matrix int8/rk8v4/rk4v4-e8 × tail {0,1024,2048} × ctx {8192,16384,32768}, W=8,
   text `.deps/m5-longtext.txt` (32,764 scored tokens), reference = per-ctx bf16-tail0 `--save-topk`.
-  Done so far: ctx 8192 int8 t0/t1024/t2048 (`m5-wpb-int8-t*-c8192`) — t0 mean KLD 0.001126,
-  same-top 0.9847. Summarize with `python .deps/summarize-wpb.py`.
+  Done so far: ctx 8192 int8 t0/t1024/t2048 + rk8v4 t0/t1024 — t0 mean KLD 0.0011-0.0026,
+  tail-on ~0.027. Summarize with `python .deps/summarize-wpb.py`.
+- **WP-B NEGATIVE at ctx 8192 (Step 44) — candidate product defect, NOT yet a conclusion:**
+  int8/rk8v4 tail 1024/2048 → mean KLD ~0.027 vs ~0.001-0.003 at tail 0 (10-24× worse; ppl worse too),
+  while at ctx=N=1024 the same rk8v4 tail *improved* KLD (0.002738 → 0.000912). A delegated exhaustive
+  re-simulation **exonerates the split partition** for reachable capacities (body ∪ tail == [0,window),
+  `tail_active=1` via the §5.10 fix; the `total_active==1` hole is unreachable). Fault lies in the
+  **shared tail/ring path**; the in-tree oracle fixtures ≤2 ring pages (T=6, keys≤67), so
+  `ring_pages>=3` and the product's `+1` rollback page are **never exercised**. Disambiguate with a
+  ctx {2048,4096} × tail {0,1024} sweep, then a targeted oracle case (window 2048, N=1024, T=8,
+  fixture `ceil(N/64)+1` pages). **Do not conclude the benefit question before this.**
 - **Operational rule (learned the hard way):** long GPU batches must run in **foreground chunks**
   (≤600 s, ~3-4 runs), re-invoking the resumable batch each time. Both `run_in_background` and
   `start /b`-detached batches are **killed after ~3 min**. After every chunk verify

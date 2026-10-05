@@ -1529,3 +1529,47 @@ between chunks.
 **Build env:** `.deps/build-target.bat <target> [jobs]` (VS2022 v143 + CUDA 13.3 + vcpkg under
 `.deps/vcpkg-root`); per-TU check `.deps/ptcheck.py` with `PTWT=<worktree>`. Builds take ~25 min
 (header change → wide rebuild).
+
+## Step 44 — WP-B partial: at ctx 8192 the INT8-family tail makes KLD ~10-24x WORSE (negative)
+
+**The measurement (trusted, W=8, 32,764 scored tokens, KLD vs a per-ctx bf16-tail0 reference):**
+
+| ctx | storage | tail | ppl | KLD mean | same-top |
+|---:|---|---:|---:|---:|---:|
+| 8192 | int8 | 0 | 5.971447 | 0.001126 | 0.9847 |
+| 8192 | int8 | 1024 | 6.045914 | **0.026986** | 0.9373 |
+| 8192 | int8 | 2048 | 6.049234 | **0.027912** | 0.9425 |
+| 8192 | rk8v4 | 0 | 5.980890 | 0.002647 | 0.9760 |
+| 8192 | rk8v4 | 1024 | 6.046884 | **0.027096** | 0.9371 |
+
+Both INT8-family storages degrade ~10-24x, and ppl worsens too. This **contradicts** the short-context
+result (ctx = N = 1024, rk8v4): there the tail improved KLD 0.002738 → 0.000912. So the tail's sign
+flips with window length. Runs to date: ctx 8192, int8 t0/t1024/t2048 + rk8v4 t0/t1024.
+
+**Root-cause analysis (delegated, read-only; exhaustive Python re-simulation of the partition).**
+The small-T tail split partition is **exonerated** for reachable capacities: at window 8192 / tail 1024
+/ KVHeads 4 the tier saturates, the §5.10 "body one split short" fix applies (`body_active =
+total_active−1`, `tail_active = 1`), the body recomputes `units_per_split` over `body_window` so it
+still tiles `[0, body_window)`, and `body ∪ tail == [0, window)` with no gap or overlap for every
+reachable config. The only structural hole is `total_active == 1 && tail_keys > 0` (forces
+`body_active = 1` at `small_t.cuh:170` → `tail_active = 0` → gap `[body_window, window)`), which needs
+`launch_capacity == 1` or `wave_splits == 1` — **unreachable** on this part (≈17-35 wave splits).
+
+Since the fault is body-size- and tail-size-independent (int8 t1024 ≈ rk8v4 t1024 ≈ 0.0270), it is in
+the **shared tail/ring path**, not the partition. The analyst flagged that the in-tree oracle
+(`tests/ops/softmax_attention/causal_cache.cpp`) fixtures a ring of `ceil(N/64)` pages with ≤2 pages,
+so **ring_pages ≥ 3 and the product's `+1` rollback page are never exercised** (product allocates
+`ceil(N/64)+1` pages, `startup.cpp:147-150`), and the oracle only tests T=6 / keys ≤ 67. A ring-addressing
+or cross-round-fill defect at long windows would be invisible to it — and would not affect
+window ≤ tail (the ctx=1024 case).
+
+**Verdict so far: NOT YET EXPLAINED. This is a candidate product defect, not a "not worth it" result.**
+Do not conclude the benefit question until one of these disambiguates:
+1. app-level sweep to localize the threshold — ctx {2048, 4096, 8192} × tail {0,1024} on rk8v4;
+2. a targeted oracle case: window 2048 (> launch capacity × units) with N=1024, T=8, and a fixture with
+   the product's real `ring_pages = ceil(N/64)+1` (≥3 pages). Pass ⇒ partition/ring exonerated; fail ⇒
+   dump `body_window/body_active/tail_active` and per-split key ranges.
+
+The oracle as-is **PASSES** (`build-port/tests/ninfer_tests.exe ninfer_softmax_attention_test`, exit 0,
+rk8v4/rk4v4-e8 TAILGAIN lines present) — but it does not cover this regime. `.deps/summarize-wpb.py`
+renders WP-B; the resumable batch continues at rk8v4 t2048 ctx 8192.
