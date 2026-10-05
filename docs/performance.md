@@ -617,3 +617,81 @@ Indicative only — a 24-token run is noisy and is not a throughput benchmark. I
 shape (prefill flat, decode a few percent slower with the tail), not a measured cost curve. A
 body+tail dual-write scan of `bench/ops/kv_cache_append_bench.cu` and a longer decode benchmark are
 the outstanding plan §5 performance characterisation.
+
+### Decode-width KLD — the tail's effect when it is actually read (2026-10-05, M5)
+
+The perplexity app scores the **prefill** route (1024-wide tiles → `Prompt`), which never reads the
+tail, so tail on/off ppl is bit-identical (above). `apps/perplexity --score-width W` narrows the
+scoring query tile to `W`; at `W ≤ 8` the small-T route runs and the tail merges. KLD is measured
+against a persisted reference (`--save-topk`, `--kld-base`) over top-K 100, matching llama.cpp's
+channel. Protocol: rk8v4, `W=8`, `--context 1024 --disjoint`, 2,046 scored tokens (a 12 KB wikitext
+slice), bf16-tail0 reference.
+
+| tail | score width | perplexity | KLD mean vs bf16 |
+|---:|---:|---:|---:|
+| 0 | 1024 | 6.485412 | — (reference) |
+| 0 | 8 | 6.496149 | 0.002647 |
+| 1024 | 1024 | 6.485412 | — (bit-identical to tail 0) |
+| 1024 | 8 | 6.464423 | **0.000912** |
+
+When the tail covers the whole window (here `ctx = N = 1024`, so the body is empty), it is **correct
+and improves** both ppl and KLD. The instrument self-check is exact (a run against its own reference
+gives KLD 0, same-top 1.0).
+
+**However, when the window is longer than the tail — the normal case — the merge is wrong.** At
+`ctx = 2048`, `tail = 1024` (body_window = 1024) the same measurement degrades badly:
+
+| ctx | storage | tail | ppl | KLD mean | same-top |
+|---:|---|---:|---:|---:|---:|
+| 2048 | rk8v4 | 0 | 6.92705 | 0.002838 | 0.9736 |
+| 2048 | rk8v4 | 1024 | 7.02481 | **0.022539** | 0.9556 |
+| 2048 | rk8v4 | 2048 | 6.91090 | 0.001068 | 0.9844 |
+| 8192 | int8 | 0 | 5.971447 | 0.001126 | 0.9847 |
+| 8192 | int8 | 1024 | 6.045914 | **0.026986** | 0.9373 |
+| 8192 | int8 | 2048 | 6.049234 | **0.027912** | 0.9425 |
+| 8192 | rk8v4 | 0 | 5.980890 | 0.002647 | 0.9760 |
+| 8192 | rk8v4 | 1024 | 6.046884 | **0.027096** | 0.9371 |
+
+The tell is `bf16` body + tail 1024 against a bf16-tail0 reference: same precision on both sides, so a
+correct merge would give KLD ≈ 0, but it gives **0.137** (same-top 0.896). The fault reproduces at
+`W=1` and `W=8`, at ctx 2048 and 8192, for `bf16`, `int8` and `rk8v4` — it is **general to any
+non-empty body**, not a quantization-domain issue, and not the split partition (the all-tail case and
+the tail-off case are both clean; the in-tree oracle only tests T=6 / ≤67 keys, or a single fused
+append step, so it does not cover this regime). **Conclusion: the tail is not correctly merged
+whenever a body contributes, so its benefit cannot be claimed. This is a defect to fix, not a "the
+tail is useless" result.**
+
+### Cross-product check — llama.cpp `kvarn4` (same model family)
+
+`llama-perplexity.exe`, `Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf`, `-c 4096 --chunks 8 -b 2048 -ub 512`,
+baseline = default f16 KV logits. llama.cpp merges the tail **inside FA at all widths**.
+
+| llamacpp KV | mean KLD | max KLD | p99.9 KLD |
+|---|---:|---:|---:|
+| f16 vs f16 baseline | 0.000000 | 0.000059 | 0.000049 |
+| q8_0 | 0.000531 | 0.046475 | 0.014471 |
+| kvarn4 tail 0 | 0.001107 | 0.187910 | 0.029845 |
+| kvarn4 tail 1024 | **0.000702** | **0.078444** | **0.022121** |
+
+The tail cuts mean KLD 37% and max KLD 58%. **The benefit is real and achievable** — ninfer's
+body+tail merge is the gap. Compare only *incremental* ΔKLD by byte tier, never absolute values
+across builds.
+
+### Speculation × tail (indicative)
+
+`ninfer` cli, `--spec mtp --draft-tokens 7`, `rk4v4-e8`, 5 prompts, `--max-new 256 --max-context 4096`:
+
+| tail | acceptance | acceptance length | decode |
+|---:|---:|---:|---:|
+| 0 | 24.1% | 2.774 tok/round | 82.6 tok/s |
+| 1024 | 20.3% | 2.408 | 70.8 tok/s |
+
+(Acceptance length and rate fall; with this short workload tail 1024 ≡ 2048 because prompt+generation
+< 1024 tokens, so "tail" covers the whole context.) These numbers are **confounded by the merge defect
+above** — the draft is tail-free while the corrupted verifier sees the tail — so they should be
+re-measured after the fix. Structured correctness (no rejected-draft pollution of the exact ring) is
+established separately: the draft cache has no tail member, and a rejected row is never observable
+because the tail masks causally and the reading round rewrites its rows first.
+
+DoD §7.3 is therefore **evidenced as negative for the current build**: ppl cannot show the tail
+(prefill route), and the decode-width KLD that can show it exposes a merge defect.
