@@ -1185,3 +1185,34 @@ Two things learned while wiring it, both recorded so they are not rediscovered:
   segmentation fault loses everything written so far and CTest shows only the exit code. A
   temporary `setvbuf(stdout, nullptr, _IONBF, 0)` in `tests/guarded_main.h` was used to locate the
   crash, then reverted (git status confirms only `causal_cache.cpp` is modified).
+
+## Step 34 -- M0 KVarN decision gate, first pass
+
+Ran the plan §0.5 baseline cell. Two things came out of it.
+
+**The open item is resolved.** Plan §0.5 flagged that llamacpp `--cache-type-k kvarn4` "may require
+a model-backed speculative mode", which §0.5 forbids. It does not: `llama-perplexity` with
+`--cache-type-k kvarn4 --cache-type-v kvarn4 --kv-tail-tokens 1024` runs with no speculative mode
+(`--spec-type none` is a server/cli flag; the offline scorer never speculates). It logs
+`llama_init_from_model: KVarN requires Flash Attention; enabling it` and scores normally.
+
+**The harness had a real bug.** `cell_llamacpp` never passed the corpus, so the first run died at
+`perplexity: the data file you provided tokenizes to only 0 tokens`. Added a pinned
+`CORPUS_TEXT` (`eval/corpora/perplexity-1m/data/wikitext/00.txt`) and `-f`, plus `need_file` on it.
+
+Pinned baseline (Wikitext-00, ctx 4096, `--chunks 4`, tail 0 unless noted), `port-tools/results/`:
+
+| KV type | PPL |
+|---|---|
+| f16 | 5.3580 |
+| q8_0 | 5.3577 |
+| kvarn4 (tail 0) | 5.3559 |
+| kvarn4 (tail 1024) | 5.3622 |
+
+Every figure is ±0.136, so kvarn4 is indistinguishable from f16/q8_0 here and the tail is neutral.
+The decision: **no quality-driven reason to borrow KVarN** on this evidence -- ninfer's own rotated
+rk4v4-e8 is likewise within noise of the exact oracle, so adopting KVarN would buy no measurable
+quality at the same granularity. The honest caveat is that 4 chunks cannot resolve differences this
+small; a decision-grade run wants a longer chunk count, which is the Phase-2 trigger the plan names,
+not a blocker. Real-model GPU runs were serial and single-owner; `tasklist` confirmed clean after
+each (`llama-perplexity` count 0).

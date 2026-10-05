@@ -20,9 +20,16 @@ packages, each mapped to concrete evidence. **Update on every step.** Status val
 
 ## Milestones (plan §4)
 
-- **M0** (KVarN decision gate): `TODO` — harness ready (`port-tools/run-experiments.sh`), baseline
-  hashes pinned. Open item: llamacpp `--cache-type-k kvarn4` may require a model-backed speculative
-  mode, which plan §0.5 forbids — resolve empirically. GPU must be free (ask first).
+- **M0** (KVarN decision gate): **DONE (first pass)** — open item **RESOLVED**: `llama-perplexity
+  --cache-type-k kvarn4` runs with **no** speculative mode (`--spec-type none` is a server/cli flag;
+  the offline scorer does not speculate); it logs `KVarN requires Flash Attention; enabling it` and
+  scores. The harness was also fixed to pass the corpus (`-f`), which it previously omitted
+  (`port-tools/run-experiments.sh`). Pinned baseline (`data/wikitext/00.txt`, ctx 4096, 4 chunks,
+  tail 0): **f16 5.3580, q8_0 5.3577, kvarn4 5.3559**; kvarn4 tail=1024 **5.3622** (all ±0.136).
+  **Conclusion:** on this slice KVarN shows no measurable ppl penalty vs f16/q8_0 and the tail is
+  within noise, so there is no *quality-driven* case to borrow KVarN — ninfer's own rotated rk4v4-e8
+  is likewise indistinguishable from exact at this granularity. A low-noise decision needs a longer
+  chunk count (Phase-2 trigger, not a blocker). Artifacts under `port-tools/results/20261005-101*`.
 - **M1** (static BF16 tail functional closure): **DONE** — the FP32 oracle is green for BF16 +
   the INT8 family (fused and cached) and the batched masked case, the graph-family assertion passes,
   the memory footprint matches plan §2 exactly, and the exit clause "quality improvement measurable"

@@ -25,6 +25,9 @@ NINFER_MODEL="${NINFER_MODEL:-$NINFER_PKG_DIR/model/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-
 # Our build (task #2). The shipped product has no perplexity binary.
 NINFER_PPL="${NINFER_PPL:-$REPO/build-port/apps/ninfer-perplexity.exe}"
 CORPUS_MANIFEST="${CORPUS_MANIFEST:-$REPO/eval/corpora/perplexity-1m/manifest.json}"
+# llama-perplexity takes one text file (the ninfer side reads the manifest). Pin the same
+# wikitext stream so the M0 baseline is reproducible; override for other streams.
+CORPUS_TEXT="${CORPUS_TEXT:-$REPO/eval/corpora/perplexity-1m/data/wikitext/00.txt}"
 
 # Pinned protocol (plan §0.5 item 3): same -c / batch size / metric on both sides.
 CTX="${CTX:-4096}"
@@ -89,8 +92,10 @@ run() {
 cell_llamacpp() {
   local dir; dir="$(new_run_dir llamacpp-$KVARN-tail$TAIL_N)"
   need_file "$LLAMACPP_MODEL"
+  need_file "$CORPUS_TEXT"
   run "$dir" baseline "$LLAMACPP_DIR/llama-perplexity.exe" \
     -m "$LLAMACPP_MODEL" \
+    -f "$CORPUS_TEXT" \
     --cache-type-k "$KVARN" --cache-type-v "$KVARN" \
     --kv-tail-tokens "$TAIL_N" \
     -c "$CTX" --chunks 4
