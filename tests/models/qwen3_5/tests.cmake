@@ -50,6 +50,10 @@ ninfer_add_test(ninfer_qwen3_5_runtime_mechanisms_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_runtime_mechanisms.cpp"
   LIBRARIES ninfer_engine ninfer_core)
 
+ninfer_add_test(ninfer_qwen3_5_exact_tail_capacity_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_exact_tail_capacity.cpp"
+  LIBRARIES ninfer_engine ninfer_core)
+
 ninfer_add_test(ninfer_qwen3_5_state_image_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_state_image.cpp"
   LIBRARIES ninfer_engine ninfer_core)
