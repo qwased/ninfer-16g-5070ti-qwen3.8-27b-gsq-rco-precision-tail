@@ -46,11 +46,6 @@ __global__ void causal_attention_small_t_tail_shadow_kernel(
         static_cast<std::int64_t>(column_begin) + static_cast<std::int64_t>(batch) * full_width;
     const int position = pos[column_base + token];
     const int ring     = batch * ring_pages + ((position >> kPagedKVPageShift) % ring_pages);
-    if (blockIdx.x == 0 && threadIdx.x == 0) {
-        printf("XDBGSH batch=%d valid=%d token=%d position=%d ring=%d rp=%d column_base=%lld\n",
-               batch, valid, token, position, ring, ring_pages,
-               static_cast<long long>(column_base));
-    }
     const std::int64_t src_off = static_cast<std::int64_t>(d) +
                                  static_cast<std::int64_t>(D) *
                                      (kv_head + static_cast<std::int64_t>(Geometry::KVHeads) * token);

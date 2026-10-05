@@ -310,11 +310,6 @@ __launch_bounds__(256) __global__ void causal_attention_small_t_reduce_output_ke
     const int window = last_pos + 1;
     const int active_split_count =
         causal_small_t_active_splits<Geometry, Int8>(window, split_count, tokens, wave_splits);
-    if (q_head == 0 && token == 0 && tid < 10 && tid < active_split_count) {
-        const int i = causal_partial_stat_index<Geometry>(q_head, token, tid, tokens);
-        printf("DBGRED win=%d asc=%d sc=%d tok=%d ws=%d split=%d m=%.6f l=%.6f\n", window,
-               active_split_count, split_count, tokens, wave_splits, tid, partial_m[i], partial_l[i]);
-    }
 
     __shared__ float weights[256], warp_sums[8], scalars[2];
     const float head_l =

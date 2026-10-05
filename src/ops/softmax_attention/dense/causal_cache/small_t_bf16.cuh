@@ -168,13 +168,6 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
     const int append_start = split_start;
     const int append_end =
         (split_start < body_window && split_end == body_window) ? window : split_end;
-    if (kv_head == 0 && batch == 0 && tid == 0 && split == 0) {
-        printf("XDBGBF16 win=%d bw=%d ba=%d ta=%d split=%d ss=%d se=%d aps=%d ape=%d ft=%d kb=%d "
-               "tok=%d cap=%d tt=%d\n",
-               window, body_window, active_split_count, tail_partition.tail_active, split,
-               split_start, split_end, append_start, append_end, first_tile, key_blocks, tokens,
-               split_count, tail_tokens);
-    }
 
     if constexpr (CacheInput::writes_cache) {
         // The owning split writes each new row. Current attention reads those rows directly from
