@@ -56,6 +56,11 @@ packages, each mapped to concrete evidence. **Update on every step.** Status val
   complete the same 12 rounds (~24-26% acceptance, ~1.8-1.9 tok/round, `EXIT=0`), and plain decode at
   N=1024 completes too — the speculation path is not regressed by the tail.
 - **M4** (optional tier): out of scope for now.
+- **M5** (tail *benefit* on rk4v4-e8 / rk8v4 / int8, + MTP impact): **WIP — plan written, not
+  executed** (`PORT-M5-PLAN.md`, Step 37). Root cause established: the benefit was never measurable
+  because `apps/perplexity` scores the prefill route and the tail merges only on the small-T decode
+  route → bit-identical ppl; upstream judges by KLD. Route A chosen (decode-width scoring + KLD
+  instrument). Nothing run yet.
 
 ## Work packages (plan §3)
 

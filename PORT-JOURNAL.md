@@ -1286,3 +1286,36 @@ the host slab, LRU or disk, so there is no second page size to carry through the
 The speculation path is not regressed by the tail. (A first attempt died on shell quoting — the
 spaced prompt was split by the nested `cmd //c`, `error: unknown argument: capital`; a no-space
 prompt avoids it.) All runs serial, single GPU; `tasklist` clean after. `PORT-DOD.md` M3 → DONE.
+
+## Step 37 — M5 opened: the tail's benefit was never measured (and why)
+
+The benefit question is now separated from the mechanism question. Root cause, measured not inferred:
+`apps/perplexity` scores the prefill route (1024-wide tiles → `Prompt`) and the tail merges only on the
+small-T decode route (`width ≤ 8`), so tail=0 vs tail=N ppl is **bit-identical** on every wired storage.
+The llamacpp side merges inside FA at all widths, so its `llama-perplexity` *does* read the ring — the
+M0 numbers differ (kvarn4 tail0 5.3559 vs tail1024 5.3622), which is the tell. Upstream judges quality by
+**KLD** against a persisted BF16-KV logits baseline (`beellama-features.md:543,699-730`), a sharp metric;
+M0 used **PPL**, which is blunt. M0's null is therefore blunt metric × ctx 4096 × good body (kvarn4)
+stacked three ways — **not** evidence against the tail.
+
+Decisions (user): route **A — decode-width scoring**, no product-math change; metric **KLD + ppl**;
+ctx {8K, 16K, 32K}; plus **WP-F, MTP × tail** (quality and correctness).
+
+Delegated a read-only investigation of the instrument's change points (general-purpose subagent). It
+confirmed the call chain and found:
+- Scoring width is implied by the token span; the real attention query width is `prefill_chunk` via
+  `nominal` (`program_impl.cpp:684`), **not** `kCausalScoreTile` (`startup.h:25`, staging only). So
+  `--score-width W` = parse + add an `EngineOptions` field + consume it there; scoring forbids graphs
+  (`program_impl.cpp:594`) and `small_prefill` only affects width>16 → **no route/graph work**.
+- `width≤8` → SmallT (`causal_softmax_attention.cpp:392`); the tail is read only in small-T
+  (`small_t.cu:214,237-252`); the `Prompt` path never references `cache.tail` → **width≤8 scoring will
+  read the ring. Confirmed.**
+- KLD: only the target-token logprob is returned today, but `[vocab,C]` logits are already materialized
+  on device → a top-K device op over them is the minimal path; widening `Engine::score_tokens` is the
+  non-trivial part.
+- Traps: `score_width` must bypass the 128-alignment of `effective_prefill_chunk`
+  (`startup.cpp:1339-1354`); a BF16 body with ≤128 visible keys still resolves to `Prompt`
+  (`:366-367`), so the first ~128 keys of a window skip the tail.
+
+Plan written to `PORT-M5-PLAN.md` (WP-A instrument, WP-B three-tier, WP-C llamacpp, WP-D regression,
+WP-F MTP, WP-E docs). **Not executed** — user will continue in the next window.
