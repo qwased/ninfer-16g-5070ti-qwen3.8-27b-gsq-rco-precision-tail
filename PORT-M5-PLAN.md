@@ -266,3 +266,26 @@ completes the verification list (touched-TU build, FP32 oracle suite incl. `N=0`
 The empirical fail-without-fix reversal was deferred — reverting `small_t.cuh` forces a full small-T
 rebuild (~2 h); the Step 48 KLD re-run already is the system-level fail-without-fix evidence. See
 `PORT-JOURNAL.md` Step 49.
+
+### 10.3 Crossing case — the multi-step consequence (Step 50)
+
+The empty-body case guards the *missing append* directly. The plan's first half of bullet 3 — a
+fused-append sequence whose earliest rows are built while `window ≤ N` and which then crosses
+`window > N`, with the attention output held to the reference — needs **multiple steps**, because a
+single fused step writes all of `[0, window)` (`append_end = window` on the last body split); a row is
+only ever written at its own step, so the hole is a multi-step artifact. `run_fused_crossing_case`
+drives that: one persistent `DeviceCache`, 24–25 sequential fused launches of 8 tokens each
+(`window 192–200`), the early steps entirely inside the tail (`body_window == 0`), the last scoring a
+body of 8. The host reference appends every step's rows to the fixture in order and populates the ring
+once from the whole sequence, then the **final** step's output plus the whole cache and ring are
+compared. Wired for `d256-h24-kv4` + `rk8v4` × `{fragmented, offset}` × `{N=192 (window 200, ring
+wraps), N=129 (window 192, no wrap)}` — four `TOPTEST fused-append crossing build` lines.
+`softmax_attention: PASS`, `ORACLE_EXIT=0`.
+
+Only rk8v4 is used: its decode prompt cutoff is 0 keys, so every step routes to the small-T fused
+kernel at any window; bf16's 256-key cutoff sends the early steps to the writing-only prompt route,
+which appends correctly and could never build the hole. The case is structurally discriminating — the
+body region `[0, window − N)` is exactly the rows the early empty-body steps own, so before the fix
+the final step scored the fixture and both the output and the cache planes disagreed (the same
+comparison already caught the harness's own token-major slicing bug during development, `cache-v` +
+`exact-tail` mismatches). The fail-without-fix reversal is deferred for the same build cost as §10.2.

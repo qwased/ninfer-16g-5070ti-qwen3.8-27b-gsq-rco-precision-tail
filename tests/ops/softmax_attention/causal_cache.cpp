@@ -4396,6 +4396,150 @@ int run_fused_empty_body_append_case(const Geometry& geometry, const CachePlan& 
     return run_a1_case(geometry, plan, test_case, mapping, nullptr, false);
 }
 
+// TOPTEST crossing regression for the M5 body+tail cache hole (fixed in 56fc8384). Where
+// run_fused_empty_body_append_case catches the *missing append* directly, this case reproduces the
+// *consequence* the defect was first seen as. A sequence is built entirely through the fused decode
+// entry; its earliest rows are quantized while the exact tail still covers the whole window
+// (`window <= N`, `body_window == 0`), then it crosses `window > N` so the body scores
+// `[0, window - N)` -- rows owned by those earlier, empty-body steps. This is the shape
+// `--score-width <= 8` produces from position 0, and the shape the Step 48 E2E KLD re-run exercised.
+//
+// Each step is an independent fused launch on one persistent cache (the real decode pattern). The
+// host reference appends every step's rows to the fixture in order -- so its body region holds the
+// true quantized rows -- and populates the ring once from the whole sequence, then the *final* step's
+// attention output and the whole cache are compared. Before the fix the earliest `body_window` rows
+// were never quantized, so the final step scored the fixture and both the output and the cache planes
+// disagreed with the reference.
+//
+// Only d256-h24-kv4 + rk8v4 is used. rk8v4 is the int8 family, whose decode prompt cutoff is 0 keys,
+// so every step routes to the small-T fused kernel at any window; bf16's 256-key cutoff would send
+// the early steps to the prompt route, which appends correctly and could never build the hole.
+// `step_tokens == 8` is inside the small-T width bound for 24 query heads (`kMaximumVerifyTokens` is
+// 16, the width-8 cutoff is on the storage's prompt limit) and `tail_tokens == 192` is three 64-page
+// ring pages, so 24 steps sit entirely inside the tail and the 25th (window 200) scores a body of 8.
+int run_fused_crossing_case(const Geometry& geometry, const CachePlan& plan, MappingPattern mapping,
+                            std::int32_t tail_tokens, std::int32_t step_tokens,
+                            std::int32_t step_count, std::uint32_t seed) {
+    const std::int32_t window        = step_tokens * step_count;
+    const std::uint32_t envelope_max = 512;
+    // max_visible_keys is the envelope cap, so the fixture has to cover it (validation rejects
+    // max_visible_keys > capacity) -- exactly what run_a1_case does with max(total + 3, envelope_max).
+    const std::int32_t max_context = std::max<std::int32_t>(window + 3, static_cast<std::int32_t>(envelope_max));
+    const std::size_t q_stride  = static_cast<std::size_t>(kHeadDim) * geometry.q_heads;
+    const std::size_t kv_stride = static_cast<std::size_t>(kHeadDim) * geometry.kv_heads;
+
+    std::vector<float> all_k = make_bf16_values(kv_stride * static_cast<std::size_t>(window),
+                                                seed + 1u, -0.25f, 0.25f);
+    std::vector<float> all_v = make_bf16_values(kv_stride * static_cast<std::size_t>(window),
+                                                seed + 2u, -1.0f, 1.0f);
+    inject_codec_edges(geometry, window, all_k, all_v);
+    std::vector<float> all_q = make_bf16_values(q_stride * static_cast<std::size_t>(window), seed,
+                                                -0.25f, 0.25f);
+    std::vector<std::int32_t> all_positions(static_cast<std::size_t>(window));
+    for (std::int32_t p = 0; p < window; ++p) { all_positions[static_cast<std::size_t>(p)] = p; }
+
+    const HostCache initial = make_cache(geometry, plan, max_context, seed + 10u);
+    HostCache expected      = initial;
+    append_cache(expected, all_k, all_v, all_positions);
+    if (tail_tokens > 0) {
+        populate_tail(expected, all_k, all_v, all_positions, tail_tokens, DType::BF16);
+    }
+
+    DeviceCache cache(initial, mapping, tail_tokens, DType::BF16);
+
+    const std::size_t step_q  = q_stride * static_cast<std::size_t>(step_tokens);
+    const std::size_t step_kv = kv_stride * static_cast<std::size_t>(step_tokens);
+    GuardedDeviceBuffer dq(step_q * sizeof(std::uint16_t));
+    GuardedDeviceBuffer dk(step_kv * sizeof(std::uint16_t));
+    GuardedDeviceBuffer dv(step_kv * sizeof(std::uint16_t));
+    GuardedDeviceBuffer dp(static_cast<std::size_t>(step_tokens) * sizeof(std::int32_t));
+    GuardedDeviceBuffer dtable_row(sizeof(std::int32_t));
+    GuardedDeviceBuffer dout(step_q * sizeof(std::uint16_t));
+    const std::int32_t table_row = 0;
+    dtable_row.copy_from_host(&table_row, sizeof(table_row));
+
+    const ops::CausalAttentionExecutionEnvelope largest{
+        static_cast<std::uint32_t>(window), envelope_max, false, false, false};
+    const std::size_t workspace_bytes = ops::causal_softmax_attention_workspace_capacity_bytes(
+        op_geometry(geometry), cache_plan_storage(plan), largest, 1, step_tokens, step_tokens);
+    GuardedDeviceBuffer workspace_buffer(std::max<std::size_t>(workspace_bytes, 256));
+
+    const std::string label =
+        case_label("causal_softmax_attention crossing", geometry, plan,
+                   with_tail({step_tokens, 0, envelope_max, seed}, tail_tokens), mapping);
+    std::cout << "    TOPTEST fused-append crossing build: " << label << '\n';
+
+    std::vector<float> last_q_float;
+    std::vector<std::uint16_t> last_output;
+    std::vector<std::int32_t> last_positions;
+    for (std::int32_t step = 0; step < step_count; ++step) {
+        const std::int32_t base = step * step_tokens;
+        std::vector<float> k_s(step_kv);
+        std::vector<float> v_s(step_kv);
+        std::vector<float> q_s(step_q);
+        std::vector<std::int32_t> p_s(static_cast<std::size_t>(step_tokens));
+        // q_index / kv_input_index are token-major (index = d + kHeadDim * (head + heads * token)),
+        // so slice with them rather than a flattened (d, head) row stride.
+        for (std::int32_t t = 0; t < step_tokens; ++t) {
+            for (std::int32_t head = 0; head < geometry.kv_heads; ++head) {
+                for (std::int32_t d = 0; d < kHeadDim; ++d) {
+                    const std::size_t src = kv_input_index(geometry, head, d, base + t);
+                    const std::size_t dst = kv_input_index(geometry, head, d, t);
+                    k_s[dst] = all_k[src];
+                    v_s[dst] = all_v[src];
+                }
+            }
+            for (std::int32_t head = 0; head < geometry.q_heads; ++head) {
+                for (std::int32_t d = 0; d < kHeadDim; ++d) {
+                    q_s[q_index(geometry, head, d, t)] = all_q[q_index(geometry, head, d, base + t)];
+                }
+            }
+        }
+        for (std::int32_t t = 0; t < step_tokens; ++t) { p_s[static_cast<std::size_t>(t)] = base + t; }
+
+        const std::vector<std::uint16_t> q_bits = to_bf16_bits(q_s);
+        const std::vector<std::uint16_t> k_bits = to_bf16_bits(k_s);
+        const std::vector<std::uint16_t> v_bits = to_bf16_bits(v_s);
+        dq.copy_from_host(q_bits.data(), q_bits.size() * sizeof(std::uint16_t));
+        dk.copy_from_host(k_bits.data(), k_bits.size() * sizeof(std::uint16_t));
+        dv.copy_from_host(v_bits.data(), v_bits.size() * sizeof(std::uint16_t));
+        dp.copy_from_host(p_s.data(), p_s.size() * sizeof(std::int32_t));
+
+        Tensor tq(dq.data(), DType::BF16, {kHeadDim, geometry.q_heads, step_tokens});
+        Tensor tk(dk.data(), DType::BF16, {kHeadDim, geometry.kv_heads, step_tokens});
+        Tensor tv(dv.data(), DType::BF16, {kHeadDim, geometry.kv_heads, step_tokens});
+        Tensor tp(dp.data(), DType::I32, {step_tokens});
+        Tensor ttable_row(dtable_row.data(), DType::I32, {1});
+        Tensor tout(dout.data(), DType::BF16, {kHeadDim, geometry.q_heads, step_tokens});
+
+        const ops::CausalAttentionExecutionEnvelope envelope{
+            static_cast<std::uint32_t>(base + step_tokens), envelope_max, false, false, false};
+        WorkspaceArena workspace(DeviceSpan{workspace_buffer.data(), workspace_buffer.bytes()});
+        ops::causal_softmax_attention(tq, tk, tv, tp, Tensor{}, ttable_row, op_geometry(geometry),
+                                      kAttentionScale, cache.batch_view(), envelope, workspace, tout,
+                                      nullptr);
+        cuda_synchronize();
+        if (workspace.used() != 0 || workspace.peak_used() > workspace_bytes) {
+            std::cerr << label << ": step " << step << " workspace high-water mismatch\n";
+            return 1;
+        }
+        if (step == step_count - 1) {
+            last_q_float   = q_s;
+            last_output    = copy_from_guarded<std::uint16_t>(dout, q_bits.size());
+            last_positions = p_s;
+        }
+    }
+
+    const std::vector<double> reference = ideal_attention(last_q_float, expected, last_positions);
+    int failures =
+        verify_attention(label, bf16_bits_to_double(last_output), reference, attention_criterion(plan));
+    failures += verify_cache(label, cache.snapshot(), expected, plan.dtype == DType::BF16);
+    failures += cache.verify_tail(label, expected);
+    failures += workspace_buffer.verify_guards((label + " workspace").c_str());
+    failures += cache.verify_guards(label);
+    return failures;
+}
+
 int run_tail_cases() {
     std::cout << "  exact KV tail (KV cache precision tail): merge, boundary, regression, masked\n";
     int failures = 0;
@@ -4438,6 +4582,19 @@ int run_tail_cases() {
                                                          MappingPattern::Fragmented);
         }
     }
+
+    // (0b) TOPTEST: the fused-append *crossing* build -- the multi-step shape the defect was found
+    // in, where rows quantized while `window <= N` are later read by the body at `window > N`. See
+    // run_fused_crossing_case. int8-family rk8v4 only (bf16's early steps take the prompt route).
+    // The first pair also wraps the ring (window 200 > 192 slots); the second pair does not.
+    failures +=
+        run_fused_crossing_case(h24, kPlanRk8v4, MappingPattern::Fragmented, 192, 8, 25, 2361u);
+    failures +=
+        run_fused_crossing_case(h24, kPlanRk8v4, MappingPattern::Offset, 192, 8, 25, 2362u);
+    failures +=
+        run_fused_crossing_case(h24, kPlanRk8v4, MappingPattern::Fragmented, 129, 8, 24, 2363u);
+    failures +=
+        run_fused_crossing_case(h24, kPlanRk8v4, MappingPattern::Offset, 129, 8, 24, 2364u);
 
     // (1) Primary merge formula: a BFloat16 body with N > 0. Body and tail are both exact, so the
     // engine result must equal the plain causal FP32 oracle within the existing BF16 criterion.

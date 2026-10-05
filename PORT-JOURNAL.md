@@ -1818,3 +1818,45 @@ append is the only writer, and `verify_cache` compares it — but the empirical 
 reversal costs a full ~21-TU rebuild down and again back (~2 h at the observed rate). It is recorded as a
 deferred confirmation, not a gap in the fix (the Step 48 KLD re-run is the fail-without-fix evidence at
 the system level: 0.038912 → 0.000933 with the fix, on the identical protocol).
+
+### Step 50 — the crossing case: the multi-step consequence of the hole
+
+The empty-body case (Step 49) guards the *missing append*. The plan's other half of bullet 3 — a
+sequence whose earliest rows are built while `window ≤ N` and which then crosses `window > N`, with the
+attention output held to the reference — is a **multi-step** artifact and got its own case,
+`run_fused_crossing_case`.
+
+**Why multi-step is mandatory.** A single fused step writes all of `[0, window)`: the append is owned by
+the last body split with `append_end = window`, and the append loop only touches rows whose position is
+in `[append_start, append_end)`, i.e. this step's own `[base, window)`. So one step can never leave a
+hole; a row is written only at its own step. The hole appears only when *earlier* steps ran with
+`body_window == 0` and the current step's body reads back into `[0, window − N)`.
+
+**The case.** One persistent `DeviceCache`, 24–25 sequential fused launches of 8 tokens each
+(`window 192–200`) through the real op — the `--score-width 8` decode pattern. The host reference
+appends every step's rows to the fixture in order (so its body region is the true quantized rows) and
+populates the ring once from the whole sequence; the **final** step's attention output, the whole cache,
+and the ring are then compared. Wired `d256-h24-kv4` + `rk8v4` × `{fragmented, offset}` ×
+`{N=192 (window 200, ring wraps: 200 > 192 slots), N=129 (window 192, no wrap)}` — four
+`TOPTEST fused-append crossing build` lines. `softmax_attention: PASS`, `ORACLE_EXIT=0`, GPU back to
+48 MiB, no orphan processes.
+
+**Only rk8v4.** Its int8-family decode prompt cutoff is 0 keys, so every step resolves to the small-T
+fused kernel at any window. bf16's 256-key cutoff would route the early steps to the prompt
+(writing-only) path, which appends correctly and could never build the hole; the crossing case therefore
+cannot be built on bf16 storage at this size.
+
+**Two development bugs, both in the harness, both caught by the case itself.** (1) The op rejected the
+first envelope: `CausalAttentionExecutionEnvelope` is `{min_visible_keys, max_visible_keys, …}`, and
+`max_visible_keys` is the *cap* validation requires to be ≤ the cache capacity, so `max_context` must be
+sized to it (`max(total + 3, envelope_max)`), exactly as `run_a1_case` does — my first version used
+256 < the 512 cap. (2) The larger one: `q_index`/`kv_input_index` are **token-major**
+(`index = d + kHeadDim·(head + heads·token)`), not the flattened `(d, head)` row stride I first sliced
+with; the wrong slicing made the case print `cache-v` + `exact-tail` mismatches — exactly the sensitivity
+the case exists to provide. After both fixes all four cases pass.
+
+**Discrimination (structural, honest).** The body region `[0, window − N)` is precisely the rows the
+early `body_window == 0` steps own, so before the fix the final step scored the fixture and the output,
+the value cache, and the ring all disagreed with the reference. The empirical fail-without-fix reversal
+is deferred for the same reason as Step 49 (reverting the fix rebuilds every small-T TU, ~2 h); the
+Step 48 KLD re-run remains the system-level fail-without-fix evidence.

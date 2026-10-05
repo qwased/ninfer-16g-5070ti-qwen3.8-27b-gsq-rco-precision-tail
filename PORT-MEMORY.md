@@ -547,5 +547,17 @@ merged to `main` after each landed sub-step.
   links and the full FP32 oracle re-runs green (`ORACLE_EXIT=0`, `softmax_attention: PASS`, `N=0` bit
   parity included). The fail-without-fix reversal was deferred (reverting `small_t.cuh` costs a full
   small-T rebuild ~2 h); Step 48's KLD re-run is the system-level fail-without-fix evidence.
+- **Crossing guard (Step 50).** The plan's other half of bullet 3 — the multi-step consequence, not just
+  the missing append — is `run_fused_crossing_case`: one persistent `DeviceCache`, 24–25 sequential
+  fused 8-token launches (`window 192–200`), the early steps entirely inside the tail (`body_window ==
+  0`), the last scoring a body of 8. The reference appends every step's rows in order and populates the
+  ring once; the final step's output + whole cache + ring are compared. Wired `d256-h24-kv4` + `rk8v4` ×
+  `{fragmented, offset}` × `{N=192 wrap, N=129 no wrap}`. Multi-step is mandatory: a single fused step
+  writes all of `[0, window)` (last body split owns `append_end = window`), so a row is only ever written
+  at its own step and the hole needs earlier `body_window == 0` steps. Only rk8v4 works (its decode prompt
+  cutoff is 0, so every step is small-T; bf16's 256-key cutoff sends early steps to the appending prompt
+  route). `softmax_attention: PASS`, `ORACLE_EXIT=0`. Envelope gotcha: `max_visible_keys` is the cap and
+  must be ≤ cache capacity, so `max_context = max(total + 3, envelope_max)`; `q_index`/`kv_input_index`
+  are token-major.
 - Runs are strictly serial, single-owner, single GPU (5070 Ti); after **every** run check
   `tasklist`/`nvidia-smi` for orphan processes (user requirement) before starting the next.
