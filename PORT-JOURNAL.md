@@ -1573,3 +1573,29 @@ Do not conclude the benefit question until one of these disambiguates:
 The oracle as-is **PASSES** (`build-port/tests/ninfer_tests.exe ninfer_softmax_attention_test`, exit 0,
 rk8v4/rk4v4-e8 TAILGAIN lines present) — but it does not cover this regime. `.deps/summarize-wpb.py`
 renders WP-B; the resumable batch continues at rk8v4 t2048 ctx 8192.
+
+### Step 44 addendum — the defect is isolated to **body+tail coexistence**, not the ring
+
+Two more measured points (rk8v4, W=8, long text) localize it:
+
+| ctx | tail | body_window | ppl | KLD mean | same-top | verdict |
+|---:|---:|---:|---:|---:|---:|---|
+| 2048 | 0 | 2048 | 6.92705 | 0.002838 | 0.9736 | baseline |
+| 2048 | 1024 | 1024 | 7.02481 | **0.022539** | 0.9556 | BROKEN |
+| **2048** | **2048** | **0 (empty)** | **6.91090** | **0.001068** | **0.9844** | **clean, best** |
+| 1024 (short text) | 1024 | 0 (empty) | 6.46442 | 0.000912 | 0.9853 | clean (Step 41) |
+
+**Conclusion:** every case where the tail covers the **whole** window (body empty) is correct and
+*improves* on tail-off. Every case where a quantized body and the tail **coexist** (0 < body_window)
+degrades KLD 8-24x, and it appears already at ctx 2048 (body_window 1024), not only 8192. So the split
+partition's *coverage* is not the issue (the analyst's exhaustive check + the all-tail case agree);
+the fault is in how the body and tail **partials are combined** for the quantized storages at
+realistic windows — a regime the in-tree oracle never exercises (it is T=6 / keys ≤ 67, or the fused
+entry is a single append step, §5.9/§5.12).
+
+**This is a real product defect in the reported "mechanism-closed" tail, surfaced only now because the
+A4 instrument makes decode-width scoring possible.** The M1 oracle's TAILGAIN line is a small-window
+result and does not establish app-level correctness. Recommended next: a targeted oracle case with a
+window > body_window and a real multi-round ring (or a body+tail case at window ≫ 67 keys); then fix
+the body/tail combination and re-run WP-B. Until then, do **not** claim the tail benefit and do **not**
+call the mechanism fully closed.

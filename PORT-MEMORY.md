@@ -471,6 +471,14 @@ merged to `main` after each landed sub-step.
   `ring_pages>=3` and the product's `+1` rollback page are **never exercised**. Disambiguate with a
   ctx {2048,4096} × tail {0,1024} sweep, then a targeted oracle case (window 2048, N=1024, T=8,
   fixture `ceil(N/64)+1` pages). **Do not conclude the benefit question before this.**
+- **WP-B defect LOCALIZED (Step 44 addendum):** every case where the tail covers the **whole** window
+  (body empty) is correct and *improves* on tail-off — ctx=1024/tail1024 KLD 0.000912, ctx=2048/tail2048
+  KLD **0.001068** (vs tail0 0.002838). Every case where a quantized body and the tail **coexist**
+  (0 < body_window) degrades KLD 8-24× — ctx2048/tail1024 **0.022539**, ctx8192/tail1024 ~0.027. The
+  fault is in the **body+tail combination** (partial-partial merge) for quantized storages at realistic
+  windows, a regime the oracle never exercises (T=6/keys≤67). The M1 TAILGAIN line is a small-window
+  result and does **not** establish app-level correctness. Fix + targeted oracle case needed before any
+  benefit claim; the mechanism is **not** fully closed.
 - **Operational rule (learned the hard way):** long GPU batches must run in **foreground chunks**
   (≤600 s, ~3-4 runs), re-invoking the resumable batch each time. Both `run_in_background` and
   `start /b`-detached batches are **killed after ~3 min**. After every chunk verify
