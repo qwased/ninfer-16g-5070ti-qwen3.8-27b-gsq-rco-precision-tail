@@ -1059,3 +1059,29 @@ ninja recompiles the whole causal_cache family with matching headers, then rebui
 The interrupt hazard -- kill a build and the depfile for the in-flight TU is lost -- is the general
 lesson: after any interrupted build, delete the objects of the directory being compiled rather than
 trusting "no work to do".
+
+## Step 30 -- de-instrument and reconfirm the oracle on clean code
+
+Removed every diagnostic print added during the Step-27/28 hunt (pure deletion, 53 lines, no
+behavioral change): `DBGRED` (`small_t.cuh`), `XDBGBF16` (`small_t_bf16.cuh`), `I8TOP`+`DBGBODY`
+(`small_t_i8.cuh`), `DBGTAIL`+`XDBGTAIL` (`small_t_tail.cuh`), `XDBGSH` (`small_t_tail_shadow.cuh`),
+`HOSTI8`+`<cstdio>` (`small_t_i8_launch.cuh`), `ROUTEF`/`ROUTEC`+`<cstdio>`
+(`causal_softmax_attention.cpp`). Verified no `DBG|XDBG|I8TOP|HOSTI8|ROUTEF|ROUTEC|printf` remains
+under the causal_cache directory; `valid` is still used by the shadow kernel. Committed `1faf6a8d`.
+
+Clean rebuild of `ninfer_tests` from the de-instrumented tree: `BUILD_EXIT=0`, 0 stray
+`ninja|nvcc|cl|link` processes.
+
+Oracle rerun (`.deps/oracle-run8.out`, `ORACLE_EXIT=0`):
+
+```
+PASS causal_softmax_attention public-contract correctness
+softmax_attention: PASS
+```
+
+All tail cases pass with the tail verifiably active: the five BF16 cases, the two tail-off
+regressions, rk8v4 fused+cached (tail 2/6), rk4v4-e8 fused+cached (tail 2/129), the nvfp4 weak
+check (`rel_l2_tail == rel_l2_tail_off == 9.2616e-02`), and the batched masked case
+`B=2 W=8 valid={6,0} tail=2`. The earlier "batched masked BF16 ring mismatch" was also a
+stale-object artifact of the same interrupted build -- no fixture change was needed. DoD §7.2 is
+therefore satisfied for the wired storages (BF16 + INT8 family) at C=1 and C>1.
