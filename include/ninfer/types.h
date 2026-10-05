@@ -427,6 +427,12 @@ struct EngineOptions {
     // Prefill with the fast INT8-KV prompt-attention kernel and round prefill_chunk down to whole
     // prompt-attention waves. Off keeps the default kernel and the requested chunk.
     bool fast_prefill_kernel           = false;
+    // Causal-scoring attention query tile width in tokens. Zero keeps the planned prefill chunk
+    // (unchanged behavior). A nonzero value narrows the query tile so a width<=8 pass selects the
+    // small-T attention route -- the only route that merges the exact KV tail -- during scoring. It
+    // is applied verbatim and therefore bypasses prefill_chunk's 128-token alignment, but is capped
+    // by the planned prefill chunk, which sizes the staging buffers.
+    std::uint32_t score_width          = 0;
     KvCacheStorage kv_cache            = KvCacheStorage::BFloat16;
     // Exact KV tail: the newest N tokens per sequence are kept unquantized in a second page pool
     // so attention can merge a quantized body partial with an exact tail partial. Zero disables

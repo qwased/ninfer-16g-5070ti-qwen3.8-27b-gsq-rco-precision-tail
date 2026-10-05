@@ -32,6 +32,14 @@ INT8 family (`int8`, `rk8v4`, `rk4v4`, `rk4v4-e8`, `rk2v4-e8`); the rotated-valu
 `nvfp4` and `k8v4` allocate the pool but no attention route reads or writes it, so the tail is inert
 there and a tail-on run of those bytes is identical to tail-off.
 
+The tail merge is implemented only on the small-T attention route, which the causal-scoring pass
+reaches only for a query width of eight or fewer tokens; the default 1024-wide score tile runs the
+prompt route, which never reads the tail. `--score-width W` scores in width-`W` attention query
+tiles so a small `W` (one to eight) drives the small-T route and makes the tail's on/off difference
+visible. It preserves the scored token count and ordering, and `W` is applied verbatim (it is not
+rounded to the prefill-chunk alignment), so `W` of 1 and 7 stay unaligned. `W` defaults to 1024 (the
+planned prefill chunk), which is exactly the pre-option behavior.
+
 All seven have been measured on this corpus; the results, alongside each format's size and decode
 speed, are in [`docs/config-calculator.html`](config-calculator.html).
 `--fast-prefill-kernel` scores `int8` with the fast prompt-attention kernel (as

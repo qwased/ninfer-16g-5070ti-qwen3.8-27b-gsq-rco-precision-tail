@@ -1073,6 +1073,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
         "resolved Paged KV capacity exceeds int32"));
     impl->max_concurrency     = inputs.max_concurrency;
     impl->prefill_chunk       = inputs.prefill_chunk;
+    impl->score_width         = inputs.score_width;
     impl->fast_prefill_kernel = inputs.fast_prefill_kernel;
     impl->draft_window        = inputs.draft_window;
     impl->lookup_ngram        = inputs.lookup_ngram;
@@ -1363,6 +1364,7 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .max_concurrency            = options.max_concurrency,
         .prefill_chunk              = effective_prefill_chunk(parameters, options),
         .fast_prefill_kernel        = options.fast_prefill_kernel,
+        .score_width                = std::min(options.score_width, options.max_context),
         .draft_window               = options.speculative.draft_tokens,
         .lookup_ngram               = options.speculative.lookup_ngram,
         .mtp_policy                 = options.speculative.mtp_policy,

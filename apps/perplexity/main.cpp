@@ -49,6 +49,10 @@ struct Options {
     std::optional<std::filesystem::path> output;
     std::uint32_t context     = 4096;
     std::uint32_t stride      = 2048;
+    // Attention query tile used while scoring. Zero keeps the planned prefill chunk (1024), which
+    // scores through the prompt attention route; a small value (<=8) selects the small-T decode
+    // route that merges the exact KV tail. Preserves the scored token count and ordering.
+    std::uint32_t score_width = 0;
     bool disjoint             = false;
     int device                = 0;
 #if defined(NINFER_SM8X_COMPAT)
@@ -84,6 +88,10 @@ std::string usage_text() {
     return "usage: ninfer-perplexity <model.ninfer> "
            "(--corpus <manifest.json> [--quick] | --text <utf8-file>)\n"
            "       [--context N] [--stride N | --disjoint] [--device N]\n"
+           "       [--score-width W]\n"
+           "       (--score-width W scores in width-W attention query tiles; W<=8 selects the\n"
+           "        small-T decode route that merges the exact KV tail, so the tail's on/off\n"
+           "        difference becomes visible. Default 1024 = the prompt route)\n"
            "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] [--output "
            "<directory>]\n"
            "       [--kv-tail-tokens N]\n"
@@ -141,6 +149,9 @@ Options parse_options(int argc, char** argv) {
             out.context = parse_integer<std::uint32_t>(value("--context"), "context");
         } else if (option == "--stride") {
             out.stride = parse_integer<std::uint32_t>(value("--stride"), "stride");
+        } else if (option == "--score-width") {
+            out.score_width = parse_integer<std::uint32_t>(value("--score-width"), "score-width");
+            if (out.score_width == 0) { usage_error("--score-width must be positive"); }
         } else if (option == "--disjoint") {
             out.disjoint = true;
         } else if (option == "--device") {
@@ -324,6 +335,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     engine_options.purpose          = ninfer::EnginePurpose::CausalScoring;
     engine_options.device           = options.device;
     engine_options.max_context      = options.context;
+    engine_options.score_width      = options.score_width;
     engine_options.kv_cache         = options.kv;
     engine_options.kv_tail_tokens   = options.kv_tail_tokens;
     engine_options.lm_head_q4       = options.lm_head_q4;
@@ -532,6 +544,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
           {"windows", options.disjoint ? "disjoint" : "sliding"},
           {"prefill_chunk_tokens", 1024},
           {"score_tile_tokens", 1024},
+          {"score_width_tokens", options.score_width == 0 ? 1024 : options.score_width},
           {"kv_dtype", kv_name(options.kv)},
           {"kv_tail_tokens", options.kv_tail_tokens}}},
         {"timing",
@@ -562,7 +575,8 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
               << "kv: " << kv_name(options.kv) << ", corpus: " << corpus.corpus_id << " / "
               << corpus.mode << ", context/stride: " << options.context << '/'
               << (options.disjoint ? options.context : options.stride)
-              << (options.disjoint ? " (disjoint windows)" : "") << "\n\n";
+              << (options.disjoint ? " (disjoint windows)" : "") << ", score-width: "
+              << (options.score_width == 0 ? 1024 : options.score_width) << "\n\n";
     std::cout << std::left << std::setw(24) << "domain" << std::right << std::setw(16) << "tokens"
               << std::setw(16) << "mean_nll" << std::setw(16) << "ppl" << '\n';
     for (const auto& [domain, aggregate] : domains) {
