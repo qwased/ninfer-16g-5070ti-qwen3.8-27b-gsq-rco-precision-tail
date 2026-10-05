@@ -393,3 +393,25 @@ the merge-route decision, not a defect. The tail's *quality* effect lives on the
 route (width <= 8) and is evidenced by the FP32 oracle; its *memory* footprint is evidenced by
 `MemorySummary` (64 MiB exact + 4 MiB reserve at N=1024, C=1). A ppl delta would require a
 decode-width scoring mode the app does not have.
+
+## 5.12 M2 — F16 exact tail, and where the dtype difference is measurable (Step 35)
+
+The ring element type is now a config dimension: `KvTailType` (`BFloat16` | `Float16`),
+`EngineOptions::kv_tail_type`, CLI `--kv-tail-type bf16|f16`, default **f16**; it flows through the
+same chain as `kv_tail_tokens` and joins the identity tag as `;kvtt=`. Both are 16-bit, so the tail
+pool geometry (`decoder_state.cpp` sets the plane dtype from `spec.kv_tail_dtype`), the 64 MiB
+curve constant and `MemorySummary` are byte-for-byte unchanged — the dtype is a *precision* choice,
+not a capacity one. The three kernel families are element-generic via
+`ops/common/kv_tail_element.cuh`; the BF16 instantiation reproduces the old kernel exactly (source
+bits copied verbatim, `mma_bf16`), F16 converts BF16→float→half and uses `mma_f16`.
+
+**Harness gotcha (recorded so it is not re-hit).** The fused quality helper
+`run_tail_quality_gain` drives a *single append step*, so its ring fixture
+(`populate_tail`) writes only the step's `tokens` positions; any `N > tokens` leaves the older tail
+slots zero and the tail looks catastrophically wrong (rel-L2 ≈ 0.69, identically for BF16 and F16 —
+the giveaway that it is the fixture). A real decode ring is filled *across* steps. The wide tail
+must therefore be measured on the cached entry, whose `make_tail_fixture` fills the whole newest-N
+ring; `run_cached_quality_gain` does that (`WIDETAIL` lines). There, F16 ≤ BF16 in all four cases
+(window 2048, N=64/256; e.g. h16 N=64: 6.35168e-02 vs 6.35250e-02), never worse, at equal cost —
+so **F16 is the default**, BF16 the verification form. The margin is small only because the rk8v4
+body quantization still dominates the total error.

@@ -1216,3 +1216,43 @@ quality at the same granularity. The honest caveat is that 4 chunks cannot resol
 small; a decision-grade run wants a longer chunk count, which is the Phase-2 trigger the plan names,
 not a blocker. Real-model GPU runs were serial and single-owner; `tasklist` confirmed clean after
 each (`llama-perplexity` count 0).
+
+## Step 35 -- M2: the F16 exact tail, landed and chosen
+
+**Delegated the implementation** (objective: spare the main context) to one general-purpose
+subagent with the touch-point list already mapped from the code. It landed M2 as `b64b6b1e` (20
+files): a `KvTailType` enum + `EngineOptions::kv_tail_type` (F16 default), the `--kv-tail-type
+bf16|f16` flag threaded through `apps/cli` and `src/serve`, the planning/`DecoderStateSpec` chain,
+the identity tag `;kvtt=f16|bf16`, and — the real work — the three tail kernels made
+element-generic through a new `src/ops/common/kv_tail_element.cuh`. The trait keeps the BF16
+instantiation a verbatim no-op (source bits copied, `__float2bfloat16`, `mma_bf16`) and gives F16 a
+BF16→float→half conversion (never reinterpreting BF16 bits as F16) plus `mma_f16`; launch sites
+dispatch on the ring tensor's `dtype`. FP16 is 16-bit like BF16, so the page geometry, the 64 MiB
+@ N=1024 footprint and `MemorySummary` are untouched.
+
+**Verified, not trusted.** Rebuilt (`ninfer_tests` bundle — building the leaf target alone does NOT
+relink `ninfer_tests.exe`, a stale-build trap) and re-ran the oracle myself: `ORACLE_EXIT=0`, 0
+failures, F16 correctness cases green, `TAILGAIN` lines present for both dtypes. `tasklist` clean.
+
+**A false start worth recording.** To make the F16-vs-BF16 choice *measurable* I first added wide
+tails (N=64/128) to the fused `TAILGAIN` helper and got rel-L2 ≈ 0.69 — the tail made it *worse*,
+identically for both dtypes. Root cause was the harness, not the kernel: `run_tail_quality_gain`
+drives a single append step, so its ring fixture holds only the step's `tokens` positions and any
+N > tokens leaves the older tail slots ZERO. The harness models what a real decode ring accumulates
+across steps; a one-call test cannot. Reverted that block (a `(4d)` note records why).
+
+**The valid measurement** uses the cached entry, whose `make_tail_fixture` fills the whole newest-N
+ring. Added `run_cached_quality_gain` (an `out_bits` out-param on the plan `run_a3_case`) comparing
+BF16 and F16 rings against the pure-exact oracle at window 2048, N=64/256, same seed:
+
+| geometry | N | rel-L2 BF16 | rel-L2 F16 |
+|---|---|---|---|
+| d256-h24-kv4 | 64 | 6.63171e-02 | 6.63161e-02 |
+| d256-h24-kv4 | 256 | 6.39419e-02 | 6.39375e-02 |
+| d256-h16-kv2 | 64 | 6.35250e-02 | 6.35168e-02 |
+| d256-h16-kv2 | 256 | 6.41126e-02 | 6.41110e-02 |
+
+F16 is lower in all four and never worse; the margin is small because the rk8v4 body still dominates
+the error even at N=256, but it is the right direction and F16 costs nothing. **Decision: F16 stays
+the default**, BF16 the verification form (plan §1.1/§4-M2). `docs/performance.md` and
+`PORT-DOD.md` updated; docs `cli.md`/`serving.md` gained the new flag.

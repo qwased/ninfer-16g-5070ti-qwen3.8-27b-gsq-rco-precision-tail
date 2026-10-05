@@ -250,6 +250,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--stage-layers A,B,...` | layers per stage, in `--devices` order; omitted means a split chosen from each device's free memory | memory-balanced |
 | `--kv-dtype bf16\|int8\|fp8\|rk8v4\|rk4v4\|rk4v4-e8\|nvfp4\|k8v4` | KV-cache storage. `rk8v4` is opt-in RotorQuant, `rk4v4` opt-in Lloyd-Max 4-bit keys and `rk4v4-e8` opt-in E8-lattice INT4 keys; all eight are accepted on this fork's sm_86/sm_89 targets | `bf16` |
 | `--kv-tail-tokens N` | keep the newest `N` tokens of each sequence unquantized in a device-only exact KV pool that attention merges with the quantized body; `0` disables the tail; merged for `bf16` and the INT8 family (`int8`, `rk8v4`, `rk4v4`, `rk4v4-e8`, `rk2v4-e8`) only, and allocated-but-inert for `fp8`, `nvfp4`, `k8v4` | `0` |
+| `--kv-tail-type bf16\|f16` | element type of the exact-tail ring. Both are 16-bit, so the pool size, page geometry and `MemorySummary` are identical; `f16` has 10 mantissa bits vs `bf16`'s 7 and is the default, `bf16` is the split-verification form | `f16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | `1..15` for MTP, DFlash and DFlash2 | unset |
 | `--lm-head-draft` | optimized proposal head | off |

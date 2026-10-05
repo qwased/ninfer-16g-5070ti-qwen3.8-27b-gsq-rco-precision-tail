@@ -36,7 +36,15 @@ packages, each mapped to concrete evidence. **Update on every step.** Status val
   is met on the decode route by the `TAILGAIN` comparison (tail rel-L2 strictly below tail-off on
   all six wired cases, Step 33). The ppl row (§7.3) is `BLOCKED` as a harness limitation
   (prefill-route scoring), not a closure failure.
-- **M2** (F16 default + graph stability): `TODO`.
+- **M2** (F16 default + graph stability): **DONE** — the exact ring's element type is now a config
+  dimension (`KvTailType` / `--kv-tail-type bf16|f16`, F16 default) carried through the CLI, serve,
+  planning and `DecoderStateSpec` chains and folded into the engine identity tag; both 16-bit, so
+  the page geometry and `MemorySummary` are unchanged. The three tail kernels are element-generic
+  through `ops/common/kv_tail_element.cuh` (`if constexpr`; the BF16 instantiation stays verbatim +
+  `mma_bf16`, F16 converts BF16→float→half + `mma_f16`), dispatching on the ring tensor's dtype. The
+  graph-family assertion (WP4/§7.5) is unchanged and still passes. `ORACLE_EXIT=0` with F16
+  correctness cases; F16-vs-BF16 chosen by the `WIDETAIL` wide-tail comparison (F16 lower in all
+  four, never worse, identical cost) — commit `b64b6b1e`, Step 35.
 - **M3** (concurrency + speculative, tier decision): `TODO`.
 - **M4** (optional tier): out of scope for now.
 
@@ -52,8 +60,8 @@ packages, each mapped to concrete evidence. **Update on every step.** Status val
 | WP6 config chain | **DONE** | Option + identity + help (`64f32d3e`, `2f010b36`); `--kv-tail-tokens` on the perplexity app (`16130914`); draft caches are tail-free by construction |
 | WP7 tier ownership | **DONE** | M1 decision: exact pool is device-only; `docs/maintainer/paged-kv-cache.md §4.5` updated |
 | WP8 transaction/rollback | **DEFERRED** | Plan §3 requires the exact-pool write to commit *after* attention, roll back and mark degraded on failure, with reserve `R` for it; `R = 1` page exists in sizing (`startup.cpp:360-363`). Not in DoD §7 and not reachable in M1: the pool is device-only, `C=1`, and the functional closure exercises no failure/rollback path. It belongs with the transactional layer (`src/models/qwen3_5/program/transactions/`), so it is a deliberate deferral, not a silently dropped requirement |
-| WP9 docs | **DONE** | `docs/cli.md`, `serving.md`, `perplexity.md`, `paged-kv-cache.md §4.5` updated; `docs/performance.md` measured section added (Step 32); `config-calculator.html` models the tail and its node test passes 24/24 |
-| WP10 verification/bench | **DONE** | Harness + oracle + `nvfp4`/`k8v4` reference quality landed; the oracle is green including the graph-family assertion and the `TAILGAIN` quality comparison (Steps 30/32/33, `ORACLE_EXIT=0`); the M1 measurement is recorded in `docs/performance.md` (memory + ppl + the prefill-route finding) |
+| WP9 docs | **DONE** | `docs/cli.md`, `serving.md`, `perplexity.md`, `paged-kv-cache.md §4.5` updated; `docs/performance.md` measured sections added (Steps 32/35, incl. the F16-vs-BF16 ring table); `--kv-tail-type` documented in `cli.md`/`serving.md`; `config-calculator.html` models the tail and its node test passes 24/24 |
+| WP10 verification/bench | **DONE** | Harness + oracle + `nvfp4`/`k8v4` reference quality landed; the oracle is green including the graph-family assertion, the `TAILGAIN` quality comparison and the F16 ring cases (Steps 30/32/33/35, `ORACLE_EXIT=0`); the M1 measurement is recorded in `docs/performance.md` (memory + ppl + the prefill-route finding) and the M2 `WIDETAIL` F16-vs-BF16 wider-tail comparison (Step 35) |
 
 ## Plan deviations (allowed by the objective; each is recorded in PORT-MEMORY)
 

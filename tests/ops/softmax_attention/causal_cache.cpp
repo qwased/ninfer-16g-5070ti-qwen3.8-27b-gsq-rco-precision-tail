@@ -3050,7 +3050,7 @@ TailFixture make_tail_fixture(const Geometry& geometry,
 }
 
 int run_a3_case(const Geometry& geometry, const CachePlan& plan, const AttentionCase& test_case,
-                MappingPattern mapping) {
+                MappingPattern mapping, std::vector<std::uint16_t>* out_bits = nullptr) {
     const std::int32_t total       = test_case.base + test_case.tokens;
     const std::int32_t max_context = static_cast<std::int32_t>(
         std::max<std::uint32_t>(static_cast<std::uint32_t>(total + 3), test_case.envelope_max));
@@ -3108,6 +3108,7 @@ int run_a3_case(const Geometry& geometry, const CachePlan& plan, const Attention
         case_label("causal_softmax_attention_cached", geometry, plan, test_case, mapping);
     const std::vector<std::uint16_t> output_bits =
         copy_from_guarded<std::uint16_t>(dout, q_bits.size());
+    if (out_bits != nullptr) { *out_bits = output_bits; }
     int failures = verify_attention(label, bf16_bits_to_double(output_bits), reference,
                                     attention_criterion(plan));
     failures += verify_cache(label + " cache unchanged", cache.snapshot(), cache_host, true);
@@ -4196,6 +4197,55 @@ int run_tail_quality_gain(const Geometry& geometry, KvCacheStorage storage, Plan
     return failures;
 }
 
+// M2 择定: a WIDE exact tail, measured through the cached entry.
+//
+// run_tail_quality_gain drives the fused append entry, which models a single step, so its ring
+// fixture only holds the step's own `tokens` positions and any N > tokens leaves the older tail
+// slots zero. The cached entry's fixture (make_tail_fixture) writes the whole newest-N ring
+// instead, so this is the only place a tail wider than the step -- the regime where the 7-bit
+// (BF16) vs 10-bit (F16) ring mantissa is observable at all -- can be measured. The reference is
+// the same exact oracle: an unquantized BFloat16 cache read through cache_value_with_tail, i.e.
+// exact body plus the exact ring, so the number is the merge's error against the ideal, and the
+// BF16 and F16 rows are directly comparable on the same seed.
+int run_cached_quality_gain(const Geometry& geometry, const CachePlan& plan,
+                            const AttentionCase& test_case, MappingPattern mapping,
+                            DType tail_dtype) {
+    const std::int32_t total       = test_case.base + test_case.tokens;
+    const std::int32_t max_context = static_cast<std::int32_t>(
+        std::max<std::uint32_t>(static_cast<std::uint32_t>(total + 3), test_case.envelope_max));
+    const std::size_t q_elements = static_cast<std::size_t>(kHeadDim) *
+                                   static_cast<std::size_t>(geometry.q_heads) *
+                                   static_cast<std::size_t>(test_case.tokens);
+    std::vector<float> q = make_bf16_values(q_elements, test_case.seed, -0.25f, 0.25f);
+    std::vector<std::int32_t> positions(static_cast<std::size_t>(test_case.tokens));
+    for (std::int32_t token = 0; token < test_case.tokens; ++token) {
+        positions[static_cast<std::size_t>(token)] = test_case.base + token;
+    }
+    const std::int32_t tail_tokens = std::max(test_case.kv_tail_tokens, 0);
+    // The device run (inside run_a3_case) builds its ring from this same fixture/seed, so the
+    // reference below and the device see identical tail rows.
+    const TailFixture tail =
+        make_tail_fixture(geometry, positions, tail_tokens, test_case.seed + 40u);
+    HostCache exact = make_cache(geometry, KvCacheStorage::BFloat16, max_context,
+                                 test_case.seed + 10u);
+    populate_tail(exact, tail.k, tail.v, tail.positions, tail_tokens, DType::BF16);
+    const std::vector<double> reference =
+        unit_value_scale(ideal_attention(q, exact, positions), test_case);
+
+    AttentionCase tail_case = test_case;
+    tail_case.tail_dtype     = tail_dtype;
+    std::vector<std::uint16_t> bits;
+    int failures = run_a3_case(geometry, plan, tail_case, mapping, &bits);
+    const std::vector<double> output = unit_value_scale(bf16_bits_to_double(bits), test_case);
+    const ReductionStats stats = compute_reduction_stats(
+        output.data(), reference.data(), static_cast<std::int64_t>(output.size()));
+    std::printf("WIDETAIL\trel_l2=%.5e\t%s %s T=%d N=%d tail=%s\n", stats.relative_l2,
+                geometry.name, cache_name(cache_plan_storage(plan)), test_case.tokens,
+                test_case.kv_tail_tokens, tail_dtype_name(tail_dtype));
+    if (!std::isfinite(stats.relative_l2)) { ++failures; }
+    return failures;
+}
+
 // WP4 / DoD #5: "CUDA Graph family sequence unchanged vs tail off".
 //
 // A decode step is replayed from the CUDA Graph family its attention route FAMILY selects:
@@ -4433,6 +4483,24 @@ int run_tail_cases() {
                                           KvCacheStorage::RotatedInt4KeyInt4ValueE8,
                                           with_tail({6, 61, 67, 2334u}, 2),
                                           MappingPattern::Fragmented, DType::FP16);
+    }
+
+    // (4d) M2 择定: a wide exact tail, measured through the cached entry only. The fused quality
+    // helper above models a single append step, so its ring fixture holds only the step's `tokens`
+    // positions and any N > tokens leaves the older tail slots zero; the cached fixture
+    // (run_a3_case / make_tail_fixture) fills the whole newest-N ring. Window 2048 (base 2042, T=6)
+    // keeps N=64 and N=256 inside their ring pages without the partial-page alias, and N=256 leaves
+    // the body almost empty so the exact ring's own precision dominates the rel-L2. Same seed per
+    // BF16/F16 pair, so the two rows are a like-for-like comparison.
+    for (const Geometry& geometry : kGeometries) {
+        for (const std::int32_t wide_tail : {64, 256}) {
+            const AttentionCase wide = with_tail(
+                {6, 2042, 4096, 2360u + static_cast<std::uint32_t>(wide_tail)}, wide_tail);
+            failures += run_cached_quality_gain(geometry, kPlanRk8v4, wide,
+                                                MappingPattern::Fragmented, DType::BF16);
+            failures += run_cached_quality_gain(geometry, kPlanRk8v4, wide,
+                                                MappingPattern::Fragmented, DType::FP16);
+        }
     }
 
     // (5) C>1 masked batched rows with the tail on. The view carries a single per-sequence ring,

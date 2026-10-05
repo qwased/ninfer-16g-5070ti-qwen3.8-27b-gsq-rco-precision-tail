@@ -577,3 +577,26 @@ exact:
 
 This is a decode-route attention-error measurement, not a corpus ppl; the two exercise different
 routes (see above).
+
+### Tail ring element type: F16 vs BF16 (M2 择定)
+
+M2 makes the exact-tail ring an F16 (10-bit mantissa) or BF16 (7-bit) pool, chosen by
+`--kv-tail-type`; F16 is the default. Both are 16-bit, so the ring bytes, page geometry and
+`MemorySummary` are identical and only the stored precision differs. The two are compared on the
+*cached* entry, whose ring fixture fills the whole newest-N window (the fused quality helper above
+can only model a tail as wide as the step), at window 2048 and N=64/256 — the regime where the tail
+covers essentially all attended keys and the ring's own precision is what the rel-L2 sees:
+
+| geometry | N | rel-L2 BF16 ring | rel-L2 F16 ring |
+|---|---|---|---|
+| d256-h24-kv4 | 64 | 6.63171e-02 | 6.63161e-02 |
+| d256-h24-kv4 | 256 | 6.39419e-02 | 6.39375e-02 |
+| d256-h16-kv2 | 64 | 6.35250e-02 | 6.35168e-02 |
+| d256-h16-kv2 | 256 | 6.41126e-02 | 6.41110e-02 |
+
+F16 is lower (better) in every case and never worse; the margin is small because the rk8v4 body
+quantization still dominates the total error (rel-L2 ≈ 6.4e-2) even when the tail holds the newest
+256 keys, but the direction is consistent with F16's three extra mantissa bits. With equal cost and
+no regression, F16 is the default (plan §1.1), and BF16 stays as the split-verification form —
+every correctness case runs on both. The oracle prints these as `WIDETAIL` lines
+(`ninfer_softmax_attention_test`).
