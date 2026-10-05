@@ -10,7 +10,7 @@ packages, each mapped to concrete evidence. **Update on every step.** Status val
 
 | # | Requirement | Status | Evidence / gap |
 |---|---|---|---|
-| 1 | `--kv-tail-tokens 1024` starts / decodes / prefills on `rk8v4`, `rk4v4-e8`, `nvfp4` bodies | **DONE** | All three bodies ran end-to-end at N=1024 on the 27B artifact: `ninfer-perplexity` loaded it and prefilled/scored 261,223 tokens with `PPL_EXIT=0` (`.deps/ppl-{rk8v4,rk4v4-e8,nvfp4}-t1024/`). Decode (small-T, width<=8) with the tail active is covered by the FP32 oracle (`.deps/oracle-run9.out`, `softmax_attention: PASS`) |
+| 1 | `--kv-tail-tokens 1024` starts / decodes / prefills on `rk8v4`, `rk4v4-e8`, `nvfp4` bodies | **DONE** | All three bodies ran end-to-end at N=1024 on the 27B artifact: `ninfer-perplexity` loaded it and prefilled/scored 261,223 tokens with `PPL_EXIT=0` (`.deps/ppl-{rk8v4,rk4v4-e8,nvfp4}-t1024/`). Decode (small-T, width<=8) with the tail active is covered by the FP32 oracle (`.deps/oracle-run9.out`, `softmax_attention: PASS`). Decode at N=1024 is now also run end-to-end through the `ninfer` cli on the 27B artifact, all three bodies, `EXIT=0` (Step 36): `rk8v4` with and without `--spec mtp`, `rk4v4-e8`, `nvfp4` (`.deps/m3-*.err`, prefill ~145 tok/s, decode ~68 tok/s, MTP rounds 12) |
 | 2 | Tail merge passes an FP32 oracle (incl. `p+1<=N`, empty-body window, C>1 masked rows) | **DONE** | `ORACLE_EXIT=0`, `softmax_attention: PASS` (`.deps/oracle-run8.out`/`-run9.out`, Steps 30/32). All tail cases pass with the tail verifiably active: BF16 ×5, tail-off regressions ×2, rk8v4 fused+cached, rk4v4-e8 fused+cached, nvfp4 weak check (`rel_l2_tail == rel_l2_tail_off`), batched masked `B=2 W=8 valid={6,0} tail=2`. The Step-27 failures were stale `small_t_i8_w5..w8` objects from an interrupted build, not product logic |
 | 3 | `apps/perplexity` shows ppl improvement vs `tail=0` on all three bodies | **BLOCKED** | Two independent reasons, both by design (plan deviations #2 and #5). (a) The tail is merged only for `bf16` + the INT8 family, so `nvfp4` is inert. (b) For every storage the perplexity app scores the **prefill phase** (`apps/perplexity/main.cpp:94-97`) in 1024-wide query tiles (`score_tile_tokens`, `main.cpp:534`) -> **prompt** route, which plan §1.5 says "only writes, decode merges". The tail is never read during scoring, so all three measured `overall.perplexity` are bit-identical at tail=0 and tail=1024 (rk8v4 4.65880995706738, rk4v4-e8 4.675237004820881, nvfp4 4.657980442927839). A decode-width ppl (width<=8) is needed to observe the tail's effect and is not reachable without new app work. The tail's *quality* effect is instead evidenced on the decode route by the FP32 oracle plus the new `TAILGAIN` comparison (Step 33): tail-on rel-L2 is strictly below tail-off rel-L2 on all six wired cases, e.g. h24 rk8v4 N=6 6.8711e-02 vs 7.0782e-02 |
 | 4 | `MemorySummary` within ±5% of plan §2; C=1 tail ≈ 64 MiB at N=1024 | **DONE** | Measured C=1 (`.deps/ppl-*-t0` vs `-t1024/report.json`): `kv_exact_history_bytes` 0 → **67,108,864 = 64 MiB exactly** for every wired storage, matching plan §2 `round_up(N,64)×65,536×C` at **0% error**; `kv_rollback_reserve_bytes` 0 → 4,194,304 (4 MiB, one page, inside the plan's "+16 MiB/C" allowance); rk8v4 `runtime_reservation_bytes` +71,303,168 = exactly 68 MiB. The `memory` block needed a rebuild: the app's `main.cpp:499-521` had the fields but the binary was stale (Step 31) |
@@ -45,7 +45,16 @@ packages, each mapped to concrete evidence. **Update on every step.** Status val
   graph-family assertion (WP4/§7.5) is unchanged and still passes. `ORACLE_EXIT=0` with F16
   correctness cases; F16-vs-BF16 chosen by the `WIDETAIL` wide-tail comparison (F16 lower in all
   four, never worse, identical cost) — commit `b64b6b1e`, Step 35.
-- **M3** (concurrency + speculative, tier decision): `TODO`.
+- **M3** (concurrency + speculative, tier decision): **DONE** — (a) per-C footprint: the exact pool
+  is `(page_count(N)+1) * C` page groups; a new host test `tests/models/qwen3_5/test_exact_tail_capacity.cpp`
+  asserts `payload_bytes == round_up(N,64)*65,536*C + C*4 MiB` **exactly** for C=1..8 and N∈{512,1024,2048}
+  (commit `6d77e0b6`), matching plan §2 to the byte. (b) Draft tail=0: the MTP/draft cache is
+  `layout.mtp_kv`, a `PagedKVCacheLayout` with **no tail member at all**, so a draft can never read or
+  write the exact ring; the test asserts `mtp_kv` payload is byte-identical tail-on vs tail-off and that
+  it carries no tail planes. (c) Cross-tier decision: exact pool is device-only (WP7/M1, no slab/LRU/disk).
+  (d) End-to-end two-state re-test on the 27B artifact (Step 36): `--spec mtp` at N=1024 and N=0 both
+  complete the same 12 rounds (~24-26% acceptance, ~1.8-1.9 tok/round, `EXIT=0`), and plain decode at
+  N=1024 completes too — the speculation path is not regressed by the tail.
 - **M4** (optional tier): out of scope for now.
 
 ## Work packages (plan §3)
@@ -95,7 +104,7 @@ packages, each mapped to concrete evidence. **Update on every step.** Status val
 | Requirement | Status | Evidence |
 |---|---|---|
 | New project in `ninfer-precision-tail` | **DONE** | local clone at `D:\ninfer\ninfer-precision-tail` |
-| Git version control | **DONE** | `main` (+ merged `port/wp1`, `port/wp10-oracle`); commits through `b04272e0` |
+| Git version control | **DONE** | `main` (+ merged `port/wp1`, `port/wp10-oracle`); commits through `6d77e0b6` (M2 F16 `b64b6b1e`/`8284ea95`, M3 capacity `6d77e0b6`) |
 | Memory doc written at every step | **DONE** | `PORT-MEMORY.md` (§5.1-5.11) + `PORT-JOURNAL.md` (Steps 0-32); `PORT-BEELLAMA-SPEC.md`; this file |
 | Subagents + worktree used to spare main context | **DONE** | multiple delegations; worktrees `port/wp1`, `port/wp10-oracle`; per-TU harness `.deps/vcheck.py` |
 | Original project/product not damaged | **DONE** | clone is separate, `origin` removed; donors (`ninfer-16g-...`, `ninfer-package`, `llamacpp`, `vcpkg`) only read; `.deps`/`build-port` inside our repo |

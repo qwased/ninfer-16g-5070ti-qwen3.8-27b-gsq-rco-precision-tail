@@ -1256,3 +1256,33 @@ F16 is lower in all four and never worse; the margin is small because the rk8v4 
 the error even at N=256, but it is the right direction and F16 costs nothing. **Decision: F16 stays
 the default**, BF16 the verification form (plan §1.1/§4-M2). `docs/performance.md` and
 `PORT-DOD.md` updated; docs `cli.md`/`serving.md` gained the new flag.
+
+## Step 36 -- M3: per-C capacity, tail-free drafts, and the end-to-end spec run
+
+M3 is "concurrency + speculative". Its four asks, each now with evidence rather than argument.
+
+**(a) The pool is per-C, exactly as plan §2.** Delegated a CPU host test
+(`tests/models/qwen3_5/test_exact_tail_capacity.cpp`, target
+`ninfer_qwen3_5_exact_tail_capacity_test`, commit `6d77e0b6`). It plans a real `DecoderStateSpec`
+(head_dim 256, kv_heads 4, 16 full-attention layers) and asserts `exact_tail.pages.payload_bytes()
+== round_up(N,64)*65,536*C + C*4,194,304` to the byte for C=1..8 and N ∈ {512,1024,2048} — the §2
+retention term plus one 4 MiB rollback page per sequence. Verified by re-running it myself: PASS.
+
+**(b) The draft is tail-free, not merely tail-zeroed.** The MTP/draft cache is `layout.mtp_kv`, a
+`PagedKVCacheLayout` with no tail member — a draft has nowhere to read or write the exact ring, so
+"force draft tail = 0" holds by construction. The test pins it: `mtp_kv` bytes are identical
+tail-on vs tail-off and it carries no tail planes. The ngram/lookup draft has no KV at all.
+
+**(c) Cross-tier decision.** Unchanged from WP7/M1: the exact pool is device-only; it never enters
+the host slab, LRU or disk, so there is no second page size to carry through the tier machinery.
+
+**(d) End-to-end, both states.** Built the `ninfer` cli and ran the 27B artifact (`IQ3_XXS`,
+9.39-9.71 GiB weights, ~4-6 s load) at N=1024:
+- `--spec mtp --kv-tail-tokens 1024`: `EXIT=0`, 12 MTP rounds, 42 drafted / 10 accepted (23.8%),
+  1.83 tok/round.
+- `--spec mtp --kv-tail-tokens 0`: `EXIT=0`, 12 rounds, 43 drafted / 11 accepted (25.6%), 1.92.
+- no `--spec`, N=1024: `EXIT=0`, prefill + decode.
+- `rk4v4-e8` and `nvfp4`, N=1024: `EXIT=0` each.
+The speculation path is not regressed by the tail. (A first attempt died on shell quoting — the
+spaced prompt was split by the nested `cmd //c`, `error: unknown argument: capital`; a no-space
+prompt avoids it.) All runs serial, single GPU; `tasklist` clean after. `PORT-DOD.md` M3 → DONE.
