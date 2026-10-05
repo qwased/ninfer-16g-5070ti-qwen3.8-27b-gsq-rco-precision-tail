@@ -440,3 +440,85 @@ Commit code + memory together (`docs(m5):` / `fix(...):`).
   `small_t.cuh` costs a full small-T rebuild); the Step 48 KLD re-run stands as the system-level evidence.
   Revisit only if a future change touches that path.
 - Open, lower priority: WP-D D1/D2/D4 (no pre-port build tree; D4 non-gating).
+
+## 12. Handoff §11 executed (Steps 54-55) — outcome
+
+**P0 (§11.2) — DONE, as `b99ba8d5`, Option A plus one extra fix in the same kernel.** The exact ring is
+now written from `causal_attention_prompt_launch` (`prompt.cu`) through the existing
+storage-independent `causal_attention_small_t_tail_shadow_kernel`, after the batched append, for the
+chunk's own rows; the fp8/nvfp4/k8v4 launches return earlier and are untouched (tail-inert). The
+process-safety notes hold: `grid.y` is unchanged, `tail_tokens == 0` stays bit-identical, and
+`batch == 1` is structural for this route (`causal_softmax_attention.cpp:359-401`), so no batched
+ring writer was needed (Option B retired).
+
+Also fixed, found while reading: the shadow kernel's ring **source** index omitted the flat column base
+the body kernel quantizes from (`column_begin + batch*full_width`), so every chunk but the first of a
+chunked launch — and every sequence past the first of a batched one — wrote the first chunk's K/V into
+its own rows. Single chunk / batch 1 (all existing oracle tail cases) cannot show it.
+
+**P1 (§11.3) — DONE.** The rebuild was far cheaper than the plan's estimate: the touched header is
+included only by `small_t.cu` and `prompt.cu`, so the two big `nvcc` TUs plus the test TU and the
+links. `ninfer.exe` (the stale pre-`56fc8384` one), `ninfer-perplexity.exe` and `ninfer_tests.exe` all
+rebuilt, `BUILD_EXIT=0`. Noticed and left alone: the `all` target fails in `tools/ninfer-multi-gpu-probe`
+(missing link to the core lib for `ninfer::core::current_resident_memory`); pre-existing, never built
+in this tree, unrelated — build named targets.
+
+**P2 (§11.4) — 1, 2, 3, 6 DONE; 4 and 5 measured only post-fix.**
+1. Oracle green: `ORACLE_EXIT=0`, `softmax_attention: PASS` including the Step 49/50 guards and the
+   `N=0` bit-parity case.
+2. The new Prompt-then-small-T oracle case landed as `run_prompt_ring_write_case` (fails pre-fix,
+   passes post-fix; bf16 + rk8v4 × fragmented/offset), plus `run_fused_chunked_ring_case` for the
+   shadow source offset (24 q-heads, width 9 ⇒ chunks 8+1). A rejected first shape (h16 width 7 / N=6)
+   is recorded in the journal: the chunked route's boundary is chunk-local, so `N ≥ width` is needed
+   for the *output* to be oracle-comparable.
+3. The bf16 scoring repro ran as a **controlled A/B** against the pre-fix reports on disk, which is
+   stronger than the plan's `ctx=192` version: ctx 2048, W=8, N=1024, same corpus and same
+   bf16-tail0 reference → mean KLD **0.13284577 → 0.00093566** (−142×), max 16.29 → 0.475,
+   `same_top` 0.9004 → 0.9867. rk8v4 identical pre/post to the last digit; the bf16 tail-off control
+   stays exactly 0. The plan's stated mechanism needed one correction: during **scoring**
+   `nominal = min(score_width, prefill_chunk)` (`program_impl.cpp:740`), so there is no >64-wide
+   prefill step; bf16's nonzero prompt limit (128/256 keys) is what sent its short-window steps to
+   `Prompt`. The >64-wide prefill trigger is the **generation** case, and it is fixed by the same call.
+4. Generation repro: **run post-fix** with a 362-token prompt (one Prompt-route prefill step), greedy
+   and seeded, tail0 vs tail1024 → character-identical continuations (1078 chars, 100% shared prefix).
+   No pre-fix binary survives the in-place rebuild, so the pre-fix contrast for this route is the
+   scoring A/B in item 3, which shares the route.
+5. WP-F F3/F4 re-run on the fixed `ninfer.exe`: tail-off is bit-identical across builds (the paired
+   control); the tail's cost falls from **14.3% → 5.8%** of decode throughput and from 3.8 → 2.1
+   acceptance points (tail1024 post-fix 3498 drafted / 768 accepted / 21.96% / 2.524 tok per round /
+   78.0 tok/s vs pre-fix 2161 / 439 / 20.31% / 2.416 / 70.8). The pre-fix acceptance drop was the
+   corrupt verifier: post-fix the run drafts 62% more tokens at a higher rate. See
+   `docs/performance.md` "Speculation × tail".
+6. WP-B spot-check — the `ctx 2048` rk8v4 cell above is the spot-check (bit-identical to its pre-fix
+   value), and the full post-fix matrix (§10.4) is unchanged.
+
+**Extra finding (not in the plan): the merge's numeric floor.** The bf16 A/B left a ~9.4e-4 residual;
+the whole-window probe (`ctx 2048`, `N=2048`, body empty, every row exact) lands on the same figure
+(0.00091878), so the residual is the small-T path's fp32/bf16 reduction order — the number any future
+merge-fidelity work would have to beat, and the current cap on the tail's benefit for coarse bodies.
+
+**P3 (§11.5) — DONE.** `docs/performance.md` rewritten around the two ring-write defects and the
+post-fix tables; `PORT-DOD.md` §7.3 → `DONE (scoped)`, §7.2/§7.6 evidence extended, M5 → `DONE`,
+deviations #6/#7 added; `PORT-MEMORY.md` §5.14; `PORT-JOURNAL.md` Steps 54+.
+
+## 13. Remaining work (for the next session)
+
+The M5 deliverable is closed: the instrument exists, two ring-write defects are fixed, the benefit is
+established for every tail-capable storage, and the oracle, the KLD matrices and the speculation runs
+are green. What is left, in priority order:
+
+1. **Nothing blocking the product claim.** `--kv-tail-tokens` can now be recommended for `bf16` and the
+   INT8 family (`int8`/`rk8v4`/`rk4v4`/`rk4v4-e8`/`rk2v4-e8`); `fp8`/`nvfp4`/`k8v4` stay inert by
+   design (deviation #2) and should be documented as such wherever the flag is advertised.
+2. **Merge numeric fidelity** (the ~9.2e-4 floor, DoD "Outstanding characterisation"). The tail's
+   benefit for coarse bodies is now capped by the small-T path's fp32/bf16 reduction order, not by any
+   data defect. A future change that beats the floor must hold: tail-off bit parity, the
+   `window ≤ N` whole-window case, and the `run_fused_crossing_case` / `run_fused_chunked_ring_case`
+   guards.
+3. **WP-D D1/D2/D4** (pre-port regression) remain unrun: no pre-port build tree exists here and
+   reconfiguring one is a multi-hour, >100 GB cost; D4 is explicitly non-gating.
+4. **WP8** (transaction/rollback) stays deferred — F2 established that a rejected draft is never
+   observable through the ring, so no rollback is needed for the current design.
+5. **Deferred empirical reversals.** The fail-without-fix reversal for the Step 49/50 guards still
+   costs a full small-T rebuild; the Step 54 pair does *not* need one (its controlled A/B is on disk).
+   The generation-route pre-fix contrast is unavailable because the fix rebuilt `ninfer.exe` in place.

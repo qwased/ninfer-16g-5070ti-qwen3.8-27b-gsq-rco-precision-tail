@@ -557,7 +557,8 @@ Bit-identical, as expected — the tail is not a defect, it is simply outside th
 The tail's quality effect is exercised by the FP32 oracle
 (`tests/ops/softmax_attention/causal_cache.cpp`, `ninfer_softmax_attention_test`), which drives the
 small-T decode route with the ring on; its memory footprint is the table above. A decode-width
-scoring mode would be needed to show a ppl delta.
+scoring mode shows the effect directly and now exists (`--score-width`, KLD) — see "Decode-width
+KLD" below.
 
 ### Decode-route quality gain (the tail's measurable effect)
 
@@ -618,72 +619,110 @@ shape (prefill flat, decode a few percent slower with the tail), not a measured 
 body+tail dual-write scan of `bench/ops/kv_cache_append_bench.cu` and a longer decode benchmark are
 the outstanding plan §5 performance characterisation.
 
-### Decode-width KLD — the tail's effect when it is actually read (2026-10-05, M5)
+### Decode-width KLD — the tail's effect when it is actually read (2026-10-05/06, M5)
 
 The perplexity app scores the **prefill** route (1024-wide tiles → `Prompt`), which never reads the
 tail, so tail on/off ppl is bit-identical (above). `apps/perplexity --score-width W` narrows the
-scoring query tile to `W`; at `W ≤ 8` the small-T route runs and the tail merges. KLD is measured
-against a persisted reference (`--save-topk`, `--kld-base`) over top-K 100, matching llama.cpp's
-channel. Protocol: rk8v4, `W=8`, `--context 1024 --disjoint`, 2,046 scored tokens (a 12 KB wikitext
-slice), bf16-tail0 reference.
+scoring query tile to `W` (`min(W, prefill_chunk)`); at `W ≤ 8` the small-T route runs and the tail
+merges. KLD is measured against a persisted reference (`--save-topk`, `--kld-base`) over top-K 100,
+matching llama.cpp's channel. Protocol: bf16-tail0 reference over 32,764–36,846 scored tokens of
+`.deps/m5-longtext.txt` at the stated context, `--disjoint`.
 
-| tail | score width | perplexity | KLD mean vs bf16 |
-|---:|---:|---:|---:|
-| 0 | 1024 | 6.485412 | — (reference) |
-| 0 | 8 | 6.496149 | 0.002647 |
-| 1024 | 1024 | 6.485412 | — (bit-identical to tail 0) |
-| 1024 | 8 | 6.464423 | **0.000912** |
+The instrument self-check is exact (a run against its own reference gives KLD 0, `same_top` 1.0), and
+the A4 gate passes: `tail=0` gives the same ppl at `W=1` and `W=1024`, while `tail=N` gives a strictly
+lower ppl at `W=1` — width ≤ 8 scoring genuinely reads the ring.
 
-When the tail covers the whole window (here `ctx = N = 1024`, so the body is empty), it is **correct
-and improves** both ppl and KLD. The instrument self-check is exact (a run against its own reference
-gives KLD 0, same-top 1.0).
+**Two defects had to be fixed before the benefit was measurable at all.** Both are in the *write*
+side of the ring, not in the merge:
 
-**However, when the window is longer than the tail — the normal case — the merge is wrong.** At
-`ctx = 2048`, `tail = 1024` (body_window = 1024) the same measurement degrades badly:
+1. **The fused-append split never quantized the tail rows** (`56fc8384`). While the exact tail covered
+   the whole window (`window ≤ N`, so `body_window == 0`) the body's splits returned before their
+   fused-append block, so those rows never reached the quantized cache; a later `window > N` body read
+   `[0, window − N)` and hit a permanent hole. Measured before the fix at ctx 8192: int8 0.0270,
+   rk8v4 0.0271, rk4v4-e8 0.0273 — a *storage-independent* degradation 24×/10×/4× over tail-off.
+2. **The `Prompt` route never wrote the ring** (`b99ba8d5`). The batched
+   `kv_cache_append_batch_launch` gates its exact-ring write on the single-sequence `block_table`
+   field, which a batch view does not carry, so that block is compiled out; its prompt kernels never
+   touch `cache.tail` either. Every step routed to `Prompt` therefore left its rows out of the ring,
+   and the following small-T decode steps merged slots still holding the ring's fill. Two shapes reach
+   that route: a prefill chunk wider than the small-T ceiling — the default in generation — and, on
+   **bf16**, a decode step whose visible window is inside the storage's nonzero prompt limit (128 keys
+   at W ≤ 4, 256 at W 5–8). The ring is now written from the same source the batched append
+   quantizes. The shadow kernel's ring *source* index also omitted the flat column base the body
+   kernel quantizes from, so every chunk but the first of a chunked step, and every sequence past the
+   first of a batched one, shadowed the first chunk's K/V; that is fixed too.
 
-| ctx | storage | tail | ppl | KLD mean | same-top |
-|---:|---|---:|---:|---:|---:|
-| 2048 | rk8v4 | 0 | 6.92705 | 0.002838 | 0.9736 |
-| 2048 | rk8v4 | 1024 | 7.02481 | **0.022539** | 0.9556 |
-| 2048 | rk8v4 | 2048 | 6.91090 | 0.001068 | 0.9844 |
-| 8192 | int8 | 0 | 5.971447 | 0.001126 | 0.9847 |
-| 8192 | int8 | 1024 | 6.045914 | **0.026986** | 0.9373 |
-| 8192 | int8 | 2048 | 6.049234 | **0.027912** | 0.9425 |
-| 8192 | rk8v4 | 0 | 5.980890 | 0.002647 | 0.9760 |
-| 8192 | rk8v4 | 1024 | 6.046884 | **0.027096** | 0.9371 |
-| 8192 | rk8v4 | 2048 | 6.050781 | **0.028044** | 0.9423 |
-| 8192 | rk4v4-e8 | 0 | 6.011151 | 0.006522 | 0.9660 |
-| 8192 | rk4v4-e8 | 1024 | 6.044898 | **0.027349** | 0.9354 |
-| 8192 | rk4v4-e8 | 2048 | 6.048284 | **0.027848** | 0.9424 |
+The two are independent, which is why the earlier matrix looked clean: the int8 family never takes
+`Prompt` at `W ≤ 8` (its prompt limit is 0), so defect 2 could not show there, and defect 1 only
+applies once a body exists.
 
-Note that the tail-on KLD converges to **≈0.027 for every storage** (int8 0.0270, rk8v4 0.0271,
-rk4v4-e8 0.0273) despite very different tail-off errors (0.0011 / 0.0026 / 0.0065) — a
-storage-independent corruption signature, consistent with the tail path itself (not the body) being
-mis-read when a body coexists.
+**Post-fix, the benefit is measurable and monotone in body coarseness.** Mean KLD vs the per-ctx
+bf16-tail0 reference (`W=8`, 32,764 scored tokens); gain = tail-off KLD ÷ tail-on KLD:
 
-Context and storage dependence — full campaign, mean KLD vs the per-ctx bf16-tail0 reference
-(W=8, 32,764 scored tokens); parenthesised = degradation factor of tail 1024 vs tail 0:
+| mean KLD | tail0 | tail1024 | tail2048 | gain 1024 / 2048 |
+|---|---|---|---|---|
+| ctx 8192 int8 | 0.00112641 | 0.00103730 | 0.00102872 | 1.09× / 1.09× |
+| ctx 8192 rk8v4 | 0.00264652 | 0.00120207 | 0.00114922 | 2.20× / 2.30× |
+| ctx 8192 rk4v4-e8 | 0.00652166 | 0.00200700 | 0.00161394 | 3.25× / 4.04× |
+| ctx 16384 int8 | 0.00112316 | 0.00104790 | 0.00101761 | 1.07× / 1.10× |
+| ctx 16384 rk8v4 | 0.00259360 | 0.00119415 | 0.00115986 | 2.17× / 2.24× |
+| ctx 16384 rk4v4-e8 | 0.00648249 | 0.00213736 | 0.00174379 | 3.03× / 3.72× |
+| ctx 32768 int8 | 0.00103341 | 0.00100826 | 0.00100349 | 1.02× / 1.03× |
+| ctx 32768 rk8v4 | 0.00241272 | 0.00118513 | 0.00110771 | 2.04× / 2.18× |
+| ctx 32768 rk4v4-e8 | 0.00631572 | 0.00212822 | 0.00170770 | 2.97× / 3.70× |
 
-| storage | ctx 8192 t0 / t1024 / t2048 | ctx 16384 t0 / t1024 / t2048 | ctx 32768 t0 / t1024 / t2048 |
+Tail-on is ≤ tail-off in **all 18 cells** and the gain grows monotonically with body coarseness
+(int8 < rk8v4 < rk4v4-e8) at every context and both tail lengths — the property the campaign set out
+to test. The three tail-off ctx-8192 cells are byte-for-byte identical to their pre-fix reports, so
+the earlier fix is tail-on-only. `same_top` moves with KLD (rk4v4-e8 8K: ppl 6.0112 → 5.9802,
+`same_top` 0.966 → 0.982). Context dependence is mild and decreasing — a fixed ring is a smaller
+fraction of a larger window.
+
+**bf16 storage + tail — the last correctness item — measured as a controlled A/B** (same corpus, same
+reference, ctx 2048, N=1024, W=8, 36,846 scored tokens):
+
+| candidate | mean KLD | max KLD | same_top |
 |---|---|---|---|
-| int8 | 0.001126 / **0.026986** (24×) / 0.027912 | 0.001123 / **0.023706** (21×) / 0.021866 | 0.001033 / **0.014450** (14×) / 0.014842 |
-| rk8v4 | 0.002647 / **0.027096** (10×) / 0.028044 | 0.002594 / **0.023840** (9×) / 0.021882 | 0.002413 / **0.014577** (6×) / 0.014910 |
-| rk4v4-e8 | 0.006522 / **0.027349** (4×) / 0.027848 | 0.006482 / **0.024542** (4×) / 0.021951 | 0.006316 / **0.015344** (2.4×) / 0.014986 |
+| bf16 tail 1024, pre-fix | 0.13284577 | 16.288 | 0.9004 |
+| bf16 tail 1024, post-fix | **0.00093566** | **0.475** | **0.9867** |
+| bf16 tail 0 (control, either build) | 0.00000000 | 0 | 1.0000 |
+| rk8v4 tail 1024 (control, either build) | 0.00113316 | 0.084 | 0.9828 |
 
-The tail degrades every storage at every context ≥ 2048; the absolute tail-on error is close to
-constant across storages (~0.027 at 8K, ~0.015-0.024 at 16-32K) regardless of tail-off error, which
-ranges 6× across storages (0.0010 int8 … 0.0065 rk4v4-e8). That **storage-independence** is the
-signature of a defect in the tail path itself, not a body-precision interaction. The only clean rows
-are `ctx = N` (whole window exact).
+A bf16 body with an exact tail should be no worse than rk8v4's, and it now is (0.00094 vs 0.00113):
+post-fix bf16 is at the *same* level as the quantized tier rather than two orders above it, and its max
+KLD is the smallest of the three. The rk8v4 cell is bit-identical pre/post fix (the same double to the
+last digit, 0.0011331605820924095) and the tail-off control stays exactly KLD 0 / `same_top` 1.0 — the
+fix is tail-on/Prompt-route-only. **The residual ~1e-3 is the merge's own numeric floor, not a
+remainder of the defect:** the whole-window case (`ctx 2048`, `N=2048`, so the body is *empty* and the
+merge is a single tail partial over exact bf16 values) lands on the same figure — pre-fix 0.20684 →
+post-fix **0.00091878**, `same_top` 0.9861 — and the Step-41 whole-window rk8v4 case gave 0.000912. So
+after the fix the tail's benefit is bounded by the small-T path's fp32/bf16 reduction order, ~1.4% of
+top-1 flips on this corpus, not by anything structural. Improving that fidelity is a follow-up
+opportunity, not a blocker.
 
-The tell is `bf16` body + tail 1024 against a bf16-tail0 reference: same precision on both sides, so a
-correct merge would give KLD ≈ 0, but it gives **0.137** (same-top 0.896). The fault reproduces at
-`W=1` and `W=8`, at ctx 2048 and 8192, for `bf16`, `int8` and `rk8v4` — it is **general to any
-non-empty body**, not a quantization-domain issue, and not the split partition (the all-tail case and
-the tail-off case are both clean; the in-tree oracle only tests T=6 / ≤67 keys, or a single fused
-append step, so it does not cover this regime). **Conclusion: the tail is not correctly merged
-whenever a body contributes, so its benefit cannot be claimed. This is a defect to fix, not a "the
-tail is useless" result.**
+**Generation route: a >64-token prompt, greedy, tail0 vs tail1024** (`ninfer` cli, `rk4v4-e8`,
+`--max-new 256 --max-context 4096 --greedy --seed 0`, a 362-token prompt — one Prompt-route prefill
+step, the shape whose rows the batched append used to leave out of the ring). The two runs produce
+**character-identical** continuations (1078 chars, shared prefix 100%), so the ring write changes
+nothing observable on this shape. Only the post-fix side is reproduced here: no pre-fix `ninfer.exe`
+survives (the fix rebuilt it in place), so the pre-fix contrast for this route is the scoring A/B
+above, which shares the route.
+
+**Ring population — which routes write it, and the one behavioural wrinkle.** After the fix every
+route that appends fills the ring for its own rows: the fused small-T entry shadows its step (the
+main model's decode path), and the Prompt launcher shadows its chunk (prefill, and bf16's short-window
+decode steps). The ring is still read only by the small-T family; `fp8`, `nvfp4` and `k8v4` carry no
+tail code at all, so their ring is allocated but never written or read (deviation #2). One wrinkle is
+worth stating because it is *not* a defect but makes a multi-chunk step deviate from the newest-N
+definition: a chunked small-T launch derives its exact/quantized boundary from the *chunk's* last
+position, not the step's newest, because the rows after the chunk have not been appended yet. The
+consequence is that a chunk merges a **superset** of the exact keys the newest-N rule would pick —
+i.e. it is never less accurate than the documented boundary — but the difference is visible to a
+strict oracle, so the oracle's chunked case keeps the whole step inside the tail (see
+`run_fused_chunked_ring_case`). The new oracle guards for all of this are
+`run_prompt_ring_write_case` (Prompt write, small-T read) and `run_fused_chunked_ring_case` (a chunk
+whose `column_begin` is above zero); both fail before the fix and pass after, and
+`ninfer_softmax_attention_test` is green (`ORACLE_EXIT=0`).
 
 ### Cross-product check — llama.cpp `kvarn4` (same model family)
 
@@ -701,21 +740,42 @@ The tail cuts mean KLD 37% and max KLD 58%. **The benefit is real and achievable
 body+tail merge is the gap. Compare only *incremental* ΔKLD by byte tier, never absolute values
 across builds.
 
-### Speculation × tail (indicative)
+### Speculation × tail (F3/F4)
 
-`ninfer` cli, `--spec mtp --draft-tokens 7`, `rk4v4-e8`, 5 prompts, `--max-new 256 --max-context 4096`:
+`ninfer` cli, `--spec mtp --draft-tokens 7`, `rk4v4-e8`, the same 5 prompts, `--max-new 256
+--max-context 4096`, pooled over the prompts (`.deps/run-m5-wpf2.sh`, raw `.deps/wpf2/`;
+pre-fix raw `.deps/wpf/`). The tail-off row is bit-identical in both builds (same drafted/accepted
+counts), which is the paired control for the tail-on rows:
 
-| tail | acceptance | acceptance length | decode |
-|---:|---:|---:|---:|
-| 0 | 24.1% | 2.774 tok/round | 82.6 tok/s |
-| 1024 | 20.3% | 2.408 | 70.8 tok/s |
+| tail | build | drafted | accepted | rate | acceptance length | decode |
+|---:|---|---:|---:|---:|---:|---:|
+| 0 | either | 3303 | 795 | 24.07% | 2.667 tok/round | 82.8 tok/s |
+| 1024 | pre-fix | 2161 | 439 | 20.31% | 2.416 | 70.8 tok/s |
+| 1024 | **post-fix** | 3498 | 768 | **21.96%** | **2.524** | **78.0 tok/s** |
+| 2048 | **post-fix** | 3498 | 768 | 21.96% | 2.524 | 78.1 tok/s |
 
-(Acceptance length and rate fall; with this short workload tail 1024 ≡ 2048 because prompt+generation
-< 1024 tokens, so "tail" covers the whole context.) These numbers are **confounded by the merge defect
-above** — the draft is tail-free while the corrupted verifier sees the tail — so they should be
-re-measured after the fix. Structured correctness (no rejected-draft pollution of the exact ring) is
-established separately: the draft cache has no tail member, and a rejected row is never observable
-because the tail masks causally and the reading round rewrites its rows first.
+Read against the tail-off control: the tail now costs **5.8%** of decode throughput and 2.1 points of
+acceptance (pre-fix: 14.3% and 3.8 points, i.e. acceptance 24.07% → 20.31%). The pre-fix drop was the
+corrupt verifier, not the tail: with the ring correct the run drafts 62% more speculative tokens
+(3303 → 3498 for nearly the same workload) at a *higher* accept rate. F3's hypothesis — a correct tail
+does not materially reduce acceptance — holds to within 2 points; the residual cost is the exact-tail
+partial plus the merge itself. `tail 1024 ≡ 2048` throughout because prompt + generation < 1024 tokens,
+so the tail covers the whole context in both (a degenerate case, not two independent points).
 
-DoD §7.3 is therefore **evidenced as negative for the current build**: ppl cannot show the tail
-(prefill route), and the decode-width KLD that can show it exposes a merge defect.
+`--mtp-attention-window 128` (F5) changes nothing measurable in acceptance (16.1% vs 16.5% on prompt 1,
+the same as without the window), consistent with the draft cache being structurally tail-free.
+
+Structured correctness (F1/F2/F5) is established separately and unchanged: the draft cache has no tail
+member, and a rejected row is never observable because the tail masks causally and the reading round
+rewrites its rows first — no ring rollback is needed (WP8 stays deferred).
+
+### Verdict
+
+`--kv-tail-tokens` is **evidenced as beneficial and correct on this port** for the storages whose
+routes merge it (`bf16` body + the INT8 family): the tail is written by every route that appends, tail
+on/off ppl is bit-identical only where the route cannot read it, and where it is read (decode-width
+scoring) it reduces mean KLD at every context and storage, with the gain growing monotonically with
+body coarseness (1.02–4.04×). A `bf16` body now scores in the same band as the quantized tier instead
+of two orders above it. `fp8`, `nvfp4` and `k8v4` remain inert by design (deviation #2), and the
+remaining cost is a ~1e-3 mean-KLD numeric floor in the small-T merge plus ~6% decode throughput with
+MTP speculation. DoD §7.3 is `DONE (scoped to the tail-capable storages)`.

@@ -599,3 +599,88 @@ merged to `main` after each landed sub-step.
   together; subagents/worktrees) are restated in §11.6.
 - Runs are strictly serial, single-owner, single GPU (5070 Ti); after **every** run check
   `tasklist`/`nvidia-smi` for orphan processes (user requirement) before starting the next.
+
+## 5.14 M5 closure — the ring-write fix, and the benefit measured (Step 54)
+
+**The fix (`b99ba8d5`, two parts, one rebuild).** (1) `prompt.cu`: `causal_attention_prompt_launch`
+now launches the storage-independent `causal_attention_small_t_tail_shadow_kernel` for its own chunk
+after the batched append, from the same BF16 k/v the append quantizes — the batched append's ring
+block is `if constexpr (requires(const CacheView& c){ c.block_table; })`, false for
+`PagedKVBatchLayerView` (`block_tables`, plural), so it is compiled out, and no prompt kernel touches
+`cache.tail`. The fp8/nvfp4/k8v4 launches return earlier and stay untouched (tail-inert). (2)
+`small_t_tail_shadow.cuh`: the ring **source** index now adds the flat column base
+`D*KVHeads*(column_begin + batch*full_width)` the body kernel also offsets by. Without that term every
+chunk but the first of a chunked launch and every sequence past the first of a batched one shadowed
+the *first* chunk's / sequence's K/V. Verified separately that the ring destination index and the
+per-sequence ring base (`batch*ring_pages`, pool = `ring_pages*max_concurrency` groups) were already
+correct.
+
+**Why the old matrix looked clean.** The int8 family's `W≤8` prompt limit is 0 keys, so those
+storages never take `Prompt` during W≤8 scoring → defect (1) could not show; bf16's limit is 128/256,
+so with `ctx 2048` and W=8 its early steps took `Prompt` while the window was small → the ring was
+never written → bf16 was the visible casualty. This supersedes the §10.5 framing that the *prefill
+chunk > 64* trigger was what WP-B had missed: in **scoring**, `nominal = min(score_width,
+prefill_chunk)` (`program_impl.cpp:740`) so the window is processed in ≤8-wide steps and no >64 chunk
+exists. The >64-token prefill trigger is real for **generation** (one step of the whole prompt), which
+is why the fix is required and not merely a bf16 patch.
+
+**Measured (controlled A/B, same corpus `m5-longtext.txt`, same bf16-tail0 reference, ctx 2048,
+N=1024, W=8, 36,846 scored tokens):**
+
+| candidate | mean KLD | max | same_top |
+|---|---|---|---|
+| bf16 t1024 pre-fix | 0.13284577 | 16.288 | 0.9004 |
+| bf16 t1024 post-fix | **0.00093566** | 0.475 | 0.9867 |
+| bf16 t0 control | 0.00000000 | 0 | 1.0000 |
+| rk8v4 t1024 (both builds) | 0.00113316 | 0.084 | 0.9828 |
+
+rk8v4 identical pre/post to the last digit and the tail-off control exactly 0 ⇒ the fix is
+tail-on/Prompt-route-only. The WP-B post-fix matrix (27/27 cells, §10.4) stands: tail-on ≤ tail-off
+18/18, gain monotone by body coarseness.
+
+**Unit guards.** `run_prompt_ring_write_case` (two steps: a 128-row Prompt step then an 8-row small-T
+step whose tail reaches back into the first step's rows; bf16 + rk8v4 × fragmented/offset) and
+`run_fused_chunked_ring_case` (h24, width 9 with 24 query heads ⇒ chunks 8+1, so a chunk starts at
+column 8; N ≥ width keeps the step inside the tail). Both assert the full ring against the fixture and
+both fail before the fix. `ORACLE_EXIT=0`.
+
+**Trap recorded twice now:** the donor artifact directory is `D:\ninfer\ninfer-package` — with the
+leading `n` of `ninfer`. `run-m5-wpf.sh` has it right; a hand-copied variant dropped the `n` and every
+run died with `CreateFileW: Win32 error 3` at artifact inspect (identical symptom to §5.13's path
+note). Copy the path, never retype it.
+
+**Blocked/deferred at this handoff:** the generation-side A/B (>64-token prompt, tail0 vs tailN token
+stream) has no saved pre-fix binary — `ninfer.exe` was rebuilt in place — so the Prompt-route repair
+rests on the scoring A/B above plus the oracle. WP-D D1/D2/D4 remain unrun (no pre-port build tree;
+D4 explicitly non-gating).
+
+**WP-F F3/F4 re-run on the fixed build (Step 55).** `.deps/run-m5-wpf2.sh` → `.deps/wpf2/`, same 5
+prompts / `--spec mtp --draft-tokens 7 --kv-dtype rk4v4-e8 --max-new 256 --max-context 4096`, pooled
+(pre-fix raw `.deps/wpf/`):
+
+| tail | build | drafted | accepted | rate | acc len | decode |
+|---:|---|---:|---:|---:|---:|---:|
+| 0 | either | 3303 | 795 | 24.07% | 2.667 | 82.8 tok/s |
+| 1024 | pre-fix | 2161 | 439 | 20.31% | 2.416 | 70.8 |
+| 1024 | post-fix | 3498 | 768 | 21.96% | 2.524 | 78.0 |
+| 2048 | post-fix | 3498 | 768 | 21.96% | 2.524 | 78.1 |
+
+tail-off is bit-identical across builds (the paired control). The tail's cost drops from 14.3% to
+**5.8%** of decode and from 3.8 to 2.1 acceptance points; the pre-fix drop was the corrupt verifier
+(post-fix the run drafts 62% more tokens at a higher rate). F5 `--mtp-attention-window 128` is neutral
+(16.1% vs 16.5%). The pre-fix `wpf/` raw data was produced by `1299-g6d77e0b6` (the stale
+pre-`56fc8384` `ninfer.exe`, exactly as `PORT-M5-PLAN.md` §11.3 recorded), so the tail-off row
+matching byte-for-byte across the two builds is what makes the comparison a valid paired A/B.
+
+**Numeric floor of the merge (Step 55).** bf16 `ctx 2048 --score-width 8` vs the same bf16-tail0
+reference: `N=1024` post-fix 0.00093566, and the **whole-window** probe `N=2048` (body empty → the
+merge is a single tail partial over exact bf16 values) post-fix **0.00091878** (pre-fix 0.20684),
+`same_top` 0.9861 — the same figure, so the residual ~1e-3 is the small-T path's own fp32/bf16
+reduction order (~1.4% top-1 flips on this corpus), not a remnant of the defect. This is the number a
+future merge-fidelity change would have to beat; it is also why `bf16` tail-on now sits in the same
+band as `rk8v4` (0.00113) instead of two orders above it.
+
+**Generation route (Step 55).** `ninfer.exe`, 362-token prompt (one Prompt-route prefill step),
+`--greedy --seed 0 --max-new 256`, `rk4v4-e8`, tail0 vs tail1024 → **character-identical** 1078-char
+continuations (100% shared prefix). Post-fix only: no pre-fix `ninfer.exe` survives the in-place
+rebuild, so the pre-fix contrast for this route is the scoring A/B.

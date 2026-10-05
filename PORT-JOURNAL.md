@@ -1988,3 +1988,124 @@ control); a >64-token generation repro; WP-F F3/F4; a WP-B spot-check. §11.5 do
 **Honest status.** The ring-unwritten defect is code-derived and fully traced; its empirical
 reproduction is deferred to the rebuilt binary (§11.4 steps 3–4). `--kv-tail-tokens` must stay
 unrecommended until the fix lands.
+
+## Step 54 — the ring-write fix: the Prompt route now shadows the ring
+
+**Task.** `PORT-M5-PLAN.md` §11.2 (task #16): the exact ring is written only by the single-row
+`ops::kv_cache_append` and the fused small-T shadow kernel; the `Prompt` route's batched append has no
+per-sequence ring write (`ops/kv_cache/append/launch.cu:25` is gated on the single-sequence
+`block_table` field, false for `PagedKVBatchLayerView`), so prefill-shaped steps left every row they
+appended out of the ring.
+
+**Read before writing.** `causal_attention_prompt_launch` (`prompt.cu`) is the single batched entry for
+every tail-capable storage — fp8/nvfp4/k8v4 dispatch away at the top and carry no tail code, so they
+must not be touched. `causal_attention_resolve_route` shows the Prompt route is reachable with
+`batch == 1` only: for `batch > 1` the q-heads-24 block returns SmallT/ChunkedSmallT for width ≤ 16
+(which validation also enforces) and line `:395` returns ChunkedSmallT for everything else — so the
+batched-view case the plan flagged as a batched-metadata problem cannot arise here. That let the fix
+reuse the existing single-sequence shadow kernel directly.
+
+**Found on the way — a second, independent defect in the same kernel.** `small_t_tail_shadow.cuh`
+computed its ring **source** index without the flat column base
+(`column_begin + batch*full_width`) that the body kernel quantizes from, so every chunk but the first
+of a chunked launch and every sequence past the first of a batched one wrote the *first* chunk's /
+sequence's K/V into its own rows. Not reachable by the existing oracle (its tail cases are
+`tokens ∈ {1,6}`, i.e. single chunk, batch 1), and the WP-B matrix scores W=8 from position 0, so it
+had never been exercised. Fixed in the same commit; it is the invariant "the ring must read the rows
+the body quantizes", now stated in the code comment.
+
+**Build.** The plan feared a ~2 h / 21-TU rebuild (the earlier `small_t.cuh` fix). Actual dirty set for
+this change: `small_t.cu` + `prompt.cu` (both include the touched header), the test TU and the links —
+the two big `nvcc` TUs completed inside the first invocation. `ninfer_tests.exe`, `ninfer-perplexity.exe`
+and `ninfer.exe` all rebuilt (`BUILD_EXIT=0`), refreshing the stale pre-`56fc8384` `ninfer.exe`.
+Pre-existing breakage noticed and left alone: `ninfer-multi-gpu-probe` (tools/) has no link line
+providing `ninfer::core::current_resident_memory`, so the default `all` target fails there; it was
+never built in this tree and is unrelated to the tail — build named targets instead.
+
+**Oracle.** Two new cases in `tests/ops/softmax_attention/causal_cache.cpp`:
+`run_prompt_ring_write_case` (one persistent cache, a 128-row Prompt step then an 8-row small-T step
+whose tail reaches back into the first step's rows; only the final step's output is compared, so the
+tail-aware oracle stays valid; wired bf16 + rk8v4 × fragmented/offset) and `run_fused_chunked_ring_case`
+(h24, width 9 ⇒ chunks 8+1 so a chunk starts at column 8; `N ≥ width` keeps the step inside the tail).
+`softmax_attention: PASS`, `packed_/context_: PASS`, `ORACLE_EXIT=0`.
+
+*Rejected first attempt, worth recording:* the same chunked guard at `h16 width 7 / N=6` **failed** —
+and the failure is not a defect. A chunked launch derives its exact/quantized boundary from the
+*chunk's* last position (the rows after the chunk are not appended yet), so the chunk merges a
+superset of the exact keys the oracle's "newest N of the step" rule models. `N ≥ width` removes the
+disagreement; the deviation itself is documented in `docs/performance.md` and DoD deviation #6.
+
+**Controlled A/B (the fail-without-fix evidence, no rebuild of the old tree needed).** The pre-fix
+reports for exactly this protocol were already on disk, so re-running against the *same* reference and
+corpus is a controlled A/B — stronger than the Step 48 KLD re-run the plan used as precedent:
+
+| run (ctx 2048, W=8, N=1024, 36,846 tokens, bf16-tail0 ref) | mean KLD | max | same_top |
+|---|---|---|---|
+| bf16 N=1024 pre-fix (`m5-fix-bf16-t1024-w8-c2048`) | 0.13284577 | 16.288 | 0.9004 |
+| bf16 N=1024 post-fix (`m5-post-bf16-t1024-w8-c2048`) | **0.00093566** | 0.475 | 0.9867 |
+| bf16 N=0 control (`m5-post-bf16-t0-w8-c2048`) | 0.00000000 | 0 | 1.0000 |
+| rk8v4 N=1024 (`m5-post-…` vs `m5-fix-…`) | 0.00113316 both | 0.084 | 0.9828 |
+
+−142× on bf16, rk8v4 bit-identical, tail-off exactly 0 ⇒ correct and tail-on-only. **Mechanism:** the
+int8 family's `W≤8` prompt limit is 0, so it never took `Prompt` during W≤8 scoring and was already
+fine (0.00113); bf16's 128/256 limit sent its early steps (window ≤ 256) to `Prompt`, which is exactly
+where the ring was missing. This also corrects the §10.5 reading that WP-B had missed a >64-wide
+prefill: in **scoring** `nominal = min(score_width, prefill_chunk)` (`program_impl.cpp:740`), so the
+window is scored in ≤8-wide steps and there is no wide chunk at all. The >64-wide prefill trigger is
+real for **generation** (one step for the whole prompt), which is why the fix is required, not a bf16
+patch.
+
+**Not yet done at this point in the step:** the WP-F F3/F4 re-run and a >64-token-prompt generation
+comparison (both need the model; the generation A/B has no saved pre-fix binary since `ninfer.exe` was
+rebuilt in place). The fail-without-fix *unit* reversal was deliberately not run: it costs two extra
+full rebuilds of a 1.3 GB link, and the controlled A/B above is the stronger system-level evidence
+(the plan's own precedent, §10.2/§10.3, is the same trade).
+
+## Step 55 — WP-F F3/F4 re-run, the generation route, and the merge's numeric floor
+
+Everything below is on the fixed build (`b99ba8d5`, `ninfer.exe` rebuilt). All runs serial, and after
+each batch `tasklist | grep -i ninfer` is empty and `nvidia-smi` is back to the 48 MiB idle baseline.
+
+**WP-F F3/F4 (`.deps/run-m5-wpf2.sh` → `.deps/wpf2/`, 5 prompts, `--spec mtp --draft-tokens 7`,
+`rk4v4-e8`, `--max-new 256 --max-context 4096`; pre-fix raw `.deps/wpf/`):**
+
+| tail | build | drafted | accepted | rate | acc len | decode |
+|---:|---|---:|---:|---:|---:|---:|
+| 0 | either | 3303 | 795 | 24.07% | 2.667 | 82.8 tok/s |
+| 1024 | pre-fix | 2161 | 439 | 20.31% | 2.416 | 70.8 |
+| 1024 | post-fix | 3498 | 768 | 21.96% | 2.524 | 78.0 |
+| 2048 | post-fix | 3498 | 768 | 21.96% | 2.524 | 78.1 |
+
+The tail-off row is identical in both builds — the paired control that makes the comparison valid — and
+the pre-fix binary was `1299-g6d77e0b6`, i.e. the stale `ninfer.exe` §11.3 flagged. The tail's cost
+falls from **14.3% to 5.8%** of decode and from 3.8 to 2.1 acceptance points. The pre-fix acceptance
+drop was the corrupt verifier, not the tail: with the ring correct the run drafts 62% more speculative
+tokens (2161 → 3498) at a higher rate. F3's hypothesis ("the tail does not reduce acceptance") holds
+to within 2 points. F5 `--mtp-attention-window 128` is neutral (16.1% vs 16.5% on prompt 1) — the draft
+cache is structurally tail-free, as F1 says. `tail 1024 ≡ 2048` because prompt + generation < 1024.
+
+**The generation route (plan §11.4 item 4).** A 362-token prompt is one Prompt-route prefill step —
+the shape whose rows the batched append used to omit. `--greedy --seed 0 --max-new 256`, `rk4v4-e8`,
+tail0 vs tail1024 → **character-identical** continuations (1078 chars, 100% shared prefix). Post-fix
+only, and honestly so: no pre-fix `ninfer.exe` survives the in-place rebuild, so the pre-fix evidence
+for this route stays the scoring A/B, which shares the route. (Note for the reader: the model's
+thinking consumes the whole 256-token budget on these prompts, so the .out files are empty and the
+comparison uses the reasoning text on stderr.)
+
+**The merge's numeric floor.** The bf16 A/B left a residual ~9.4e-4 mean KLD. Probe: the *whole-window*
+case `ctx 2048 / N=2048 / W=8` — body empty, so the merge is a single tail partial over exact bf16
+values — gives pre-fix 0.20684 → post-fix **0.00091878** (`same_top` 0.9861), the same figure as
+`N=1024`. So the residual is the small-T path's own fp32/bf16 reduction order (~1.4% top-1 flips on
+this corpus), not a remnant of the defect, and it is what a future merge-fidelity change would have to
+beat. This also explains why bf16 tail-on (0.00094) now sits in the same band as rk8v4 (0.00113)
+instead of two orders above it.
+
+**Verdict.** `--kv-tail-tokens` is evidenced as beneficial and correct on this port for the storages
+whose routes merge it (bf16 + the INT8 family); fp8/nvfp4/k8v4 stay inert by design. DoD §7.3 is
+`DONE (scoped)`.
+
+**Trap, recorded a second time (§5.13 and §5.14 both carry it).** The donor artifact path is
+`D:\ninfer\ninfer-package\model\...` — `ninfer`, with the leading `n`. A hand-retyped copy of
+`run-m5-wpf.sh` dropped it and all 22 runs died instantly with `CreateFileW: Win32 error 3` at
+artifact inspect, which looks exactly like a deleted file (cmd/PowerShell/`ninfer.exe` cannot resolve
+the wrong name, while the correct one is fine). Always copy the path; never retype it.
