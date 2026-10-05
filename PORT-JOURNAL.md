@@ -1319,3 +1319,32 @@ confirmed the call chain and found:
 
 Plan written to `PORT-M5-PLAN.md` (WP-A instrument, WP-B three-tier, WP-C llamacpp, WP-D regression,
 WP-F MTP, WP-E docs). **Not executed** — user will continue in the next window.
+
+## Step 38 — M5/WP-A1: `--score-width W`, the decode-width scoring instrument
+
+M5 is now executing. WP-A1 (the enabler for everything else) landed as `e3afebbe` on branch
+`port/m5-instrument`, worktree `.worktrees/m5a`, then fast-forwarded to `main`.
+
+**Delegated** the implementation to one general-purpose subagent (main context preserved). It added
+`EngineOptions::score_width` (`include/ninfer/types.h`) and the `--score-width W` CLI option
+(`apps/perplexity/main.cpp`), threaded it through planning (`startup.h/.cpp`, copied into the
+sequence candidate at `:1367`) and consumed it at `program_impl.cpp:683-691` as
+`score_tile = score_width==0 ? prefill_chunk : min(score_width, prefill_chunk)`, used for `nominal`.
+`score_width==0` reproduces the old 1024-wide loop byte-for-byte.
+
+**Why it bypasses the 128-alignment:** `score_width` is a distinct field that never enters
+`effective_prefill_chunk`, so W=1/7 stay unaligned and the attention launch sees width<=8 — which
+`causal_attention_resolve_route` (`causal_softmax_attention.cpp:347-402`) sends to **small-T**, the
+only route that reads `cache.tail`. INT8-family storages set `prompt_limit=0` at width<=8 (`:378`),
+so they never short-circuit to `Prompt`; BF16 keeps its 128/256 prompt limit (plan A2 caveat).
+
+**Verified by compile, not by run (yet):** ptcheck per-TU compiled `apps/perplexity/main.cpp`,
+`startup.cpp`, `program_impl.cpp`, `engine.cpp` clean (first pass caught a real C7560 designated-
+initializer-order error, fixed). No full build at commit time.
+
+**Harness tooling change:** `.deps/ptcheck.py` is now parameterized by worktree via `PTWT`
+(default `wp1`, unchanged) and writes `.deps/ptcheck_<wt>.bat`, so M5 worktrees can be checked the
+same way without editing the script. Recorded here because the old script hard-coded `.worktrees/wp1`.
+
+Next: WP-A4 self-check (tail=0 ppl W=1 ≈ W=1024; tail=N ppl W=1 < W=1024) needs a full build and a
+GPU run; then WP-A3 (KLD top-K) for the sharp metric.

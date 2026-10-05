@@ -31,7 +31,7 @@ know why — empirically, not by inference:
 
 ## 2. WP-A — the instrument (change points已探明)
 
-### A1 `--score-width W`
+### A1 `--score-width W` — **DONE** (`e3afebbe`)
 - Call chain: `apps/perplexity/main.cpp:365-421` (WindowPlan → `engine.score_tokens(span, first_target)`).
 - Engine: `Engine::score_tokens` (`engine.h:83-85`, `engine.cpp:355-384`) → `CausalScoreCore`
   (`causal_score_core.h:62/136`) → `ProgramImpl::causal_score` (`program_impl.cpp:588`).

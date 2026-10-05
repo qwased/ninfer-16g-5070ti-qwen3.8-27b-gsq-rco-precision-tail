@@ -415,3 +415,23 @@ ring; `run_cached_quality_gain` does that (`WIDETAIL` lines). There, F16 ≤ BF1
 (window 2048, N=64/256; e.g. h16 N=64: 6.35168e-02 vs 6.35250e-02), never worse, at equal cost —
 so **F16 is the default**, BF16 the verification form. The margin is small only because the rk8v4
 body quantization still dominates the total error.
+
+## 5.13 M5 execution — the benefit campaign (in progress)
+
+M5 (`PORT-M5-PLAN.md`) is the *benefit* half of the tail question; M0–M3 closed only the mechanism.
+Campaign is being executed step by step; worktree `.worktrees/m5a`, branch `port/m5-instrument`,
+merged to `main` after each landed sub-step.
+
+- **WP-A1 DONE (`e3afebbe`):** `EngineOptions::score_width` + `--score-width W`. Scoring attention
+  query tile becomes `min(W, prefill_chunk)` (default 0 == old 1024 tiles, bit-identical). `W` never
+  enters `effective_prefill_chunk`, so `W<=8` stays unaligned and selects the small-T route that
+  reads the exact ring — this is the whole point (the old 1024-wide tiles always took `Prompt`).
+  Consumed at `program_impl.cpp:683-691`. Compile-verified per-TU; full build + GPU run pending.
+- **Tooling:** `.deps/ptcheck.py` is now worktree-parameterized (`PTWT` env, default `wp1`);
+  `.deps/build-target.bat <target>` builds one target in `build-port` under the VS2022/CUDA-13.3 env.
+- **WP-A4 self-check (next gate):** tail=0 → ppl(W=1) ≈ ppl(W=1024); tail=N → ppl(W=1) < ppl(W=1024).
+  Only ppl is needed for this gate; KLD (WP-A3) comes after.
+- **WP-A3 (todo):** device top-K over the already-materialized `[vocab,C]` logits, widen
+  `Engine::score_tokens` return, persist a BF16 tail-0 baseline, then run KLD.
+- Runs are strictly serial, single-owner, single GPU (5070 Ti); after **every** run check
+  `tasklist`/`nvidia-smi` for orphan processes (user requirement) before starting the next.
