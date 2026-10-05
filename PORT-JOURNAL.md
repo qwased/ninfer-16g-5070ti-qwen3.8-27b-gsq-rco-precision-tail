@@ -1680,9 +1680,10 @@ Completed the plan's storage and context coverage (W=8, 32,764 scored tokens, pe
   ctx 16384 0.002594 / **0.023840** / **0.021882**; ctx 32768 0.002413 / **0.014577** / **0.014910**.
   The defect is present at every ctx with a body; its magnitude falls as the tail shrinks relative to
   the window (10x at 8K → 6x at 32K). The only clean rows are `ctx = N` (whole window).
-- **Not run:** `int8`/`rk4v4-e8` at ctx 16K/32K. The corruption signature is already
-  storage-independent, so further cells would only re-confirm it (AGENTS.md: stop collecting once the
-  alternatives are distinguished).
+- **Not run:** none — the full WP-B matrix (3 storages × 3 tails × ctx {8192,16384,32768}) is complete,
+  plus rk8v4 at ctx 2048 and the whole-window clean cases at ctx 2048/1024. **Every cell degrades**, and
+  tail-on KLD is ~storage-independent (≈0.027 at 8K) while tail-off spans 6× — the defect signature.
+  Raw: `.deps/m5-{wpb,ctx}-*/report.json`.
 
 All measurements are recorded in `docs/performance.md` ("Decode-width KLD") with the raw harnesses in
 `.deps/` (`run-m5-{save,kld,wpb,thresh,ctxext,wpc,wpf}`).

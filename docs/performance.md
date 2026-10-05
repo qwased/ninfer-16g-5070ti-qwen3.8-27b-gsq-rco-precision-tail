@@ -661,20 +661,20 @@ rk4v4-e8 0.0273) despite very different tail-off errors (0.0011 / 0.0026 / 0.006
 storage-independent corruption signature, consistent with the tail path itself (not the body) being
 mis-read when a body coexists.
 
-Context dependence (rk8v4, W=8, 32,764 scored tokens, bf16-tail0 reference per ctx):
+Context and storage dependence — full campaign, mean KLD vs the per-ctx bf16-tail0 reference
+(W=8, 32,764 scored tokens); parenthesised = degradation factor of tail 1024 vs tail 0:
 
-| ctx | tail 0 | tail 1024 | tail 2048 |
-|---:|---:|---:|---:|
-| 1024 (short text) | 0.002647 | **0.000912** (whole window; *improves*) | — |
-| 2048 | 0.002838 | **0.022539** | 0.001068 (whole window; *improves*) |
-| 8192 | 0.002647 | **0.027096** | **0.028044** |
-| 16384 | 0.002594 | **0.023840** | **0.021882** |
-| 32768 | 0.002413 | **0.014577** | **0.014910** |
+| storage | ctx 8192 t0 / t1024 / t2048 | ctx 16384 t0 / t1024 / t2048 | ctx 32768 t0 / t1024 / t2048 |
+|---|---|---|---|
+| int8 | 0.001126 / **0.026986** (24×) / 0.027912 | 0.001123 / **0.023706** (21×) / 0.021866 | 0.001033 / **0.014450** (14×) / 0.014842 |
+| rk8v4 | 0.002647 / **0.027096** (10×) / 0.028044 | 0.002594 / **0.023840** (9×) / 0.021882 | 0.002413 / **0.014577** (6×) / 0.014910 |
+| rk4v4-e8 | 0.006522 / **0.027349** (4×) / 0.027848 | 0.006482 / **0.024542** (4×) / 0.021951 | 0.006316 / **0.015344** (2.4×) / 0.014986 |
 
-The defect is present at every context where a body contributes; its KLD magnitude falls as the tail
-becomes a smaller fraction of the window (10x at 8K → 6x at 32K), consistent with a roughly
-fixed-cost corruption. The two clean rows are exactly the cases where the tail spans the whole window
-and the body is empty.
+The tail degrades every storage at every context ≥ 2048; the absolute tail-on error is close to
+constant across storages (~0.027 at 8K, ~0.015-0.024 at 16-32K) regardless of tail-off error, which
+ranges 6× across storages (0.0010 int8 … 0.0065 rk4v4-e8). That **storage-independence** is the
+signature of a defect in the tail path itself, not a body-precision interaction. The only clean rows
+are `ctx = N` (whole window exact).
 
 The tell is `bf16` body + tail 1024 against a bf16-tail0 reference: same precision on both sides, so a
 correct merge would give KLD ≈ 0, but it gives **0.137** (same-top 0.896). The fault reproduces at
