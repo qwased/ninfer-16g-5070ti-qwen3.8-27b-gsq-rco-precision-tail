@@ -3,12 +3,14 @@
 #include "ops/softmax_attention/dense/causal_cache/launch.h"
 
 #include "ops/common/device_route.h"
+#include "ops/common/kv_tail_element.cuh"
 #include "ops/common/math.h"
 #include "ops/kv_cache/append/launch.h"
 #include "ops/kv_cache/d256_profile.h"
 #include "ops/softmax_attention/dense/causal_cache/prompt_bf16.cuh"
 #include "ops/softmax_attention/dense/causal_cache/prompt_i8.cuh"
 #include "ops/softmax_attention/dense/causal_cache/prompt_i8_fast.cuh"
+#include "ops/softmax_attention/dense/causal_cache/small_t_tail_shadow.cuh"
 #include "core/device.h" // CUDA_CHECK
 
 #include <cstdint>
@@ -286,6 +288,44 @@ void causal_attention_prompt_launch(const Tensor& q, const Tensor& k, const Tens
         return;
     }
     kv_cache_append_batch_launch(k, v, positions, valid_columns, table_rows, cache, stream);
+    // The batched append owns the quantized body only: its exact-ring write is gated on the
+    // single-sequence `block_table` field, which a batch view does not carry, so it is compiled out
+    // here. A Prompt-route step -- a prefill chunk, or a decode-width step the small-T route does not
+    // take -- would then leave its rows out of each sequence's ring, and the newest `min(N, window)`
+    // readings of the *decode* steps that follow would merge stale slots. Shadow-write this step's
+    // unquantized rows from the same source the append quantizes, exactly as the fused small-T entry
+    // does for its own step. The fp8/nvfp4/k8v4 prompt launches above return earlier and their
+    // small-T kernels carry no tail code, so their ring is never read and is left alone.
+    if (cache.tail.enabled() && cache.tail.page_count > 0) {
+        constexpr int kShadowThreads = 256;
+        const auto* positions_ptr    = static_cast<const std::int32_t*>(positions.data);
+        const auto* valid_columns_ptr =
+            valid_columns.data == nullptr ? nullptr
+                                          : static_cast<const std::int32_t*>(valid_columns.data);
+        const CausalAppendInput input{static_cast<const __nv_bfloat16*>(k.data),
+                                      static_cast<const __nv_bfloat16*>(v.data)};
+        with_kv_tail_element(cache.tail.k_pages.dtype, [&]<typename Elem>() {
+            const auto launch = [&]<typename Geometry>() {
+                const std::int64_t units = static_cast<std::int64_t>(q.ne[2]) * Geometry::KVHeads *
+                                           (kCausalHeadDim / 8);
+                const dim3 grid(
+                    static_cast<unsigned>(div_up(units, static_cast<std::int64_t>(kShadowThreads))),
+                    static_cast<unsigned>(q.ne[3]));
+                causal_attention_small_t_tail_shadow_kernel<Geometry, CausalAppendInput, Elem>
+                    <<<grid, kShadowThreads, 0, stream>>>(
+                        input, positions_ptr, static_cast<Elem*>(cache.tail.k_pages.data),
+                        static_cast<Elem*>(cache.tail.v_pages.data), cache.tail.page_count,
+                        static_cast<std::int32_t>(q.ne[2]), static_cast<std::int32_t>(q.ne[2]), 0,
+                        valid_columns_ptr);
+            };
+            if (q.ne[1] == CausalD256H24Kv4::QHeads) {
+                launch.template operator()<CausalD256H24Kv4>();
+            } else {
+                launch.template operator()<CausalD256H16Kv2>();
+            }
+        });
+        CUDA_CHECK(cudaGetLastError());
+    }
     const auto launch = [&]<bool Masked>() {
         const PagedKVBatchMetadata<Masked> metadata{
             .tables = static_cast<const std::int32_t*>(cache.block_tables.data),

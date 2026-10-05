@@ -4540,6 +4540,174 @@ int run_fused_crossing_case(const Geometry& geometry, const CachePlan& plan, Map
     return failures;
 }
 
+// TOPTEST prompt-route exact-ring write. The Prompt route appends through the *batched*
+// kv_cache_append_batch_launch, whose exact-ring write is gated on the single-sequence
+// `block_table` field and is therefore compiled out for the batch view -- it, and every prompt
+// kernel, never touches cache.tail. A prefill chunk wider than the small-T ceiling (or a
+// decode-width step whose envelope picks Prompt) thus used to leave every row it appended out of the
+// ring, and the first `min(N, window)` small-T decode steps of that sequence merged slots still
+// holding the ring's baseline fill.
+//
+// The shape that isolates it: the *writes* come from a route that does not merge the tail and the
+// *read* comes from one that does. One persistent cache, two steps -- a Prompt-width step of
+// `prompt_tokens` at positions 0.., then a small-T step whose tail read reaches back over rows only
+// the first step owns. Only the final step's output is compared, so the tail-aware oracle is valid;
+// the whole ring and the whole body cache are compared against a fixture built from the entire
+// sequence. Before the fix the ring planes disagree for every row of the first step, and the merged
+// output with them.
+//
+// Only d256-h24-kv4 + rk8v4: rk8v4's width<=8 prompt cutoff is 0 keys, so the final step cannot fall
+// back to the Prompt route and is guaranteed to merge the tail. `tail_tokens == 128` is two 64-page
+// ring pages against a window of `prompt_tokens + decode_tokens`, so the tail reaches back into the
+// Prompt step's rows without wrapping past them.
+int run_prompt_ring_write_case(const Geometry& geometry, const CachePlan& plan,
+                               MappingPattern mapping, std::int32_t tail_tokens,
+                               std::int32_t prompt_tokens, std::int32_t decode_tokens,
+                               std::uint32_t seed) {
+    const std::int32_t window        = prompt_tokens + decode_tokens;
+    const std::uint32_t envelope_max = 512;
+    const std::int32_t max_context =
+        std::max<std::int32_t>(window + 3, static_cast<std::int32_t>(envelope_max));
+    const std::size_t q_stride  = static_cast<std::size_t>(kHeadDim) * geometry.q_heads;
+    const std::size_t kv_stride = static_cast<std::size_t>(kHeadDim) * geometry.kv_heads;
+
+    std::vector<float> all_k = make_bf16_values(kv_stride * static_cast<std::size_t>(window),
+                                                seed + 1u, -0.25f, 0.25f);
+    std::vector<float> all_v = make_bf16_values(kv_stride * static_cast<std::size_t>(window),
+                                                seed + 2u, -1.0f, 1.0f);
+    inject_codec_edges(geometry, window, all_k, all_v);
+    std::vector<float> all_q = make_bf16_values(q_stride * static_cast<std::size_t>(window), seed,
+                                                -0.25f, 0.25f);
+    std::vector<std::int32_t> all_positions(static_cast<std::size_t>(window));
+    for (std::int32_t p = 0; p < window; ++p) { all_positions[static_cast<std::size_t>(p)] = p; }
+
+    const HostCache initial = make_cache(geometry, plan, max_context, seed + 10u);
+    HostCache expected      = initial;
+    append_cache(expected, all_k, all_v, all_positions);
+    if (tail_tokens > 0) {
+        populate_tail(expected, all_k, all_v, all_positions, tail_tokens, DType::BF16);
+    }
+
+    DeviceCache cache(initial, mapping, tail_tokens, DType::BF16);
+
+    // Sized for the wider Prompt step; the small-T step uses the buffer's prefix.
+    const std::size_t max_q  = q_stride * static_cast<std::size_t>(prompt_tokens);
+    const std::size_t max_kv = kv_stride * static_cast<std::size_t>(prompt_tokens);
+    GuardedDeviceBuffer dq(max_q * sizeof(std::uint16_t));
+    GuardedDeviceBuffer dk(max_kv * sizeof(std::uint16_t));
+    GuardedDeviceBuffer dv(max_kv * sizeof(std::uint16_t));
+    GuardedDeviceBuffer dp(static_cast<std::size_t>(prompt_tokens) * sizeof(std::int32_t));
+    GuardedDeviceBuffer dtable_row(sizeof(std::int32_t));
+    GuardedDeviceBuffer dout(max_q * sizeof(std::uint16_t));
+    const std::int32_t table_row = 0;
+    dtable_row.copy_from_host(&table_row, sizeof(table_row));
+
+    const ops::CausalAttentionExecutionEnvelope largest{
+        static_cast<std::uint32_t>(window), envelope_max, false, false, false};
+    const std::size_t workspace_bytes = ops::causal_softmax_attention_workspace_capacity_bytes(
+        op_geometry(geometry), cache_plan_storage(plan), largest, 1, decode_tokens, decode_tokens);
+    GuardedDeviceBuffer workspace_buffer(std::max<std::size_t>(workspace_bytes, 256));
+
+    const std::string label =
+        case_label("causal_softmax_attention prompt-ring", geometry, plan,
+                   with_tail({window, 0, envelope_max, seed}, tail_tokens), mapping);
+    std::cout << "    TOPTEST prompt-route ring write: " << label << '\n';
+
+    std::vector<float> last_q_float;
+    std::vector<std::uint16_t> last_output;
+    std::vector<std::int32_t> last_positions;
+    std::int32_t base = 0;
+    for (const std::int32_t tokens : {prompt_tokens, decode_tokens}) {
+        std::vector<float> k_s(kv_stride * static_cast<std::size_t>(tokens));
+        std::vector<float> v_s(kv_stride * static_cast<std::size_t>(tokens));
+        std::vector<float> q_s(q_stride * static_cast<std::size_t>(tokens));
+        std::vector<std::int32_t> p_s(static_cast<std::size_t>(tokens));
+        for (std::int32_t t = 0; t < tokens; ++t) {
+            for (std::int32_t head = 0; head < geometry.kv_heads; ++head) {
+                for (std::int32_t d = 0; d < kHeadDim; ++d) {
+                    const std::size_t src = kv_input_index(geometry, head, d, base + t);
+                    const std::size_t dst = kv_input_index(geometry, head, d, t);
+                    k_s[dst]              = all_k[src];
+                    v_s[dst]              = all_v[src];
+                }
+            }
+            for (std::int32_t head = 0; head < geometry.q_heads; ++head) {
+                for (std::int32_t d = 0; d < kHeadDim; ++d) {
+                    q_s[q_index(geometry, head, d, t)] = all_q[q_index(geometry, head, d, base + t)];
+                }
+            }
+        }
+        for (std::int32_t t = 0; t < tokens; ++t) { p_s[static_cast<std::size_t>(t)] = base + t; }
+
+        const std::vector<std::uint16_t> q_bits = to_bf16_bits(q_s);
+        const std::vector<std::uint16_t> k_bits = to_bf16_bits(k_s);
+        const std::vector<std::uint16_t> v_bits = to_bf16_bits(v_s);
+        dq.copy_from_host(q_bits.data(), q_bits.size() * sizeof(std::uint16_t));
+        dk.copy_from_host(k_bits.data(), k_bits.size() * sizeof(std::uint16_t));
+        dv.copy_from_host(v_bits.data(), v_bits.size() * sizeof(std::uint16_t));
+        dp.copy_from_host(p_s.data(), p_s.size() * sizeof(std::int32_t));
+
+        Tensor tq(dq.data(), DType::BF16, {kHeadDim, geometry.q_heads, tokens});
+        Tensor tk(dk.data(), DType::BF16, {kHeadDim, geometry.kv_heads, tokens});
+        Tensor tv(dv.data(), DType::BF16, {kHeadDim, geometry.kv_heads, tokens});
+        Tensor tp(dp.data(), DType::I32, {tokens});
+        Tensor ttable_row(dtable_row.data(), DType::I32, {1});
+        Tensor tout(dout.data(), DType::BF16, {kHeadDim, geometry.q_heads, tokens});
+
+        const ops::CausalAttentionExecutionEnvelope envelope{
+            static_cast<std::uint32_t>(base + tokens), envelope_max, false, false, false};
+        WorkspaceArena workspace(DeviceSpan{workspace_buffer.data(), workspace_buffer.bytes()});
+        ops::causal_softmax_attention(tq, tk, tv, tp, Tensor{}, ttable_row, op_geometry(geometry),
+                                      kAttentionScale, cache.batch_view(), envelope, workspace, tout,
+                                      nullptr);
+        cuda_synchronize();
+        if (workspace.used() != 0 || workspace.peak_used() > workspace_bytes) {
+            std::cerr << label << ": step ending at " << (base + tokens)
+                      << " workspace high-water mismatch\n";
+            return 1;
+        }
+        if (tokens == decode_tokens) {
+            last_q_float   = q_s;
+            last_output    = copy_from_guarded<std::uint16_t>(dout, q_bits.size());
+            last_positions = p_s;
+        }
+        base += tokens;
+    }
+
+    const std::vector<double> reference = ideal_attention(last_q_float, expected, last_positions);
+    int failures =
+        verify_attention(label, bf16_bits_to_double(last_output), reference, attention_criterion(plan));
+    failures += verify_cache(label, cache.snapshot(), expected, plan.dtype == DType::BF16);
+    failures += cache.verify_tail(label, expected);
+    failures += workspace_buffer.verify_guards((label + " workspace").c_str());
+    failures += cache.verify_guards(label);
+    return failures;
+}
+
+// TOPTEST chunked fused-append ring write. The fused small-T entry splits a step wider than its tile
+// into chunks that each start above column 0 (8 rows per chunk for 24 query heads), and the shadow
+// kernel indexes its ring source from the same flat column base the body kernel quantizes from.
+// Before that offset every chunk but the first shadowed the *first* chunk's K/V into its own rows, so
+// the newest rows of a chunked step -- exactly the rows the next decode step merges as exact -- held
+// another chunk's data. `prime_tail_body = false` leaves the fused shadow as the only ring writer, so
+// the whole ring is asserted against the fixture; a chunked shape is required because a single chunk
+// starts at column 0 and cannot expose the offset. Width 9 with 24 query heads is two chunks (8 + 1),
+// and the second chunk's single row is the step's newest.
+//
+// `tail_tokens >= tokens` is required for the *output* comparison too: a chunked launch derives its
+// exact/quantized boundary from its own last position while the oracle derives it from the step's
+// newest position, and the two agree only when the whole step is inside the tail. Where they differ
+// the engine is the more accurate of the two (a chunk's boundary is never older than the step's, so
+// such a step merges a superset of the exact keys the oracle models), which makes the difference a
+// documented deviation rather than a defect -- but it is not oracle-comparable, so this case keeps the
+// step inside the tail.
+int run_fused_chunked_ring_case(const Geometry& geometry, const CachePlan& plan,
+                                const AttentionCase& test_case, MappingPattern mapping) {
+    std::cout << "    TOPTEST fused-append chunked ring write: "
+              << case_label("causal_softmax_attention", geometry, plan, test_case, mapping) << '\n';
+    return run_a1_case(geometry, plan, test_case, mapping, nullptr, false);
+}
+
 int run_tail_cases() {
     std::cout << "  exact KV tail (KV cache precision tail): merge, boundary, regression, masked\n";
     int failures = 0;
@@ -4570,6 +4738,9 @@ int run_tail_cases() {
     // the envelope above its 256-key prompt cutoff, because for width <= 8 a narrower envelope
     // selects Prompt; 512 is used throughout to keep that explicit.
     //
+    // The prompt route does still *write* the ring (case 0c), which is a separate obligation from
+    // merging it: a later decode step reads those rows. Cases 0b-0d cover that split explicitly.
+    //
     // (0) TOPTEST: the fused-append empty-body cache write. window = tokens = 6 (base 0) and N = 64
     // put the whole window inside the exact tail, so body_window == 0 and the body's one split
     // scores nothing -- it exists only to quantize the six rows. Envelope 512 keeps the small-T route
@@ -4595,6 +4766,29 @@ int run_tail_cases() {
         run_fused_crossing_case(h24, kPlanRk8v4, MappingPattern::Fragmented, 129, 8, 24, 2363u);
     failures +=
         run_fused_crossing_case(h24, kPlanRk8v4, MappingPattern::Offset, 129, 8, 24, 2364u);
+
+    // (0c) TOPTEST: the Prompt-route ring write. The batched append (the Prompt route's only write
+    // path) owns the quantized body but not the ring, so a prefill-shaped step used to leave its rows
+    // out of the exact tail entirely -- the defect behind the bf16-storage-at-scale and
+    // "long prompt in generation" reports. The append and the read are separated here on purpose:
+    // step 1 is Prompt-shaped (128 rows), step 2 is small-T and its tail read covers step 1's rows.
+    // Both tail-capable storage families are covered (bf16, and the int8 family through rk8v4).
+    // See run_prompt_ring_write_case.
+    for (const CachePlan& plan : {kPlanBf16, kPlanRk8v4}) {
+        failures += run_prompt_ring_write_case(h24, plan, MappingPattern::Fragmented, 128, 128, 8,
+                                               2371u);
+        failures +=
+            run_prompt_ring_write_case(h24, plan, MappingPattern::Offset, 128, 128, 8, 2372u);
+    }
+
+    // (0d) TOPTEST: the ring write of a *chunked* fused launch, whose second chunk starts above
+    // column 0. 24 query heads chunk 8 rows at a time, so a 9-row step is two chunks; before the
+    // shadow kernel's source offset, chunk 2 filled the ring slot of row 8 from row 0. N = 9 keeps
+    // the step inside the tail, which the output comparison requires. See run_fused_chunked_ring_case.
+    failures += run_fused_chunked_ring_case(h24, kPlanRk8v4, with_tail({9, 0, 513, 2381u}, 9),
+                                            MappingPattern::Fragmented);
+    failures += run_fused_chunked_ring_case(h24, kPlanRk8v4, with_tail({9, 0, 513, 2382u}, 9),
+                                            MappingPattern::Offset);
 
     // (1) Primary merge formula: a BFloat16 body with N > 0. Body and tail are both exact, so the
     // engine result must equal the plain causal FP32 oracle within the existing BF16 criterion.

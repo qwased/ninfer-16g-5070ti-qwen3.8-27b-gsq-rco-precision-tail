@@ -48,9 +48,15 @@ __global__ void causal_attention_small_t_tail_shadow_kernel(
         static_cast<std::int64_t>(column_begin) + static_cast<std::int64_t>(batch) * full_width;
     const int position = pos[column_base + token];
     const int ring     = batch * ring_pages + ((position >> kPagedKVPageShift) % ring_pages);
-    const std::int64_t src_off = static_cast<std::int64_t>(d) +
-                                 static_cast<std::int64_t>(D) *
-                                     (kv_head + static_cast<std::int64_t>(Geometry::KVHeads) * token);
+    // The body kernel offsets this same source by the flat column base before it quantizes, so the
+    // ring has to read the identical rows: a chunked launch starts above column 0 and a sequence
+    // batch strides by `full_width`. Without the term the ring slot of every later chunk and of
+    // every sequence past the first is filled from the *first* chunk's or sequence's K/V.
+    const std::int64_t src_off =
+        static_cast<std::int64_t>(D) * static_cast<std::int64_t>(Geometry::KVHeads) * column_base +
+        static_cast<std::int64_t>(d) +
+        static_cast<std::int64_t>(D) *
+            (kv_head + static_cast<std::int64_t>(Geometry::KVHeads) * token);
     const std::int64_t dst = paged_kv_element_offset<D, Geometry::KVHeads>(
         ring, kv_head, position & kPagedKVPageMask, d);
     store_tail_vec8(&tail_k[dst], &input.k[src_off]);
