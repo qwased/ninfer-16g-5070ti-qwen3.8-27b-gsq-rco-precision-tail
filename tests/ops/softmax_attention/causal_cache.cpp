@@ -4084,6 +4084,70 @@ int run_quantized_tail_case(const Geometry& geometry, KvCacheStorage storage,
     return failures;
 }
 
+// Quality gain on the wired storages, measured against the *exact unquantized* oracle. The hybrid
+// oracle proves the merged result is correct; this proves it is *better* than the same body with
+// the tail off -- M1's "quality improvement measurable" clause. The tail replaces the newest N
+// quantized rows with exact BF16 rows, so tail-on must land strictly closer to the exact oracle.
+template <typename PlanT>
+int run_tail_quality_gain(const Geometry& geometry, KvCacheStorage storage, PlanT plan,
+                          const AttentionCase& test_case, MappingPattern mapping) {
+    const std::int32_t total       = test_case.base + test_case.tokens;
+    const std::int32_t max_context = static_cast<std::int32_t>(
+        std::max<std::uint32_t>(static_cast<std::uint32_t>(total + 3), test_case.envelope_max));
+    const std::size_t q_elements = static_cast<std::size_t>(kHeadDim) *
+                                   static_cast<std::size_t>(geometry.q_heads) *
+                                   static_cast<std::size_t>(test_case.tokens);
+    const std::size_t kv_elements = static_cast<std::size_t>(kHeadDim) *
+                                    static_cast<std::size_t>(geometry.kv_heads) *
+                                    static_cast<std::size_t>(test_case.tokens);
+    std::vector<float> q = make_bf16_values(q_elements, test_case.seed, -0.25f, 0.25f);
+    std::vector<float> k = make_bf16_values(kv_elements, test_case.seed + 1u, -0.25f, 0.25f);
+    std::vector<float> v = make_bf16_values(kv_elements, test_case.seed + 2u, -1.0f, 1.0f);
+    inject_codec_edges(geometry, test_case.tokens, k, v);
+    std::vector<std::int32_t> positions(static_cast<std::size_t>(test_case.tokens));
+    for (std::int32_t token = 0; token < test_case.tokens; ++token) {
+        positions[static_cast<std::size_t>(token)] = test_case.base + token;
+    }
+
+    HostCache exact = make_cache(geometry, KvCacheStorage::BFloat16, max_context,
+                                 test_case.seed + 10u);
+    append_cache(exact, k, v, positions);
+    const std::vector<double> reference =
+        unit_value_scale(ideal_attention(q, exact, positions), test_case);
+
+    std::vector<std::uint16_t> tail_bits;
+    std::vector<std::uint16_t> no_tail_bits;
+    std::cout << "    " << case_label("causal_softmax_attention", geometry, plan,
+                                      with_tail(test_case, test_case.kv_tail_tokens), mapping)
+              << " (quality gain vs exact oracle)\n";
+    int failures = run_a1_case(geometry, plan, with_tail(test_case, test_case.kv_tail_tokens),
+                               mapping, &tail_bits);
+    failures += run_a1_case(geometry, plan, with_tail(test_case, 0), mapping, &no_tail_bits);
+
+    const std::vector<double> tail_output =
+        unit_value_scale(bf16_bits_to_double(tail_bits), test_case);
+    const std::vector<double> no_tail_output =
+        unit_value_scale(bf16_bits_to_double(no_tail_bits), test_case);
+    const ReductionStats tail_stats = compute_reduction_stats(
+        tail_output.data(), reference.data(), static_cast<std::int64_t>(tail_output.size()));
+    const ReductionStats no_tail_stats = compute_reduction_stats(
+        no_tail_output.data(), reference.data(), static_cast<std::int64_t>(no_tail_output.size()));
+    std::printf("TAILGAIN\trel_l2_tail=%.4e\trel_l2_tail_off=%.4e\t%s %s T=%d N=%d\n",
+                tail_stats.relative_l2, no_tail_stats.relative_l2, geometry.name,
+                cache_name(storage), test_case.tokens, test_case.kv_tail_tokens);
+    if (!std::isfinite(tail_stats.relative_l2) || !std::isfinite(no_tail_stats.relative_l2)) {
+        std::cerr << "exact KV tail " << geometry.name << " " << cache_name(storage)
+                  << ": quality-gain result is not finite\n";
+        ++failures;
+    } else if (!(tail_stats.relative_l2 < no_tail_stats.relative_l2)) {
+        std::cerr << "exact KV tail " << geometry.name << " " << cache_name(storage)
+                  << ": the exact tail did not reduce error vs the exact oracle (tail="
+                  << tail_stats.relative_l2 << " off=" << no_tail_stats.relative_l2 << ")\n";
+        ++failures;
+    }
+    return failures;
+}
+
 // WP4 / DoD #5: "CUDA Graph family sequence unchanged vs tail off".
 //
 // A decode step is replayed from the CUDA Graph family its attention route FAMILY selects:
@@ -4276,6 +4340,23 @@ int run_tail_cases() {
                                        with_tail({6, 61, 67, 2331u}, 2),
                                        MappingPattern::Fragmented);
     });
+
+    // (4b) The wired storages are already judged by the complete hybrid oracle above; qualify the
+    // same decode shapes against the *exact unquantized* oracle as well. That is what makes the
+    // tail's quality gain measurable rather than merely correct: tail-on must be strictly closer to
+    // the exact oracle than tail-off, because the newest rows are exact BF16 instead of quantized.
+    for (const Geometry& geometry : kGeometries) {
+        failures += run_tail_quality_gain(geometry, KvCacheStorage::RotatedInt8KeyInt4ValueGroup64,
+                                          kPlanRk8v4, with_tail({6, 61, 67, 2332u}, 2),
+                                          MappingPattern::Fragmented);
+        failures += run_tail_quality_gain(geometry, KvCacheStorage::RotatedInt8KeyInt4ValueGroup64,
+                                          kPlanRk8v4, with_tail({6, 61, 67, 2333u}, 6),
+                                          MappingPattern::Fragmented);
+        failures += run_tail_quality_gain(geometry, KvCacheStorage::RotatedInt4KeyInt4ValueE8,
+                                          KvCacheStorage::RotatedInt4KeyInt4ValueE8,
+                                          with_tail({6, 61, 67, 2334u}, 2),
+                                          MappingPattern::Fragmented);
+    }
 
     // (5) C>1 masked batched rows with the tail on. The view carries a single per-sequence ring,
     // so the batched tail case addresses one cache sequence: the writer (valid_columns < width)

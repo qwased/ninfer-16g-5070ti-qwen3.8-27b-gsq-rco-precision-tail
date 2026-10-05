@@ -558,3 +558,22 @@ The tail's quality effect is exercised by the FP32 oracle
 (`tests/ops/softmax_attention/causal_cache.cpp`, `ninfer_softmax_attention_test`), which drives the
 small-T decode route with the ring on; its memory footprint is the table above. A decode-width
 scoring mode would be needed to show a ppl delta.
+
+### Decode-route quality gain (the tail's measurable effect)
+
+Where the tail *does* merge — the small-T decode route (width ≤ 8) — it reduces error against the
+exact unquantized oracle. `ninfer_softmax_attention_test` asserts tail-on rel-L2 < tail-off rel-L2
+(the `TAILGAIN` line); all six wired cases improve, and the gain grows with N as more rows become
+exact:
+
+| geometry | storage | N | rel-L2 tail | rel-L2 tail-off |
+|---|---|---|---|---|
+| d256-h24-kv4 | rk8v4 | 2 | 7.3422e-02 | 7.3756e-02 |
+| d256-h24-kv4 | rk8v4 | 6 | 6.8711e-02 | 7.0782e-02 |
+| d256-h24-kv4 | rk4v4-e8 | 2 | 7.1316e-02 | 7.1328e-02 |
+| d256-h16-kv2 | rk8v4 | 2 | 7.2562e-02 | 7.2860e-02 |
+| d256-h16-kv2 | rk8v4 | 6 | 7.1415e-02 | 7.2393e-02 |
+| d256-h16-kv2 | rk4v4-e8 | 2 | 6.7988e-02 | 6.8532e-02 |
+
+This is a decode-route attention-error measurement, not a corpus ppl; the two exercise different
+routes (see above).

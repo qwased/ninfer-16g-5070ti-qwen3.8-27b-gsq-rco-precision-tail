@@ -1153,3 +1153,35 @@ One environment note carried forward: a bare `cmd //c "call env-port.bat && cd .
 infer_tests.exe ..."` intermittently failed to resolve the runner path ("not recognized"), while
 the checked-in `.deps/run-oracle.bat` (which does the same steps) works reliably. Prefer the script.
 Verified `tasklist` clean (0 `ninfer_tests|ninja|cl.exe`) after every build and run.
+
+## Step 33 -- the tail's quality gain, measured on the decode route (M1 exit clause)
+
+Plan M1's exit is "FP32 oracle passes; all three bodies run and the quality improvement is
+measurable". The ppl route cannot show it (Step 31), so the gain is measured where the tail actually
+merges: the small-T decode route, against the exact unquantized oracle. New helper
+`run_tail_quality_gain(geometry, storage, plan, case, mapping)`: it builds the exact BF16 reference
+(`ideal_attention` over the unquantized KV), runs the same quantized case twice via the *plan*
+overload of `run_a1_case` -- once with the tail, once at retention 0 -- and asserts the tail-on
+output is strictly closer to the exact oracle. Printed as `TAILGAIN`. All six wired cases improve:
+
+```
+h24 rk8v4   N=2  7.3422e-02 < 7.3756e-02     h16 rk8v4   N=2  7.2562e-02 < 7.2860e-02
+h24 rk8v4   N=6  6.8711e-02 < 7.0782e-02     h16 rk8v4   N=6  7.1415e-02 < 7.2393e-02
+h24 rk4v4-e8 N=2 7.1316e-02 < 7.1328e-02     h16 rk4v4-e8 N=2 6.7988e-02 < 6.8532e-02
+```
+
+`softmax_attention: PASS`, `ORACLE_EXIT=0` (`.deps/oracle-run13.out`). So M1's "quality improvement
+measurable" clause is satisfied on the decode route, complementing (not replacing) the ppl row's
+`BLOCKED` note: the harness that is supposed to show an end-to-end ppl delta simply does not drive a
+route the tail touches.
+
+Two things learned while wiring it, both recorded so they are not rediscovered:
+
+- **`run_quantized_tail_case` is unsafe for `rk8v4`.** It goes through the storage overload of
+  `run_a1_case` (`KvCacheStorage`), which for `rk8v4` crashes with 0xC0000005; the existing rk8v4
+  cases all use the *plan* overload (`kPlanRk8v4`). The new helper is templated on the plan/storage
+  argument so each storage uses the overload the harness already trusts.
+- **A crash hides all output.** The test's stdout is block-buffered and under 4 KiB, so a
+  segmentation fault loses everything written so far and CTest shows only the exit code. A
+  temporary `setvbuf(stdout, nullptr, _IONBF, 0)` in `tests/guarded_main.h` was used to locate the
+  crash, then reverted (git status confirms only `causal_cache.cpp` is modified).
