@@ -1964,3 +1964,27 @@ the feature in its main habitat. The fix is to write the ring from the batched a
 ring-write kernel keyed on `block_tables`/`table_rows`, or launch the existing storage-independent
 `causal_attention_small_t_tail_shadow_kernel` from `causal_attention_prompt_launch`). It subsumes the
 bf16 scoring case, so one fix plus one rebuild closes both.
+
+### Step 53 — handoff: the plan for the ring-unwritten fix
+
+Session boundary. Everything needed to resume is on disk; HEAD `012b7e44`.
+
+**State.** WP-B post-fix matrix done and committed (`8b7fe338`, benefit established). Problem B
+root-caused and **widened** (`012b7e44`, Steps 51–52): the `Prompt`/batched append never writes the
+exact ring, so the tail is corrupt in generation for **every tail-capable storage** (bf16 + int8
+family) once the prompt exceeds 64 tokens. **No code fix yet** — the next session implements it.
+
+**Plan written to `PORT-M5-PLAN.md` §11** (self-contained, with file:line, commands, constraints):
+§11.2 the fix (Option A: launch the storage-independent shadow kernel from `causal_attention_prompt_launch`
+`prompt.cu:268-310`, which is the single batched entry for all tail-capable storages; Option B: a batched
+ring-write kernel keyed on `PagedKVBatchMetadata`). §11.3 one rebuild — `ninfer.exe` is stale
+(2026-10-05 11:09, pre-`56fc8384`) so it must be rebuilt anyway; ~21 TUs, foreground chunks ≤600 s.
+§11.4 verification: oracle green incl. the Step 49/50 guards and `N=0` parity; **a new Prompt-then-small-T
+oracle case** (the direct guard for this fix); the cheap bf16 scoring repro (`ctx=192` vs `ctx=128`
+control); a >64-token generation repro; WP-F F3/F4; a WP-B spot-check. §11.5 docs (`docs/performance.md`,
+`PORT-DOD.md` §7.3). §11.6 the standing constraints (donor trees read-only; check for orphans and the
+48 MiB idle baseline after every run; persist docs and commit code+docs together; subagents/worktrees).
+
+**Honest status.** The ring-unwritten defect is code-derived and fully traced; its empirical
+reproduction is deferred to the rebuilt binary (§11.4 steps 3–4). `--kv-tail-tokens` must stay
+unrecommended until the fix lands.

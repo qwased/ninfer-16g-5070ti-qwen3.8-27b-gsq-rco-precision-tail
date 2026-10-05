@@ -352,3 +352,91 @@ per-row kernel keyed on `block_tables`/`table_rows`, or launch the existing stor
 `causal_attention_small_t_tail_shadow_kernel` from `causal_attention_prompt_launch`). It subsumes the
 bf16 scoring case, so one fix + one rebuild (which also refreshes the pre-fix `ninfer.exe`) closes both,
 together with the WP-F re-run.
+
+## 11. Handoff — next work plan (Step 53, session boundary)
+
+Self-contained pickup notes. Repo `D:/ninfer/ninfer-precision-tail`; HEAD at handoff `012b7e44`.
+Memory: `PORT-MEMORY.md` §5.13 (Steps 47–52). Session log: `PORT-JOURNAL.md` Steps 47–53.
+Build tree: `build-port` (CMake/Ninja, Release, `CMAKE_CUDA_ARCHITECTURES=120a`), driven by
+`.deps/env-port.bat` + `.deps/build-target.bat`. **Read-only donors, never touch:**
+`D:/ninfer/infer-16g-5070ti-5080-5090-qwen3.8-27b-gsq-rco`, `ninfer-package`, `llamacpp`, `beellama.cpp`.
+
+### 11.1 Where we are
+
+- **Done (committed).** `8b7fe338` WP-B post-fix matrix → the tail benefit is **established** (tail-on ≤
+  tail-off 18/18; gain monotone by body coarseness at every ctx × tail). `012b7e44` problem B root-caused
+  and **widened**: the Prompt/batched append never writes the exact ring, so the tail is corrupt in
+  generation for **every tail-capable storage** once the prompt exceeds 64 tokens (§10.5).
+- **Open.** The tail cannot be recommended until §11.2 lands. `--kv-tail-tokens` should stay
+  unrecommended meanwhile.
+
+### 11.2 P0 — FIX the ring-unwritten defect (task #16)
+
+**Defect.** The ring is written only by (i) the single-row `ops::kv_cache_append`
+(`ops/kv_cache/append/launch.cu:25-41`; product caller = `mtp_kv_` only, `text.cpp:523`) and (ii) the
+small-T shadow kernel (`small_t.cu:339`). The `Prompt` route appends via the **batched**
+`kv_cache_append_batch_launch` (`launch.cu:239`), whose ring block is `if constexpr
+(requires(const CacheView& c){ c.block_table; })` — false for `PagedKVBatchLayerView` (`block_tables`,
+plural) → compiled out. A prefill chunk > 64 keys routes to `Prompt` for **every** storage
+(`small_prefill` covers only width 17–64, `causal_softmax_attention.cpp:350`; else `:401`), so prefill
+rows never reach the ring; the first `g < N` decode steps then read unwritten slots.
+
+**Fix (choose the narrowest that is correct).**
+- *Option A — local to the Prompt route (preferred if it covers the case).* `causal_attention_prompt_launch`
+  (`prompt.cu:268-310`) is the single batched entry for **all tail-capable storages** (bf16 + int8
+  family; fp8/k8v4/nvfp4 dispatch away earlier and are tail-inert). Launch the storage-independent
+  `causal_attention_small_t_tail_shadow_kernel` (`small_t_tail_shadow.cuh`) from there, before/after the
+  batched append, for the rows of this chunk. Constraint: the shadow kernel's ring index is per-sequence
+  (`ring = seq*page_count + ((key>>6)%page_count)`); confirm it handles the batched metadata
+  (`tables`/`table_rows`/`table_stride`) or restrict to the single-sequence case (prefill is batch 1).
+- *Option B — general.* Add a batched ring-write kernel in `launch_full` keyed on
+  `PagedKVBatchMetadata` (tables + `table_rows`), mirroring `kv_cache_append_tail_bf16_kernel`
+  (`ops/kv_cache/append/kernel.cuh:74`). Larger blast radius; only worth it if batch > 1 must be covered.
+
+**Safety notes.** The ring write is **idempotent** (same k/v → same slot), so overlapping with the
+`small_prefill` (width 17–64) shadow write is harmless. Do not change `grid.y` (DoD #5). Keep
+`tail_tokens == 0` bit-identical. Do not perturb the fp8/k8v4/nvfp4 paths (tail-inert).
+
+### 11.3 P1 — REBUILD once (this also refreshes the stale `ninfer.exe`)
+
+`build-port/apps/ninfer.exe` is dated **2026-10-05 11:09**, i.e. **before** the `56fc8384` fix — the WP-F
+harness uses it, so it must be rebuilt regardless. The fix touches `causal_softmax_attention`/append TUs;
+the earlier small-T header fix forces a large incremental rebuild (~21 TUs, ~2 h at the observed rate).
+Build in **foreground chunks** of ≤600 s (the tool cap kills longer calls; re-invoke the same build until
+`BUILD_EXIT=0`); zero compiler diagnostics + `FAILED=<n>` + a 124/255 exit = external kill, not an error.
+Rebuild `ninfer.exe`, `ninfer-perplexity.exe`, `ninfer_tests`.
+
+### 11.4 P2 — VERIFY
+
+1. **Oracle** (`ninfer_tests`): `ORACLE_EXIT=0`, `softmax_attention: PASS`, `packed_.../context_...: PASS`,
+   incl. the Step 49 empty-body guard, the Step 50 crossing guard, and `N=0` bit parity.
+2. **New oracle case (the direct guard for this fix):** drive a **Prompt-route** append (width > 64) and
+   then a **small-T** read that covers those rows; assert the ring planes equal the appended exact K/V.
+   Fails before the fix (unwritten), passes after. Add to `tests/ops/softmax_attention/causal_cache.cpp`.
+3. **bf16 scoring repro (cheap):** bf16 `--kv-tail-tokens 64` vs bf16 tail0 at `--score-width 1`,
+   `--context 192` (predicted ~0.13–0.27 KLD today → ≈0 after the fix), with `--context 128` as the
+   all-Prompt control. Reuse `.deps/run-m5-kld.bat` / `run-m5-save.bat`; reference = bf16 tail0.
+4. **Generation repro (the product case):** `ninfer.exe` with a **>64-token prompt**, tail0 vs tail1024
+   (rk4v4-e8), fixed prompt/greedy/seed → the token stream must be (near-)identical; today the first N
+   tokens read garbage.
+5. **WP-F F3/F4** (task #14): acceptance / tokens-per-round / decode tok/s, tail0 vs tailN, with the
+   fixed `ninfer.exe` (the earlier numbers were confounded by the cache hole **and** by this defect).
+6. **WP-B spot-check:** one cell from `.deps/run-m5-wpb2.bat` to confirm no regression.
+
+### 11.5 P3 — DOCUMENT and COMMIT
+
+Update `docs/performance.md` (tail section: the ring is populated by prefill too; generation vs scoring),
+`PORT-DOD.md` §7.3 (`BLOCKED`/`NEGATIVE` → the evidenced verdict), and Steps 53+ in the journal/memory.
+Commit code + memory together (`docs(m5):` / `fix(...):`).
+
+### 11.6 Standing constraints (carry into the next window)
+
+- **Do NOT modify the upstream donor trees** (paths in §11 header) — read-only.
+- After **every** GPU run, confirm `tasklist | grep -iE "ninfer|perplexity"` is empty and `nvidia-smi`
+  is back to the 48 MiB idle baseline (no orphan processes; user requirement).
+- Persist memory docs at every step; commit code + docs together.
+- Use subagents + git worktrees to protect the main context.
+- **Deferred:** the empirical fail-without-fix reversal for the Step 49/50 guards (reverting
+  `small_t.cuh` costs a full small-T rebuild); the Step 48 KLD re-run stands as the system-level evidence.
+  Revisit only if a future change touches that path.
+- Open, lower priority: WP-D D1/D2/D4 (no pre-port build tree; D4 non-gating).

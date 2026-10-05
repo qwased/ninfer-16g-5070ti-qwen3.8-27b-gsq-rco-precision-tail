@@ -589,5 +589,13 @@ merged to `main` after each landed sub-step.
   **required**, not optional — a guard would disable the feature in its main habitat. Fix = write the
   ring from the batched append path (or launch the storage-independent shadow kernel from the Prompt
   route); it subsumes the bf16 scoring case.
+- **HANDOFF (Step 53) — resume here.** HEAD `012b7e44`. **Next action: implement the fix for the
+  ring-unwritten defect (task #16)** — write the ring from the Prompt/batched append path (§10.5), then
+  **one** rebuild (`ninfer.exe` is stale at 2026-10-05 11:09, pre-`56fc8384`), then verify (oracle + a
+  new Prompt-then-small-T oracle case + the bf16 scoring repro + a >64-token generation repro + WP-F
+  F3/F4 + a WP-B spot-check). **Full, self-contained plan with file:line, commands and constraints:
+  `PORT-M5-PLAN.md` §11.** `--kv-tail-tokens` stays unrecommended until the fix lands. Standing rules
+  (no donor writes; check for orphans + 48 MiB idle after every run; persist docs and commit code+docs
+  together; subagents/worktrees) are restated in §11.6.
 - Runs are strictly serial, single-owner, single GPU (5070 Ti); after **every** run check
   `tasklist`/`nvidia-smi` for orphan processes (user requirement) before starting the next.
