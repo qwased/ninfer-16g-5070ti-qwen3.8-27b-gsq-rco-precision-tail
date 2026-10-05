@@ -600,3 +600,20 @@ quantization still dominates the total error (rel-L2 ≈ 6.4e-2) even when the t
 no regression, F16 is the default (plan §1.1), and BF16 stays as the split-verification form —
 every correctness case runs on both. The oracle prints these as `WIDETAIL` lines
 (`ninfer_softmax_attention_test`).
+
+### End-to-end decode cost (indicative)
+
+Turning the tail on adds a second partial plus the merge to the small-T decode path, so decode
+slows somewhat while prefill (prompt route, no merge) is untouched. On the 27B artifact,
+`ninfer` cli, `rk8v4`, 24 generated tokens (`--max-context 2048`):
+
+| configuration | prefill tok/s | decode tok/s |
+|---|---|---|
+| `--spec mtp`, N=1024 | 145.7 | 73.3 |
+| `--spec mtp`, N=0 | 146.8 | 79.6 |
+| no spec, N=1024 | 143.6 | 68.3 |
+
+Indicative only — a 24-token run is noisy and is not a throughput benchmark. It shows the expected
+shape (prefill flat, decode a few percent slower with the tail), not a measured cost curve. A
+body+tail dual-write scan of `bench/ops/kv_cache_append_bench.cu` and a longer decode benchmark are
+the outstanding plan §5 performance characterisation.
