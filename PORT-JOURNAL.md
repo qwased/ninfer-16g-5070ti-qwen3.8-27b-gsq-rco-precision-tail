@@ -1348,3 +1348,37 @@ same way without editing the script. Recorded here because the old script hard-c
 
 Next: WP-A4 self-check (tail=0 ppl W=1 ≈ W=1024; tail=N ppl W=1 < W=1024) needs a full build and a
 GPU run; then WP-A3 (KLD top-K) for the sharp metric.
+
+## Step 39 — M5/WP-A4: the gate PASSES — width<=8 scoring reads the ring
+
+Built `ninfer-perplexity` from `main` with the A1 change (`BUILD_EXIT=0`, 147/147 targets). GPU free,
+strictly serial runs, `tasklist`/`nvidia-smi` clean after every run (0 `ninfer-perplexity`, 48 MiB).
+
+Protocol: rk8v4, `--text` = first 12000 bytes of `eval/corpora/perplexity-1m/data/wikitext/00.txt`
+(2046 scored tokens), `--context 1024 --disjoint`. **ctx = N = 1024** is chosen deliberately: with
+`tail >= ctx` the body is empty and every key comes from the exact ring, so a tail-on improvement is
+unmistakable. Model: `D:\ninfer\ninfer-package\model\Qwen3.8-27B-GSQ-RCO-IQ3_XXS-vision-bf16-mtp.ninfer`.
+
+| tail | score width | perplexity |
+|---:|---:|---:|
+| 0    | 1024 | 6.485411508522421 |
+| 0    | 1    | 6.488674471977547 |
+| 1024 | 1024 | 6.485411508522421 |
+| 1024 | 1    | **6.476584746346809** |
+
+**Gate result:**
+- tail=0: ppl(W=1) − ppl(W=1024) = +0.00326, i.e. **0.05% — reduction-order drift only**. Equal, as required.
+- tail=1024: ppl(W=1) is **strictly lower** than both tail=0 figures (−0.01209 vs W=1 tail0; −0.00883 vs
+  W=1024). The ring is genuinely read on the small-T route. **This is the "the ring is read" criterion.**
+- tail=0 vs tail=1024 at W=1024 is **bit-identical** (both `6.485411508522421`) — re-confirms Step 31:
+  the 1024-wide tile takes `Prompt`, which never reads the tail.
+- `memory` at tail=1024: `kv_exact_history_bytes` 67,108,864 = **64 MiB exactly**, rollback 4,194,304.
+
+Per run: ~39 s wall including the ~5 s load. Harness: `.deps/run-m5-a4b.bat <fmt> <tail> <width> <ctx>`.
+
+**Path typo (cost a failed run, recorded):** the donor product directory is
+`D:\ninfer\ninfer-package` (with the `n`). The first drafts of the new M5 harnesses had
+`infer-package`; the pre-existing `run-m1-ppl.bat` was already correct. Symptom of the
+typo was `CreateFileW: Win32 error 3` at artifact inspect. Fixed in the new scripts.
+
+**WP-A4 is DONE.** WP-A3 (KLD) is unblocked; the width<=8 instrument is proven.

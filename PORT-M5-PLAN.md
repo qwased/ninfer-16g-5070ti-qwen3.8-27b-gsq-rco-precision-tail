@@ -66,10 +66,14 @@ know why — empirically, not by inference:
 - Baseline: run **bf16 body + tail 0** once to persist the reference top-k; run candidates with the same
   evaluation tokens/order.
 
-### A4 instrument self-check (falsifiable gate)
+### A4 instrument self-check (falsifiable gate) — **DONE, PASSES** (Step 39)
 - tail=0: ppl at W=1 ≈ ppl at W=1024 (within tolerance; only reduction-order drift).
 - tail=N: ppl at W=1 **<** ppl at W=1024. This is the "the ring is read" criterion.
 - If A4 fails → stop and revisit the design; do not proceed to WP-B.
+
+**Result (rk8v4, ctx=N=1024, 2046 scored tokens):** tail=0 W1024 6.485411508522421 / W1
+6.488674471977547 (+0.05%, drift); tail=1024 W1024 6.485411508522421 (bit-identical to tail=0) / W1
+**6.476584746346809** (strictly lower). Gate passes; `kv_exact_history_bytes` 64 MiB exactly.
 
 ## 3. WP-B — three-tier benefit campaign (ninfer)
 

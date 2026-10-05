@@ -431,7 +431,16 @@ merged to `main` after each landed sub-step.
   `.deps/build-target.bat <target>` builds one target in `build-port` under the VS2022/CUDA-13.3 env.
 - **WP-A4 self-check (next gate):** tail=0 → ppl(W=1) ≈ ppl(W=1024); tail=N → ppl(W=1) < ppl(W=1024).
   Only ppl is needed for this gate; KLD (WP-A3) comes after.
-- **WP-A3 (todo):** device top-K over the already-materialized `[vocab,C]` logits, widen
-  `Engine::score_tokens` return, persist a BF16 tail-0 baseline, then run KLD.
+- **WP-A4 DONE (Step 39):** the gate **passes**. rk8v4, ctx=N=1024 (whole context exact), 2046 scored
+  tokens: tail=0 ppl W1024 6.485412 vs W1 6.488674 (0.05% drift); tail=1024 W1024 6.485412
+  (bit-identical to tail=0) vs W1 **6.476585** (strictly lower). Width<=8 scoring genuinely reads the
+  ring. Harness `.deps/run-m5-a4b.bat <fmt> <tail> <width> <ctx>`.
+- **Path note:** the donor product directory is `D:\ninfer\ninfer-package` (the `n`). The first
+  drafts of the new M5 harness scripts had `infer-package`; wrong path → `CreateFileW: Win32 error 3`
+  at artifact inspect. Fixed. (The pre-existing `run-m1-ppl.bat` and §2 above were already correct.)
+- **WP-A3 (in progress, parked WIP in `.worktrees/m5a`):** a subagent implemented the device top-K +
+  `--save-topk`/`--kld-base` KLD path (22 files, ~1300 lines) but hit its 150-turn cap before
+  committing/validating; the edits are preserved as an uncommitted WIP on branch `port/m5-instrument`
+  and must be verified/committed separately.
 - Runs are strictly serial, single-owner, single GPU (5070 Ti); after **every** run check
   `tasklist`/`nvidia-smi` for orphan processes (user requirement) before starting the next.
