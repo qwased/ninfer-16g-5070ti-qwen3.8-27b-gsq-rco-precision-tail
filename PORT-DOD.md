@@ -99,6 +99,18 @@ packages, each mapped to concrete evidence. **Update on every step.** Status val
    decode-width scoring mode the app does not have. `MemorySummary` (§7.4) *does* move and matches
    plan §2 exactly, which is the tail's measurable footprint in this harness.
 
+## Outstanding characterisation (non-blocking; not acceptance criteria)
+
+- **Plan §5 "performance" row.** The end-to-end decode shape (prefill flat, decode a few percent
+  slower at N=1024) is recorded in `docs/performance.md` from the Step-36 cli runs, but the
+  body+tail dual-write scan of `bench/ops/kv_cache_append_bench.cu` is **not run**: benchmarks are
+  behind `NINFER_BUILD_BENCHMARKS` (OFF) and turning them on reconfigures the whole tree for what is
+  a cost characterisation, not a correctness gate. Left for a benchmark pass if a throughput number
+  is needed.
+- **M4** (plan §4, optional: exact pool on host/disk tier; per-request tail observability API) is not
+  started, by design — the plan gates it on a real need after M3 ("仅在 M3 后确有需求时启动").
+- **WP8** (transaction/rollback) remains deferred; see deviation #4.
+
 ## Required-scope items from the objective itself
 
 | Requirement | Status | Evidence |
