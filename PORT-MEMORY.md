@@ -498,8 +498,14 @@ merged to `main` after each landed sub-step.
   (≤600 s, ~3-4 runs), re-invoking the resumable batch each time. Both `run_in_background` and
   `start /b`-detached batches are **killed after ~3 min**. After every chunk verify
   `tasklist | grep -i ninfer-perplexity` is empty (user requirement: no orphan processes).
-- **Ready but not yet run:** WP-C `.deps/run-m5-wpc.sh` (llamacpp KLD); WP-F F3/F4/F5
-  `.deps/run-m5-wpf.sh` (`ninfer.exe --spec mtp`); WP-D via the calculator test + product
-  `ninfer-serve.exe` (read-only corroboration). WP-E docs last.
+- **WP-D PARTIAL / WP-E DONE (Step 45):** D3 evidenced by `node docs/config-calculator.test.mjs`
+  → PASS (N=0 leaves the golden engine reservation untouched; 262144-token int8 golden matches the
+  engine refusal figure). D1/D2/D4 not run — no pre-port build tree (multi-hour, >100 GB) and the
+  product ships only `ninfer-serve.exe` (D4 non-gating). WP-E: `docs/performance.md` decode-width KLD
+  section + `PORT-DOD.md` §7.3 `BLOCKED`→`NEGATIVE`. `PORT-M5-PLAN.md` §9 records the outcome.
+- **M5 FOLLOW-UP (the real remaining work):** fix the body+tail merge (newest rows not correctly handed
+  from the exact ring into the quantized body cache across rounds?), add a large-window oracle case
+  (window ≫ 67 keys, `ring_pages ≥ 3`), then re-run WP-B/C/F. Until then the tail's benefit is
+  **unproven** and `--kv-tail-tokens` should not be recommended.
 - Runs are strictly serial, single-owner, single GPU (5070 Ti); after **every** run check
   `tasklist`/`nvidia-smi` for orphan processes (user requirement) before starting the next.

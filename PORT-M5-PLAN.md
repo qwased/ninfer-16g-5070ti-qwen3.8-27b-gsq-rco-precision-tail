@@ -144,6 +144,44 @@ remain** — GPU runs on the `ninfer` cli, after WP-B.
 - Change DoD §7.3 from `BLOCKED` to evidenced; if the result is negative, state plainly that the tail is
   not worth it at this tier.
 
+## 9. Outcome (M5 executed, Steps 38-45)
+
+**WP-A — DONE.** A1 `--score-width W` (`e3afebbe`); A2 confirmed; A3 KLD top-K instrument (`3037bb98`,
+verified: self-KLD 0, and rk8v4 tail0→tail1024 0.002738→0.000912 at ctx=N=1024); A4 gate **PASSES**
+(tail=0 ppl W1≈W1024; tail=N ppl W1<W1024). Small-T ceiling measured: W≤8 (24 q-heads).
+
+**WP-B — EXECUTED, NEGATIVE (defect).** At ctx=N=1024 the tail is correct and improves. But whenever a
+**body** and the tail coexist the merge is **wrong**: ctx2048/rk8v4 tail1024 KLD 0.022539 vs tail0
+0.002838; ctx8192 int8/rk8v4 tail1024 ≈0.027 vs ≈0.001-0.003; the tell is **bf16 body+tail vs a bf16
+reference = KLD 0.137** (same precision ⇒ should be ≈0). Reproduces at W=1 and W=8, for bf16/int8/rk8v4.
+The in-tree oracle (T=6, keys≤67, single fused append) does not cover this regime. **The benefit cannot
+be claimed; the merge must be fixed.** Remaining WP-B cells (ctx 16K/32K, rk4v4-e8) were not run —
+the defect is already general, so they would only re-confirm it.
+
+**WP-C — DONE.** llama.cpp `kvarn4` merges inside FA at all widths and cuts mean KLD 0.001107→0.000702
+(−37%), max 0.188→0.078 — the benefit is real; ninfer's merge is the gap.
+
+**WP-D — PARTIAL.** D3 evidenced: `node docs/config-calculator.test.mjs` → **PASS**, incl. "N=0 leaves
+the golden engine reservation untouched" and the 262144-token int8 27B golden matching the engine's
+refusal figure. D1/D2/D4 **not run**: a pre-port build tree (b06908ba) does not exist here and
+reconfiguring one is a multi-hour, >100 GB cost; the shipped product exposes only `ninfer-serve.exe`
+(D4 is explicitly non-gating). Partial support: `tail=0` is the identity partition (oracle N=0
+bit-exact, DoD §7.6 DONE), the calculator pins N=0 to the golden reservation, and WP-F measured HEAD
+`tail=0` decode at 82.6 tok/s.
+
+**WP-F — F1/F2/F5 DONE (analysis), F3/F4 measured (confounded).** No ring pollution on rejection (R-D
+does not trigger). Acceptance 24.1%→20.3%, decode 82.6→70.8 tok/s with the tail — but confounded by the
+merge defect; repeat after the fix.
+
+**WP-E — DONE.** `docs/performance.md` gained the decode-width KLD / llamacpp / speculation sections;
+`PORT-DOD.md` §7.3 `BLOCKED`→`NEGATIVE` with the M5 evidence.
+
+**Follow-up (the real remaining work):** fix the body+tail merge (leading hypothesis: with a non-empty
+body the newest rows are not correctly handed from the exact ring into the quantized body cache across
+rounds, so later rounds' bodies read un-written rows — see Step 44/§8 deviation #3), add a large-window
+oracle case (window ≫ 67 keys, `ring_pages ≥ 3`), then re-run WP-B/C/F. Until then the tail's benefit
+is unproven and `--kv-tail-tokens` should not be recommended.
+
 ## 8. Discipline and risks
 
 - Single-GPU serial owner; confirm every process terminates after each run; donor trees read-only;
