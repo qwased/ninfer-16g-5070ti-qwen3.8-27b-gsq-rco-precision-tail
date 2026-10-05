@@ -157,14 +157,21 @@ causal_small_t_tail_partition(int window, int tail_tokens, int launch_capacity, 
     // every short window, so a body clamped only at total_active takes every split and the newest
     // tail_keys keys fall out of the softmax entirely (they are in neither partial, so neither the
     // m/l merge nor the weighted accumulator ever sees them). Whenever the tail has keys the body
-    // therefore stops one split short of the range, and a non-empty body keeps at least one split
-    // so the keys below body_window stay covered as well -- the body's own tier can ask for more
-    // splits than the whole window's, because the INT8 token-count tiers are not monotonic in the
-    // window, and an empty body asks for none.
+    // therefore stops one split short of the range, and it keeps at least one split even when it is
+    // empty (body_window == 0) -- the body's own tier can ask for more splits than the whole
+    // window's, because the INT8 token-count tiers are not monotonic in the window.
+    //
+    // That last split also exists to *write*: the fused-append body kernel owns the quantized cache
+    // write of this step's rows, so when body_window == 0 the empty body split appends the newest
+    // tail rows to the cache (scoring nothing) while the tail reads them from the ring. An empty
+    // body that asked for no split would leave those rows unquantized -- once the window grows past
+    // N the body reads [0, window - N) and hits a permanent hole (the M5 body+tail defect).
     int body_active = 0;
     if (body_window > 0) {
         body_active = causal_small_t_active_splits<Geometry, Int8>(body_window, launch_capacity,
                                                                    tokens, wave_splits);
+    }
+    if (body_window > 0 || tail_keys > 0) {
         const int body_limit = tail_keys > 0 ? total_active - 1 : total_active;
         if (body_active > body_limit) { body_active = body_limit; }
         if (body_active < 1) { body_active = 1; }

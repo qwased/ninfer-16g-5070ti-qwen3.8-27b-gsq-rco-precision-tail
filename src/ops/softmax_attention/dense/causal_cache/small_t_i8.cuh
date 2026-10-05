@@ -229,10 +229,6 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     const int split_start = split * units_per_split * (tile_split ? Bc : 1);
     const int split_limit = split_start + units_per_split * (tile_split ? Bc : 1);
     const int split_end   = (split_limit < body_window) ? split_limit : body_window;
-    if (split_start >= split_end) {
-        write_neutral();
-        return;
-    }
     const int first_tile = (split_start / Bc) * Bc;
     const int key_blocks = div_up(split_end - first_tile, Bc);
     const int first_page = first_tile >> kPagedKVPageShift;
@@ -251,15 +247,14 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     // Fused-append ownership (exact tail). The body still *scores* only [0, body_window), but every
     // key this step appends has to reach the quantized cache: the newest tail_keys keys are read from
     // the exact ring on this step, yet a later step's body reads them from this cache once they leave
-    // the tail, and no other kernel quantizes them. So the split that owns the final body key also
-    // owns the newest tail keys the body does not score, and the append covers [0, window) exactly
-    // once. As the append range is a superset of the scoring range of that split only, no two splits
-    // append the same key and no split appends a key another split scores. Keeping the append row on
-    // the block table (rather than the staged page IDs of the scoring range) makes the extra keys'
-    // pages readable.
+    // the tail, and no other kernel quantizes them. The *last* body split owns [split_start, window),
+    // so the append covers [0, window) exactly once across the splits and no split appends a key
+    // another split scores. With body_window == 0 that split is the whole (score-empty) body and
+    // exists only to own the append -- the ring alone would leave these rows unquantized, and a later
+    // window > N body reads them from [0, window - N). Keeping the append row on the block table
+    // (rather than the staged page IDs of the scoring range) makes the extra keys' pages readable.
     const int append_start = split_start;
-    const int append_end =
-        (split_start < body_window && split_end == body_window) ? window : split_end;
+    const int append_end   = split == active_split_count - 1 ? window : split_end;
 
     if constexpr (CacheInput::writes_cache) {
         // Decompose H256 as H4 over four independently transformed H64 groups. The existing
@@ -359,6 +354,14 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             }
         }
         __syncthreads();
+    }
+
+    // A split this launch owns but that no key falls into scores nothing; it still owes the reducer a
+    // neutral partial (all-zero acc, -inf m, 0 l). Only the last body split can be empty, and only
+    // when body_window == 0 -- the append-only split whose cache write ran above.
+    if (split_start >= split_end) {
+        write_neutral();
+        return;
     }
 
     for (int i = tid; i < Br * D; i += Threads) { q_i8[i] = 0; }

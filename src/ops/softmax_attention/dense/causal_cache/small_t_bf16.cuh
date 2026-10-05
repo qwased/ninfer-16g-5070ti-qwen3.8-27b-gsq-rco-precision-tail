@@ -140,10 +140,6 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
     const int split_start = split * units_per_split * (tile_split ? Bc : 1);
     const int split_limit = split_start + units_per_split * (tile_split ? Bc : 1);
     const int split_end   = (split_limit < body_window) ? split_limit : body_window;
-    if (split_start >= split_end) {
-        write_neutral();
-        return;
-    }
     const int first_tile = (split_start / Bc) * Bc;
     const int key_blocks = div_up(split_end - first_tile, Bc);
     const int first_page = first_tile >> kPagedKVPageShift;
@@ -162,12 +158,12 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
     // Fused-append ownership (exact tail). The body still *scores* only [0, body_window), but every
     // key this step appends has to reach the quantized cache: the newest tail_keys keys are read from
     // the exact ring on this step, yet a later step's body reads them from this cache once they leave
-    // the tail, and no other kernel quantizes them. So the split that owns the final body key also
-    // owns the newest tail keys the body does not score, and the append covers [0, window) exactly
-    // once. Keep the extra keys off the scoring range above (they are never scored here).
+    // the tail, and no other kernel quantizes them. The *last* body split owns [split_start, window),
+    // so the append covers [0, window) exactly once across the splits. With body_window == 0 that
+    // split is the whole (score-empty) body and exists only to own the append -- the ring alone would
+    // leave these rows unquantized, and a later window > N body reads them from [0, window - N).
     const int append_start = split_start;
-    const int append_end =
-        (split_start < body_window && split_end == body_window) ? window : split_end;
+    const int append_end   = split == active_split_count - 1 ? window : split_end;
 
     if constexpr (CacheInput::writes_cache) {
         // The owning split writes each new row. Current attention reads those rows directly from
@@ -189,6 +185,14 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
             }
         }
         __syncthreads();
+    }
+
+    // A split this launch owns but that no key falls into scores nothing; it still owes the reducer a
+    // neutral partial (all-zero acc, -inf m, 0 l). Only the last body split can be empty, and only
+    // when body_window == 0 -- the append-only split whose cache write ran above.
+    if (split_start >= split_end) {
+        write_neutral();
+        return;
     }
 
     for (int idx = tid; idx < Br * D; idx += Threads) {
