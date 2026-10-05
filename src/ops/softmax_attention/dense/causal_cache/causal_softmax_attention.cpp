@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
@@ -566,6 +567,11 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
     auto scope = workspace.scope();
     const detail::CausalAttentionRoute route =
         detail::causal_attention_resolve_route(q.ne[1], width, batch, cache.storage, envelope);
+    std::fprintf(stderr,
+                 "ROUTEF op=%s heads=%d w=%d bs=%d stor=%d env=[%u,%u] tail=%d/%d route=%s\n", op,
+                 q.ne[1], width, batch, static_cast<int>(cache.storage), envelope.min_visible_keys,
+                 envelope.max_visible_keys, cache.tail.retention, cache.tail.page_count,
+                 detail::causal_attention_route_name(route));
     if (route == detail::CausalAttentionRoute::ChunkedSmallT) {
         launch_chunked_small_t(q, k, v, positions, valid_columns, kv_table_rows, scale, cache,
                                envelope, workspace, out, stream);
@@ -605,6 +611,10 @@ void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
     auto scope = workspace.scope();
     const detail::CausalAttentionRoute route =
         detail::causal_attention_resolve_route(q.ne[1], q.ne[2], 1, cache.storage, envelope);
+    std::fprintf(stderr, "ROUTEC op=%s heads=%d w=%d bs=1 stor=%d env=[%u,%u] tail=%d/%d route=%s\n",
+                 op, q.ne[1], q.ne[2], static_cast<int>(cache.storage), envelope.min_visible_keys,
+                 envelope.max_visible_keys, cache.tail.retention, cache.tail.page_count,
+                 detail::causal_attention_route_name(route));
     if (route == detail::CausalAttentionRoute::ChunkedSmallT) {
         launch_cached_chunked_small_t(q, positions, scale, cache, envelope, workspace, out, stream);
         return;

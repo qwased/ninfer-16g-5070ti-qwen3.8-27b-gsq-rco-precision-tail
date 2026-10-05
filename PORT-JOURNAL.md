@@ -1024,3 +1024,38 @@ norm). That is unexplored. Combined with Step 27i (batched fixture bug), the nex
 3. remove the `DBG*` printf blocks, rebuild, and rerun the oracle.
 Any edits it left after `96043f9a` are parked in the following commit. Its orphaned compiler
 processes were stopped by PID.
+
+## Step 29 - root cause of every remaining tail failure: stale INT8 objects, not the partition
+
+The whole INT8-family tail failure (fused rk8v4 marginal; cached rk8v4/rk4v4-e8 gross) is **not a
+product bug**: the INT8 small-T translation units for token tiles **5..8 were never rebuilt after the
+tail landed**. `small_t_i8_w{5,6,7,8}_*.cu.obj` carried mtime 03:57-04:01 while the tail headers
+(`small_t_tail.cuh`, `small_t_i8_launch.cuh`, `small_t_i8.cuh`) are 06:18-06:19 and `w1..w4` objs are
+06:24-06:32: the 06:24 rebuild that followed the header edit was the subagent's, and it was killed
+with only w1..w4 done. A killed compile leaves no depfile entry, so ninja never learned those TUs
+depend on the edited headers and reported "no work to do". Those objects still held pre-tail code, so
+for `TokenTile >= 5` the launcher read `PagedKVBatchLayerView` without the tail and the merge was
+inert. BF16 was unaffected because `small_t.cu` (the BF16 body) had been rebuilt.
+
+Evidence (run6, stderr split from stdout): at the op entry every failing case shows the tail present
+and the small-T route -- `ROUTEF ... heads=24 w=6 stor=3 env=[67,512] tail=2/1 route=small_t` -- yet
+there is **no `HOSTI8`** (`tail_tokens <= 0` inside `launch_tc_partial_i8`) and **no `I8TOP tok=6`**
+anywhere: the i8 body kernel was never reached for T=6. With `PagedKVLayerView` gains the tail field
+being the only difference, the stale-object explanation is the only one consistent with all of it.
+
+Two consequences worth recording:
+
+- **The five "passing" BF16 tail cases were a false positive.** With the tail inert the BF16 body
+  reads the exact BF16 rows anyway, so `body == tail` and the merge is a no-op; they would pass even
+  with `retention == 0`. Only BF16 cases *with the tail active* (XDBGBF16 `tt>0`, 8 launches) exercise
+  anything, and those are the ones the harness also covers through the INT8 family.
+- **The Step-27g/28b route leads were noise.** The resolved route is `small_t` for every failing case
+  and the tail is present at the op entry; the partition arithmetic that the host model in
+  `.deps/part-model.py` reproduces was never the problem.
+
+Fix applied: deleted every object under
+`build-port/src/ops/CMakeFiles/ninfer_ops.dir/softmax_attention/dense/causal_cache/` (39 files) so
+ninja recompiles the whole causal_cache family with matching headers, then rebuilt `ninfer_tests`.
+The interrupt hazard -- kill a build and the depfile for the in-flight TU is lost -- is the general
+lesson: after any interrupted build, delete the objects of the directory being compiled rather than
+trusting "no work to do".
