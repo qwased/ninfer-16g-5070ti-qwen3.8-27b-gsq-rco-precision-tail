@@ -325,3 +325,30 @@ controlled A/B.
 campaign (bf16 appears only as the tail-0 reference); it is the last correctness item before
 `--kv-tail-tokens` can be declared safe for bf16 storage. WP-C (llamacpp) already shows the external
 concept works; the three quantized tiers now show ninfer's own merge works too.
+
+### 10.5 Problem B is broader than bf16 — the Prompt route never writes the ring (Step 52)
+
+Supersedes the "bf16 only" framing of §10.1. Root cause (two read-only subagents + my own re-reads):
+
+- bf16's nonzero `prompt_limit` (`causal_softmax_attention.cpp:367`: 128 at W≤4, 256 at W5–8) sends
+  early rows to `Prompt` (`:390`). `Prompt` appends via the **batched** `kv_cache_append_batch_launch`
+  (`prompt.cu:288`), whose ring-shadow write is gated by
+  `if constexpr (requires(const CacheView& c){ c.block_table; })` (`ops/kv_cache/append/launch.cu:25`)
+  — false for `PagedKVBatchLayerView` (`block_tables`, plural) → **compiled out**. Ring writers are only
+  the single-row `ops::kv_cache_append` (product caller = `mtp_kv_` only, `text.cpp:523`) and the
+  small-T shadow kernel (`small_t.cu:339`).
+- **Correction:** the tail is read only by **bf16 and the int8 family** (int8/rk8v4/rk4v4/rk4v4-e8/
+  rk2v4-e8). fp8/k8v4/nvfp4 small-T launchers contain **no tail code** → the feature is **inert** there.
+- **B is therefore not bf16-only.** A prefill chunk > 64 keys (default 1024; `small_prefill` covers only
+  width 17–64) routes to `Prompt` (`:401`) for **every** storage, so the ring is unwritten for prefill
+  rows; the tail then reads the newest `min(N, window)` keys by absolute index and, for the first `g < N`
+  generated tokens, reads unwritten slots → **corrupt in generation for every tail-capable storage** with
+  a prompt > 64 tokens. Unseen by WP-B (W=8 from position 0 → small-T throughout) and WP-F (~20-token
+  prompts → shadow writes the ring); the oracle drives the cached entry, which writes the ring.
+
+**Consequence:** the fix is **required**, not optional — a guard would disable the tail whenever a long
+prompt is prefilled, i.e. in its main habitat. Fix = write the ring from the batched append path (a
+per-row kernel keyed on `block_tables`/`table_rows`, or launch the existing storage-independent
+`causal_attention_small_t_tail_shadow_kernel` from `causal_attention_prompt_launch`). It subsumes the
+bf16 scoring case, so one fix + one rebuild (which also refreshes the pre-fix `ninfer.exe`) closes both,
+together with the WP-F re-run.

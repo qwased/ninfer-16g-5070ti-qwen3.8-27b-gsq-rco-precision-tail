@@ -571,5 +571,23 @@ merged to `main` after each landed sub-step.
   `same_top` up (`rk8v4` 0.976→0.983; `rk4v4-e8` 0.966→0.980/0.982). Raw `.deps/m5-wpb2-*/`; summarizer
   `.deps/summarize-wpb2.py`. Scope: proves the **quantized** tiers (WP-B's question); the separate
   bf16-storage+tail defect is untouched and remains open (task #15).
+- **Problem B is BROADER than bf16 — the Prompt route never writes the ring (Step 52).** Two read-only
+  subagents + my own re-reads. bf16's nonzero `prompt_limit` (`:367`, 128/256 at W≤8) sends early rows
+  to `Prompt`; `Prompt` appends via the **batched** `kv_cache_append_batch_launch` (`prompt.cu:288`),
+  whose ring write is gated by `if constexpr (requires(const CacheView& c){ c.block_table; })`
+  (`append/launch.cu:25`) — false for `PagedKVBatchLayerView` (`block_tables`, plural) → **compiled
+  out**. Ring writers = single-row `ops::kv_cache_append` (product caller = mtp_kv only, `text.cpp:523`)
+  + small-T shadow kernel (`small_t.cu:339`). **Correction:** the tail is read only by **bf16 and the
+  int8 family** (`small_t_bf16.cuh`/`small_t.cu` and `small_t_i8_launch.cuh` → `small_t_tail.cuh`);
+  fp8/k8v4/nvfp4 small-T launchers have **no tail code** → inert (no benefit, no corruption). So B is
+  not bf16-only: a prefill chunk > 64 keys (default 1024; `small_prefill` only covers 17–64) routes to
+  `Prompt` (`:401`) for **every** storage, leaving the ring unwritten for prefill rows; the tail then
+  reads the newest `min(N,window)` keys by absolute index, so the first `g < N` generated tokens read
+  garbage → **corrupt in generation for every tail-capable storage** (bf16 + int8/rk8v4/rk4v4/rk4v4-e8/
+  rk2v4-e8) with a >64-token prompt. Unobserved because WP-B scores W=8 from 0 (small-T throughout →
+  ring written) and WP-F used ~20-token prompts (≤64 → shadow writes ring). **Consequence:** B is
+  **required**, not optional — a guard would disable the feature in its main habitat. Fix = write the
+  ring from the batched append path (or launch the storage-independent shadow kernel from the Prompt
+  route); it subsumes the bf16 scoring case.
 - Runs are strictly serial, single-owner, single GPU (5070 Ti); after **every** run check
   `tasklist`/`nvidia-smi` for orphan processes (user requirement) before starting the next.

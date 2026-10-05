@@ -1917,3 +1917,50 @@ WP-B's question, and restores the harness to the clean-`ctx=N` numbers (`rk8v4` 
 pre-fix whole-window 0.001068). The **separate** open defect (bf16 *storage* + tail at scale, KLD 0.207)
 is untouched by this campaign — bf16 is used here only as the tail-0 reference — and remains the last
 correctness item before `--kv-tail-tokens` can be called safe at bf16 storage. It is tracked separately.
+
+### Step 52 — problem B is broader than bf16: the Prompt route never writes the ring
+
+Two read-only subagents root-caused the "bf16 + tail at scale" defect; I re-verified every load-bearing
+line myself.
+
+**Root cause (confirmed).** For bf16 storage `prompt_limit` is `width<=4 ? 128 : width<=8 ? 256 : 640`
+(`causal_softmax_attention.cpp:367`), and `envelope.max_visible_keys <= prompt_limit` returns `Prompt`
+(`:390`). The `Prompt` route appends via the **batched** `kv_cache_append_batch_launch`
+(`prompt.cu:288`; also `prompt_fp8.cu:73`, `prompt_k8v4.cu:73`, `prompt_nvfp4.cu:73`), and that path's
+ring-shadow write is gated by `if constexpr (requires(const CacheView& c){ c.block_table; })`
+(`ops/kv_cache/append/launch.cu:25`) — **false** for `PagedKVBatchLayerView`, which exposes
+`block_tables` (plural, `core/paged_kv_cache.h:55`). The block is **compiled out**, so the ring is never
+written on that route. The ring has exactly two writers: the single-row `ops::kv_cache_append`
+(`launch.cu:30`), whose only product caller is `mtp_kv_` (`text.cpp:523`), and the small-T shadow kernel
+(`small_t.cu:339`). Confirmed by grepping every write to `cache.tail.k_pages` — only those two sites.
+
+**Correction to an earlier claim.** The tail is **read** only by bf16 (`small_t.cu` → `small_t_tail.cuh`)
+and the INT8 family (`small_t_i8_launch.cuh` → `small_t_tail.cuh`). The fp8 / k8v4 / nvfp4 small-T
+launchers (`small_t_fp8.cu`, `small_t_k8v4.cu`, `small_t_nvfp4.cu`) contain **no tail code at all**
+(their only "tail" hits are the word "split-KV" in a comment) — so for those storages the feature is
+**inert**: no benefit, and no corruption. The earlier note that "fp8/k8v4 are hit at W5–8" was wrong.
+
+**So B is not bf16-only.** A product prefill chunk has width > 64 (`prefill_chunk_` default 1024;
+`small_prefill` only covers width 17–64, `:350`), so it falls through to `Prompt` (`:401`) **for every
+storage** → the ring is never written for prefill rows. Then the tail partial reads the newest
+`min(N, window)` keys by absolute index (`small_t_tail.cuh:148-179,224-228`) with no knowledge of what
+was written, so for the first ~N generated tokens (`g < N`, window `P+g`) the read range `[P+g-N, P+g)`
+includes prefill keys `< P` whose ring slots are unwritten. The tail merge is therefore **corrupt in
+generation for every tail-capable storage** — bf16 *and* int8/rk8v4/rk4v4/rk4v4-e8/rk2v4-e8 — whenever
+the prompt exceeds 64 tokens. Zero-initialised pages do not fix it (a zero key is a real key with
+score 0).
+
+**Why no campaign saw it.** WP-B scores with `--score-width 8` from position 0, so every step is small-T
+(prompt_limit 0 for the int8 family) → the ring is written → clean. WP-F generated from ~20-token
+prompts (≤64) → the `small_prefill`/ChunkedSmallT route → the shadow kernel writes the ring → clean. The
+in-tree oracle drives the *cached* entry through `ops::kv_cache_append`, which writes the ring → never
+exercises the Prompt route. The defect is code-derived (fully traced); empirical reproduction needs the
+rebuilt `ninfer.exe` (it predates `56fc8384`) plus a >64-token prompt, tail0 vs tailN — deferred to the
+P2/P4 build.
+
+**Consequence for the plan.** This changes B from "bf16-only curiosity, guard instead of fix" to
+**required**: a guard would have to disable the tail whenever a long prompt is prefilled, i.e. disable
+the feature in its main habitat. The fix is to write the ring from the batched append path (a per-row
+ring-write kernel keyed on `block_tables`/`table_rows`, or launch the existing storage-independent
+`causal_attention_small_t_tail_shadow_kernel` from `causal_attention_prompt_launch`). It subsumes the
+bf16 scoring case, so one fix plus one rebuild closes both.
