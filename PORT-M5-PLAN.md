@@ -155,8 +155,10 @@ verified: self-KLD 0, and rk8v4 tail0→tail1024 0.002738→0.000912 at ctx=N=10
 0.002838; ctx8192 int8/rk8v4 tail1024 ≈0.027 vs ≈0.001-0.003; the tell is **bf16 body+tail vs a bf16
 reference = KLD 0.137** (same precision ⇒ should be ≈0). Reproduces at W=1 and W=8, for bf16/int8/rk8v4.
 The in-tree oracle (T=6, keys≤67, single fused append) does not cover this regime. **The benefit cannot
-be claimed; the merge must be fixed.** Remaining WP-B cells (ctx 16K/32K, rk4v4-e8) were not run —
-the defect is already general, so they would only re-confirm it.
+be claimed; the merge must be fixed.** The **full matrix is complete** — 3 storages × tail {0,1024,2048}
+× ctx {8192,16384,32768}, plus rk8v4 at ctx 2048 and the whole-window clean cases. Every cell degrades;
+the degradation is 24×/21×/14× (int8), 10×/9×/6× (rk8v4), 4×/4×/2.4× (rk4v4-e8) at 8K/16K/32K, and
+tail-on KLD is ~storage-independent while tail-off spans 6× — the defect signature.
 
 **WP-C — DONE.** llama.cpp `kvarn4` merges inside FA at all widths and cuts mean KLD 0.001107→0.000702
 (−37%), max 0.188→0.078 — the benefit is real; ninfer's merge is the gap.

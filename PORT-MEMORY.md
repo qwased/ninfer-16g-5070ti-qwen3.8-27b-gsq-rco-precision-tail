@@ -471,10 +471,11 @@ merged to `main` after each landed sub-step.
   `ring_pages>=3` and the product's `+1` rollback page are **never exercised**. Disambiguate with a
   ctx {2048,4096} × tail {0,1024} sweep, then a targeted oracle case (window 2048, N=1024, T=8,
   fixture `ceil(N/64)+1` pages). **Do not conclude the benefit question before this.**
-- **WP-B three-tier at ctx 8192 complete (tail mean KLD):** int8 0.001126→0.026986, rk8v4
-  0.002647→0.027096, rk4v4-e8 0.006522→0.027349. Tail-on KLD converges to **≈0.027 for every
-  storage** despite very different tail-off errors — a **storage-independent corruption signature**,
-  so the tail path itself is mis-read when a body coexists (not a body-precision interaction).
+- **WP-B three-tier × ctx COMPLETE (tail mean KLD, degradation of t1024 vs t0):** int8 24×@8K / 21×@16K
+  / 14×@32K; rk8v4 10× / 9× / 6×; rk4v4-e8 4× / 4× / 2.4×. Tail-on KLD is ~storage-independent
+  (≈0.027@8K, ≈0.015-0.024@16-32K) while tail-off spans 6× (0.0010 int8 … 0.0065 rk4v4-e8) — the
+  **defect signature** (tail path, not body). Clean only at `ctx=N` (whole window). Raw:
+  `.deps/m5-wpb-*/`, `.deps/m5-ctx-*/`; rendered in `docs/performance.md`.
 - **WP-B defect LOCALIZED (Step 44 addendum):** every case where the tail covers the **whole** window
   (body empty) is correct and *improves* on tail-off — ctx=1024/tail1024 KLD 0.000912, ctx=2048/tail2048
   KLD **0.001068** (vs tail0 0.002838). Every case where a quantized body and the tail **coexist**
