@@ -1466,3 +1466,66 @@ Read-only code analysis (delegated; no edits, no GPU). Answers, with the plan's 
   in which case that step takes the Prompt/wide route and the tail is not read. Relevant to F3/F4.
 
 F3 (acceptance) and F4 (perf) are GPU runs on the `ninfer` cli and follow WP-B.
+
+## Step 43 — M5 progress snapshot (context-compression handoff)
+
+**Where we are.** M5 = `PORT-M5-PLAN.md`; worktree `.worktrees/m5a`, branch `port/m5-instrument`
+(rebased onto `main`; nothing uncommitted). `main` tip = `1a5d2202`. Everything below is committed.
+
+**Landed and verified:**
+- **WP-A1 DONE** `e3afebbe` — `--score-width W` (EngineOptions::score_width → program_impl.cpp:683-691;
+  bypasses the 128-alignment).
+- **WP-A4 DONE, gate PASSES** (`4e78f7bc`) — rk8v4 ctx=N=1024, 2046 tokens: tail0 W1024 6.485412 /
+  W1 6.488674 (drift); tail1024 W1024 6.485412 (bit-identical) / W1 6.476585 (strictly lower).
+  **Width ceiling: W≤8 is small-T (24 q-heads); use W=8** (measured: tail0 6.496149 vs tail1024
+  6.464423).
+- **WP-A3 DONE, verified** (`3037bb98` + `d78481cb`) — KLD top-K instrument. `EngineOptions::score_topk`
+  (default 0); `Engine::score_tokens` → `std::vector<ScoredTarget{logprob, topk}>`; app flags
+  `--score-topk K` (default 100), `--save-topk`, `--kld-base`; `report.json` `kld` block.
+  Verified: self-KLD exactly 0 / same-top 1.0; rk8v4 vs bf16-tail0 at W8 ctx1024 → mean KLD
+  0.002738 (tail0) → 0.000912 (tail1024), same-top 0.9726 → 0.9853.
+- **WP-F F1/F2/F5 DONE by code analysis** (`1a5d2202`) — draft tail=0 is structural; **no ring
+  pollution on rejection** (frontier-advance commit + causal mask + same-round shadow rewrite); R-D
+  does not trigger; `--mtp-attention-window` never reads `cache.tail`. Caveat: MTP verification width
+  `verify_window+1` can exceed 8 → those steps take Prompt and skip the tail.
+
+**In progress — WP-B (three-tier benefit campaign).** Harness `.deps/run-m5-wpb.bat` (resumable:
+skips any run whose `report.json` exists; writes `.deps/wpb.done` at the end). Matrix = storages
+{int8, rk8v4, rk4v4-e8} × tails {0,1024,2048} × ctx {8192,16384,32768}, each vs a per-ctx
+bf16-tail0 `--save-topk` reference; W=8; text `.deps/m5-longtext.txt` (160 KB → 32,764 scored
+tokens); model `D:\ninfer\ninfer-package\model\Qwen3.8-27B-GSQ-RCO-IQ3_XXS-vision-bf16-mtp.ninfer`.
+
+*Progress so far (ctx 8192, int8):* t0 mean KLD 0.001126 / same-top 0.9847; t1024 and t2048 dirs
+exist (`m5-wpb-int8-t{0,1024,2048}-c8192`). Reference `m5-ref-bf16-t0-w8-c8192.ptk` exists.
+**Remaining: 24 candidate runs + 2 refs (ctx 16384/32768).** ~2.5 min each → ~60 min.
+
+*Results summary command:* `python .deps/summarize-wpb.py` (reads `.deps/m5-wpb-*/report.json`).
+
+**Operational gotcha (cost three attempts — do not repeat).** The harness reaps tool-spawned
+children: both a plain `run_in_background` bash batch and a `start /b`-detached batch were **killed
+after ~3 minutes / 3 runs**. Run long GPU batches in **foreground chunks** (each Bash call ≤600 s,
+~3-4 runs) and re-invoke the resumable `.deps/run-m5-wpb.bat` — it continues where it stopped.
+Always check `tasklist | grep -i ninfer-perplexity` after each chunk (user requirement); it should be 0
+between chunks.
+
+**Remaining WPs (ready-to-run scripts):**
+- **WP-C** `.deps/run-m5-wpc.sh` — llamacpp `llama-perplexity.exe` + `model/Qwen3.8-27B-...-IQ3_XXS-mtp.gguf`;
+  default-f16 `--save-all-logits` baseline then `f16/q8_0/kvarn4 t0,t1024` with `--kl-divergence`;
+  `-c 4096 --chunks 8 -b 2048 -ub 512`. Run as `bash .deps/run-m5-wpc.sh`. Compare **incremental**
+  ΔKLD by byte tier only; state that llamacpp merges the tail at **all widths**.
+- **WP-F F3/F4/F5** `.deps/run-m5-wpf.sh` — `build-port/apps/ninfer.exe` (present) with
+  `--spec mtp --draft-tokens 7 --kv-tail-tokens {0,1024,2048}` on 5 prompts, `--max-new 256
+  --max-context 4096 --kv-dtype rk4v4-e8`; plus `--mtp-attention-window 128`. Spec diagnostics go to
+  stderr (`.deps/wpf/*.err`), answers to `.deps/wpf/*.out`.
+- **WP-D** (no pre-port rebuild — too costly): D3 evidenced by `node docs/config-calculator.test.mjs`
+  → **PASS**, incl. "tailBytes: N=0 leaves the golden engine reservation untouched" and the
+  262144-token int8 golden matching the engine's refusal figure. D1/D2/D4 via the product
+  `D:\ninfer\ninfer-package\engine\ninfer-serve.exe` (read-only) as cross-build corroboration, or
+  state as limited. **D4 is explicitly non-gating.**
+- **WP-E** — update `docs/performance.md` tail section + flip DoD §7.3 from BLOCKED using the WP-B/C
+  numbers, then remove/retire the campaign plan per AGENTS.md ("remove temporary plans when done").
+
+**Path note:** the donor product dir is `D:\ninfer\ninfer-package` (with the `n`).
+**Build env:** `.deps/build-target.bat <target> [jobs]` (VS2022 v143 + CUDA 13.3 + vcpkg under
+`.deps/vcpkg-root`); per-TU check `.deps/ptcheck.py` with `PTWT=<worktree>`. Builds take ~25 min
+(header change → wide rebuild).

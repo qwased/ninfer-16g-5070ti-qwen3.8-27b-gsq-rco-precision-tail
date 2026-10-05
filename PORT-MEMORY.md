@@ -457,5 +457,17 @@ merged to `main` after each landed sub-step.
   only rows written by the reading round can be observed. Plan risk R-D does **not** trigger. Caveat:
   MTP verification width `verify_window+1` can exceed 8 → those steps take Prompt and skip the tail.
   F3 (acceptance) / F4 (perf) are GPU runs still to do.
+- **WP-B IN PROGRESS (resumable):** `.deps/run-m5-wpb.bat` skips completed runs and writes
+  `.deps/wpb.done`. Matrix int8/rk8v4/rk4v4-e8 × tail {0,1024,2048} × ctx {8192,16384,32768}, W=8,
+  text `.deps/m5-longtext.txt` (32,764 scored tokens), reference = per-ctx bf16-tail0 `--save-topk`.
+  Done so far: ctx 8192 int8 t0/t1024/t2048 (`m5-wpb-int8-t*-c8192`) — t0 mean KLD 0.001126,
+  same-top 0.9847. Summarize with `python .deps/summarize-wpb.py`.
+- **Operational rule (learned the hard way):** long GPU batches must run in **foreground chunks**
+  (≤600 s, ~3-4 runs), re-invoking the resumable batch each time. Both `run_in_background` and
+  `start /b`-detached batches are **killed after ~3 min**. After every chunk verify
+  `tasklist | grep -i ninfer-perplexity` is empty (user requirement: no orphan processes).
+- **Ready but not yet run:** WP-C `.deps/run-m5-wpc.sh` (llamacpp KLD); WP-F F3/F4/F5
+  `.deps/run-m5-wpf.sh` (`ninfer.exe --spec mtp`); WP-D via the calculator test + product
+  `ninfer-serve.exe` (read-only corroboration). WP-E docs last.
 - Runs are strictly serial, single-owner, single GPU (5070 Ti); after **every** run check
   `tasklist`/`nvidia-smi` for orphan processes (user requirement) before starting the next.
