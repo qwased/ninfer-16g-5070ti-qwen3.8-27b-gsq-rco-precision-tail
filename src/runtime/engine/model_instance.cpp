@@ -103,6 +103,12 @@ void validate_options(const EngineOptions& options) {
     if (options.max_concurrency == 0 || options.max_concurrency > kMaximumConcurrency) {
         throw std::invalid_argument("Engine max_concurrency must be in [1,8]");
     }
+    if (options.score_topk < 0 || options.score_topk > kMaxScoreTopK) {
+        throw std::invalid_argument("Engine score_topk must be in [0,kMaxScoreTopK]");
+    }
+    if (options.score_topk != 0 && options.purpose != EnginePurpose::CausalScoring) {
+        throw std::invalid_argument("Engine score_topk requires a CausalScoring Engine");
+    }
     if (options.max_pending_requests == 0 || options.pending_timeout_ms == 0) {
         throw std::invalid_argument("Engine pending request capacity and timeout must be nonzero");
     }

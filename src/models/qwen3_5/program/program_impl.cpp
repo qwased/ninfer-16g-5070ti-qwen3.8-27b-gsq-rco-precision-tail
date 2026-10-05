@@ -148,6 +148,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
       continuation_capacity(normalized_private_capacity(plan.context_cache)),
       shared_prefix_capacity(plan.context_cache.max_shared_prefixes.value_or(0)),
       prefill_chunk(plan.prefill_chunk), score_width(plan.score_width),
+      score_topk(plan.score_topk),
       fast_prefill_kernel(plan.fast_prefill_kernel),
       draft_window(plan.draft_window), lookup_ngram(plan.lookup_ngram), mtp_policy(plan.mtp_policy),
       ngram_draft_window(plan.ngram_draft_window), ngram_min_match(plan.ngram_min_match),
@@ -173,6 +174,16 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
       score_logprobs_host(plan.causal_scoring ? std::make_optional<PinnedHostBuffer>(
                                                     kCausalScoreTile * sizeof(float))
                                               : std::nullopt),
+      score_topk_ids_host(plan.causal_scoring && plan.score_topk != 0
+                              ? std::make_optional<PinnedHostBuffer>(
+                                    static_cast<std::size_t>(plan.score_topk) * kCausalScoreTile *
+                                    sizeof(TokenId))
+                              : std::nullopt),
+      score_topk_logprobs_host(plan.causal_scoring && plan.score_topk != 0
+                                   ? std::make_optional<PinnedHostBuffer>(
+                                         static_cast<std::size_t>(plan.score_topk) *
+                                         kCausalScoreTile * sizeof(float))
+                                   : std::nullopt),
       ordinary_host(
           !plan.causal_scoring && plan.speculative_backend == SpeculativeBackend::None
               ? std::make_optional<PinnedHostBuffer>(sizeof(qwen3_5::OrdinaryDecodeIngress) +
@@ -586,11 +597,14 @@ ProgramImpl::~ProgramImpl() noexcept {
     }
 }
 
-std::vector<float> ProgramImpl::causal_score(PreparedPromptData&& prompt,
-                                             std::uint32_t first_target) {
+std::vector<ScoredTarget> ProgramImpl::causal_score(PreparedPromptData&& prompt,
+                                                    std::uint32_t first_target) {
     if (!causal_scoring || !score_hidden || !score_logprobs_host ||
         workspace_plan.causal_score == 0) {
         throw std::logic_error("Program was not constructed for causal scoring");
+    }
+    if (score_topk != 0 && (!score_topk_ids_host || !score_topk_logprobs_host)) {
+        throw std::logic_error("causal scoring top-K readback is not staged");
     }
     if (speculative_backend != SpeculativeBackend::None || vision_enabled || use_cuda_graph ||
         context_cache.enabled) {
@@ -629,7 +643,7 @@ std::vector<float> ProgramImpl::causal_score(PreparedPromptData&& prompt,
         if (!released) { throw std::logic_error("causal score resources could not be released"); }
     };
 
-    std::vector<float> output;
+    std::vector<ScoredTarget> output;
     output.reserve(token_count_size - first_target);
     std::vector<TokenId> staged_targets;
     staged_targets.reserve(kCausalScoreTile);
@@ -659,22 +673,61 @@ std::vector<float> ProgramImpl::causal_score(PreparedPromptData&& prompt,
             work.reset();
             mark_workspace_usage(workspace_plan.causal_score);
             const auto columns = static_cast<std::int32_t>(staged_columns);
+            const std::int32_t top_k = static_cast<std::int32_t>(score_topk);
             Tensor logits      = work.alloc(
                 DType::BF16, {dimension(parameters.model.config().text.vocab_size), columns});
             Tensor target_ids = work.alloc(DType::I32, {columns});
             Tensor logprobs   = work.alloc(DType::FP32, {columns});
-            Tensor hidden     = score_hidden->slice(1, 0, columns);
+            // Allocated in the order the causal-score workspace plan reserves them, so the
+            // selection planes and the head's linear scratch land where the dry run put them.
+            Tensor topk_ids =
+                score_topk == 0 ? Tensor{} : work.alloc(DType::I32, {top_k, columns});
+            Tensor topk_logprobs =
+                score_topk == 0 ? Tensor{} : work.alloc(DType::FP32, {top_k, columns});
+            Tensor hidden = score_hidden->slice(1, 0, columns);
             execution::project(hidden, parameters.text.output_head, logits, work, device.stream);
             CUDA_CHECK(cudaMemcpyAsync(target_ids.data, staged_targets.data(), target_ids.bytes(),
                                                     cudaMemcpyHostToDevice, device.stream));
-            ops::target_logprobs(logits, target_ids,
-                                              dimension(parameters.model.resources().public_token_count),
-                                              logprobs, device.stream);
+            const auto valid_rows = dimension(parameters.model.resources().public_token_count);
+            if (score_topk == 0) {
+                ops::target_logprobs(logits, target_ids, valid_rows, logprobs, device.stream);
+            } else {
+                ops::target_logprobs_topk(logits, target_ids, valid_rows, top_k, logprobs,
+                                          topk_ids, topk_logprobs, device.stream);
+            }
             CUDA_CHECK(cudaMemcpyAsync(score_logprobs_host->data(), logprobs.data, logprobs.bytes(),
                                                     cudaMemcpyDeviceToHost, device.stream));
+            if (score_topk != 0) {
+                CUDA_CHECK(cudaMemcpyAsync(score_topk_ids_host->data(), topk_ids.data,
+                                           topk_ids.bytes(), cudaMemcpyDeviceToHost,
+                                           device.stream));
+                CUDA_CHECK(cudaMemcpyAsync(score_topk_logprobs_host->data(), topk_logprobs.data,
+                                           topk_logprobs.bytes(), cudaMemcpyDeviceToHost,
+                                           device.stream));
+            }
             device.synchronize();
             const auto* host = static_cast<const float*>(score_logprobs_host->data());
-            output.insert(output.end(), host, host + staged_columns);
+            if (score_topk == 0) {
+                output.insert(output.end(), host, host + staged_columns);
+            } else {
+                // Both selection planes are [K, columns]: entry k of column c sits at k*columns+c,
+                // in descending log probability, so one target's distribution is contiguous.
+                const auto* ids = static_cast<const TokenId*>(score_topk_ids_host->data());
+                const auto* selected =
+                    static_cast<const float*>(score_topk_logprobs_host->data());
+                for (std::uint32_t column = 0; column < staged_columns; ++column) {
+                    ScoredTarget target;
+                    target.logprob = host[column];
+                    target.topk.reserve(score_topk);
+                    for (std::uint32_t rank = 0; rank < score_topk; ++rank) {
+                        const std::size_t index =
+                            static_cast<std::size_t>(rank) * staged_columns + column;
+                        target.topk.push_back(
+                            ScoreTopKEntry{.token = ids[index], .logprob = selected[index]});
+                    }
+                    output.push_back(std::move(target));
+                }
+            }
             staged_targets.clear();
             staged_columns = 0;
             work.reset();
@@ -739,7 +792,7 @@ std::vector<float> ProgramImpl::causal_score(PreparedPromptData&& prompt,
         }
         flush();
         if (output.size() != token_count_size - first_target) {
-            throw std::logic_error("causal score produced the wrong number of logprobs");
+            throw std::logic_error("causal score produced the wrong number of scored targets");
         }
         cleanup();
         return output;

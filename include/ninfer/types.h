@@ -358,6 +358,27 @@ enum class CudaMemoryPolicy : std::uint8_t {
     Mixed,
 };
 
+// One entry of a scored target's top-K next-token distribution. `logprob` is a natural-log
+// log-softmax value in the same domain as ScoredTarget::logprob, and both come from the same
+// per-column normalization, so a token present in both carries the identical float.
+struct ScoreTopKEntry {
+    TokenId token = -1;
+    float logprob = 0.0F;
+};
+
+// One scored target of Engine::score_tokens: the target token's own log probability, plus,
+// when EngineOptions::score_topk is nonzero, that position's top-K next-token distribution in
+// descending logprob order. `topk` is empty when the option is off and holds exactly
+// EngineOptions::score_topk entries otherwise.
+struct ScoredTarget {
+    float logprob = 0.0F;
+    std::vector<ScoreTopKEntry> topk;
+};
+
+// Widest top-K a scoring Program materializes per target. The device selection is a repeated
+// block-wide maximum, so K bounds the per-column work rather than any single array.
+inline constexpr int kMaxScoreTopK = 128;
+
 struct EngineOptions {
     std::filesystem::path artifact_path;
     std::filesystem::path chat_template_path;
@@ -433,6 +454,12 @@ struct EngineOptions {
     // is applied verbatim and therefore bypasses prefill_chunk's 128-token alignment, but is capped
     // by the planned prefill chunk, which sizes the staging buffers.
     std::uint32_t score_width          = 0;
+    // Causal-scoring top-K width. Zero (default) keeps the pre-existing behavior: score_tokens
+    // returns each target's own log probability and nothing else. A nonzero value additionally
+    // materializes, for every scored target, the K most probable next tokens with their log
+    // probabilities (a device-side top-K over the output head's logits), at the cost of K extra
+    // selection passes over the vocabulary per scored column. It is a CausalScoring-only option.
+    int score_topk                     = 0;
     KvCacheStorage kv_cache            = KvCacheStorage::BFloat16;
     // Exact KV tail: the newest N tokens per sequence are kept unquantized in a second page pool
     // so attention can merge a quantized body partial with an exact tail partial. Zero disables

@@ -80,9 +80,12 @@ public:
     // The bytes one token decodes to, special tokens included; they need not be whole UTF-8.
     [[nodiscard]] std::string token_bytes(TokenId token) const;
 
-    // Returns log p(tokens[i] | tokens[0..i)) for i in [first_target,tokens.size()).
-    [[nodiscard]] std::vector<float> score_tokens(std::vector<TokenId> tokens,
-                                                  std::uint32_t first_target);
+    // Returns one entry per target: log p(tokens[i] | tokens[0..i)) for i in
+    // [first_target,tokens.size()). Each entry's `topk` is empty unless
+    // EngineOptions::score_topk is nonzero, in which case it holds that position's top-K
+    // next-token distribution in descending log probability, in the same log-softmax domain.
+    [[nodiscard]] std::vector<ScoredTarget> score_tokens(std::vector<TokenId> tokens,
+                                                         std::uint32_t first_target);
 
     [[nodiscard]] std::uint32_t count_tokens(PromptInput input,
                                              const PreparationControl& control = {}) const;

@@ -18,4 +18,18 @@ void target_logprobs_launch(const Tensor& logits, const Tensor& target_ids, std:
     CUDA_CHECK(cudaGetLastError());
 }
 
+void target_logprobs_topk_launch(const Tensor& logits, const Tensor& target_ids,
+                                 std::int32_t valid_rows, std::int32_t k, Tensor& target_out,
+                                 Tensor& topk_ids, Tensor& topk_logprobs, cudaStream_t stream) {
+    const auto columns = static_cast<unsigned int>(logits.ne[1]);
+    target_logprobs_topk_kernel<kTargetLogprobsBlock>
+        <<<columns, kTargetLogprobsBlock, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(logits.data),
+            static_cast<const std::int32_t*>(target_ids.data),
+            static_cast<float*>(target_out.data), static_cast<std::int32_t*>(topk_ids.data),
+            static_cast<float*>(topk_logprobs.data), valid_rows, logits.ne[0], k,
+            static_cast<std::int32_t>(columns));
+    CUDA_CHECK(cudaGetLastError());
+}
+
 } // namespace ninfer::ops::detail

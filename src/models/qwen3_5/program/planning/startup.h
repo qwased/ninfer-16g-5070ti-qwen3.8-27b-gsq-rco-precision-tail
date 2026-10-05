@@ -103,6 +103,9 @@ struct SequencePlanningInputs {
     bool fast_prefill_kernel                = false;
     // Causal-scoring attention query tile width; zero keeps prefill_chunk. Never aligned.
     std::uint32_t score_width               = 0;
+    // Causal-scoring top-K width; zero keeps the target-logprob-only result. Bounds the
+    // selection workspace (k rows of the score tile) this plan reserves.
+    std::uint32_t score_topk                = 0;
     std::uint32_t draft_window              = 0;
     std::uint32_t lookup_ngram             = 0;
     MtpDraftPolicy mtp_policy               = MtpDraftPolicy::Fixed;
@@ -142,6 +145,8 @@ struct SequencePlanImpl {
     // Causal-scoring attention query tile width; zero keeps prefill_chunk. Carried unaligned so a
     // width<=8 pass selects the small-T route that reads the exact KV tail.
     std::uint32_t score_width               = 0;
+    // Causal-scoring top-K width; zero returns target log probabilities alone.
+    std::uint32_t score_topk                = 0;
     std::uint32_t draft_window              = 0;
     std::uint32_t lookup_ngram             = 0;
     MtpDraftPolicy mtp_policy               = MtpDraftPolicy::Fixed;

@@ -59,13 +59,14 @@ public:
     CausalScoreCore(const CausalScoreCore&)            = delete;
     CausalScoreCore& operator=(const CausalScoreCore&) = delete;
 
-    [[nodiscard]] std::vector<float> score(PreparedPrompt prompt, std::uint32_t first_target) {
+    [[nodiscard]] std::vector<ScoredTarget> score(PreparedPrompt prompt,
+                                                  std::uint32_t first_target) {
         // One synchronous public call owns the sole job slot until its result is delivered.
         std::scoped_lock call_lock(call_mutex_);
-        auto job                               = std::make_unique<Job>();
-        job->prompt                            = std::move(prompt);
-        job->first_target                      = first_target;
-        std::future<std::vector<float>> result = job->promise.get_future();
+        auto job                                = std::make_unique<Job>();
+        job->prompt                             = std::move(prompt);
+        job->first_target                       = first_target;
+        std::future<std::vector<ScoredTarget>> result = job->promise.get_future();
         {
             std::lock_guard queue_lock(queue_mutex_);
             if (stopping_) { throw std::runtime_error("causal scoring engine is stopping"); }
@@ -113,7 +114,7 @@ private:
     struct Job {
         PreparedPrompt prompt;
         std::uint32_t first_target = 0;
-        std::promise<std::vector<float>> promise;
+        std::promise<std::vector<ScoredTarget>> promise;
     };
 
     void worker_loop() noexcept {
@@ -129,7 +130,7 @@ private:
                 job = std::move(job_);
             }
             try {
-                std::vector<float> result;
+                std::vector<ScoredTarget> result;
                 {
                     std::scoped_lock lock(execution_mutex_);
                     result =

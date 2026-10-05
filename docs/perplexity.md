@@ -101,6 +101,47 @@ perplexity = exp(mean_nll)
 The first window scores `[1,min(context,N))`. Each later window advances by `stride` targets while
 retaining up to `context-stride` preceding tokens as local context. Streams never share history.
 
+## KLD against a reference (top-K)
+
+`--save-topk <path>` and `--kld-base <path>` add the distribution-level metric llama.cpp reports
+next to perplexity. `--save-topk` persists this run's per-target next-token distribution as a KLD
+reference (normally the `bf16` body with the tail off); `--kld-base` loads one and reports this
+run's KLD against it. Either flag enables the top-K instrument at `--score-topk K`, default 100.
+
+Each scored target then carries, besides its own log probability, the `K` most probable next tokens
+with their log probabilities. The selection runs on the device over the output head's logits in the
+same pass that produces the target log probability, so the two are in the same log-softmax domain
+and a token that is both a top-K member and the target carries the identical value.
+
+The comparison is `KLD(candidate || reference)` over the **union** of the two top-K sets plus the
+target token itself, with each side renormalized over that support; a token a side did not select is
+floored at that side's least probable top-K entry, the smallest value that side actually measured.
+Mass outside the union is dropped on both sides, exactly as llama.cpp's top-K KLD does, so only the
+*incremental* KLD between two runs is meaningful -- never its absolute value. Both flags report the
+median, mean, P99, P99.9 and maximum of the per-target KLD, Same-top% (the share of targets whose
+most probable token is identical, which is exact because the top-K argmax is the vocabulary argmax),
+and the mean difference of the scored target token's own log probability.
+
+The reference file is refused on load when its corpus, model, context, stride, score width, window
+mode or scored-token count differs from the run, so a KLD always compares the same scored positions;
+only the KV representation may differ, because that is what the comparison varies. Scoring a run
+against a reference taken from itself reports KLD 0 and Same-top 100% -- the self-check to run after
+any change to the instrument:
+
+```bash
+./build/apps/ninfer-perplexity models/qwen3_8_27b_gsq_rco_iq3_s.ninfer \
+  --corpus eval/corpora/perplexity-1m/manifest.json --quick --context 8192 --stride 4096 \
+  --kv-dtype bf16 --kv-tail-tokens 0 --save-topk out/bf16-t0.topk
+
+./build/apps/ninfer-perplexity models/qwen3_8_27b_gsq_rco_iq3_s.ninfer \
+  --corpus eval/corpora/perplexity-1m/manifest.json --quick --context 8192 --stride 4096 \
+  --kv-dtype rk4v4-e8 --kv-tail-tokens 1024 --kld-base out/bf16-t0.topk
+```
+
+The instrument costs `K` selection passes over the vocabulary per scored column, so a run with
+either flag is measurably slower than the same run without one. Its result lands in `report.json`
+as `kld`, with `topk` naming the reference paths and `execution.score_topk_tokens` the width.
+
 ## Comparing runs
 
 For a numerical comparison, keep the corpus, context, stride, and execution settings fixed except
@@ -112,6 +153,7 @@ are runtime results from the current artifact tokenizer and are recorded in each
 contain unrounded NLL/PPL values for every window, stream, domain, and the token-weighted overall
 aggregate.
 
-The schema-v4 report identifies the artifact's architecture, public name, actual weight formats
+The schema-v5 report identifies the artifact's architecture, public name, actual weight formats
 and prefill signature alongside the workload and numerical results; its execution configuration
-records `rope_yarn`, `rope_yarn_factor`, `rope_scaling_factor` and `rope_scaling_original_context`.
+records `rope_yarn`, `rope_yarn_factor`, `rope_scaling_factor`, `rope_scaling_original_context` and
+`score_topk_tokens`.

@@ -597,8 +597,8 @@ public:
 
     [[nodiscard]] RequestBasePlan plan_request(const PreparedPromptData& prompt,
                                                const runtime::ResolvedExecutionOptions& options);
-    [[nodiscard]] std::vector<float> causal_score(PreparedPromptData&& prompt,
-                                                  std::uint32_t first_target);
+    [[nodiscard]] std::vector<ScoredTarget> causal_score(PreparedPromptData&& prompt,
+                                                        std::uint32_t first_target);
     [[nodiscard]] std::optional<AdmissionCandidate> inspect_admission(
         const PreparedPromptData& prompt, const RequestBasePlan& base, runtime::LaneId destination,
         const ContinuationHandle* source, const SharedPrefixHandle* shared_source,
@@ -755,6 +755,8 @@ public:
     const std::uint32_t prefill_chunk;
     // Causal-scoring attention query tile width; zero keeps prefill_chunk. Carried unaligned.
     const std::uint32_t score_width;
+    // Causal-scoring top-K width; zero returns target log probabilities alone.
+    const std::uint32_t score_topk;
     const bool fast_prefill_kernel;
     const std::uint32_t draft_window;
     const std::uint32_t lookup_ngram;
@@ -865,6 +867,10 @@ public:
 
     std::optional<PinnedHostBuffer> round_host;
     std::optional<PinnedHostBuffer> score_logprobs_host;
+    // Causal-scoring top-K readback (score_topk > 0 only): one [score_topk, score tile] plane of
+    // token ids and one of log probabilities, in the order the selection wrote them.
+    std::optional<PinnedHostBuffer> score_topk_ids_host;
+    std::optional<PinnedHostBuffer> score_topk_logprobs_host;
     // The logits behind a request's first token, copied when the request reports log
     // probabilities.
     std::optional<PinnedHostBuffer> first_token_logits_host;

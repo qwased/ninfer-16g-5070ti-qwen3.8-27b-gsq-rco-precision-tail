@@ -607,6 +607,14 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                static_cast<std::int32_t>(kCausalScoreTile));
         matrix(causal_score, DType::I32, 1, static_cast<std::int32_t>(kCausalScoreTile));
         matrix(causal_score, DType::FP32, 1, static_cast<std::int32_t>(kCausalScoreTile));
+        if (plan.score_topk != 0) {
+            // The selection's two [K, tile] result planes, allocated in the same order the scoring
+            // flush allocates them (after the target logprobs, before the head's linear scratch).
+            matrix(causal_score, DType::I32, static_cast<std::int32_t>(plan.score_topk),
+                   static_cast<std::int32_t>(kCausalScoreTile));
+            matrix(causal_score, DType::FP32, static_cast<std::int32_t>(plan.score_topk),
+                   static_cast<std::int32_t>(kCausalScoreTile));
+        }
         linear_scratch(causal_score, parameters.text.output_head, 1, kCausalScoreTile);
         out.causal_score = finish(causal_score);
     }
@@ -1074,6 +1082,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->max_concurrency     = inputs.max_concurrency;
     impl->prefill_chunk       = inputs.prefill_chunk;
     impl->score_width         = inputs.score_width;
+    impl->score_topk          = inputs.score_topk;
     impl->fast_prefill_kernel = inputs.fast_prefill_kernel;
     impl->draft_window        = inputs.draft_window;
     impl->lookup_ngram        = inputs.lookup_ngram;
@@ -1365,6 +1374,7 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .prefill_chunk              = effective_prefill_chunk(parameters, options),
         .fast_prefill_kernel        = options.fast_prefill_kernel,
         .score_width                = std::min(options.score_width, options.max_context),
+        .score_topk                 = static_cast<std::uint32_t>(options.score_topk),
         .draft_window               = options.speculative.draft_tokens,
         .lookup_ngram               = options.speculative.lookup_ngram,
         .mtp_policy                 = options.speculative.mtp_policy,

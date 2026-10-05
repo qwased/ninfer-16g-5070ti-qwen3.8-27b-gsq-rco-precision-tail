@@ -22,6 +22,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <optional>
@@ -38,8 +39,13 @@ namespace {
 using Clock = std::chrono::steady_clock;
 using json  = nlohmann::json;
 using ninfer::perplexity::CorpusSelection;
+using ninfer::perplexity::KldAccumulator;
 using ninfer::perplexity::ScoreAggregate;
+using ninfer::perplexity::TopKReferenceProtocol;
 using ninfer::perplexity::WindowPlan;
+
+// Default top-K width of the KLD instrument: llama.cpp's --kl-divergence uses 100.
+constexpr std::uint32_t kDefaultScoreTopK = 100;
 
 struct Options {
     bool help_requested = false;
@@ -53,6 +59,13 @@ struct Options {
     // scores through the prompt attention route; a small value (<=8) selects the small-T decode
     // route that merges the exact KV tail. Preserves the scored token count and ordering.
     std::uint32_t score_width = 0;
+    // Top-K width of the next-token distribution each scored target additionally carries. Zero
+    // means "as requested by the flags below": off without them, kDefaultScoreTopK with either.
+    std::uint32_t score_topk = 0;
+    // Persist this run's per-target top-K distribution as a KLD reference.
+    std::optional<std::filesystem::path> save_topk;
+    // Compare this run against a persisted reference and report KLD statistics.
+    std::optional<std::filesystem::path> kld_base;
     bool disjoint             = false;
     int device                = 0;
 #if defined(NINFER_SM8X_COMPAT)
@@ -92,6 +105,14 @@ std::string usage_text() {
            "       (--score-width W scores in width-W attention query tiles; W<=8 selects the\n"
            "        small-T decode route that merges the exact KV tail, so the tail's on/off\n"
            "        difference becomes visible. Default 1024 = the prompt route)\n"
+           "       [--score-topk K] [--save-topk <path>] [--kld-base <path>]\n"
+           "       (--score-topk K materializes each scored target's K most probable next tokens\n"
+           "        with their log probabilities. Either of the other two flags enables it at K=100\n"
+           "        by default: --save-topk persists this run's per-target top-K distribution as a\n"
+           "        KLD reference, and --kld-base loads one and reports KLD against it, over the\n"
+           "        union of the two top-K sets plus the target token, both sides renormalized over\n"
+           "        that support, with a token missing from one side floored at that side's K-th log\n"
+           "        probability. Only incremental KLD between runs has meaning)\n"
            "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] [--output "
            "<directory>]\n"
            "       [--kv-tail-tokens N]\n"
@@ -152,6 +173,16 @@ Options parse_options(int argc, char** argv) {
         } else if (option == "--score-width") {
             out.score_width = parse_integer<std::uint32_t>(value("--score-width"), "score-width");
             if (out.score_width == 0) { usage_error("--score-width must be positive"); }
+        } else if (option == "--score-topk") {
+            out.score_topk = parse_integer<std::uint32_t>(value("--score-topk"), "score-topk");
+            if (out.score_topk == 0 ||
+                out.score_topk > static_cast<std::uint32_t>(ninfer::kMaxScoreTopK)) {
+                usage_error("--score-topk must be in [1,kMaxScoreTopK]");
+            }
+        } else if (option == "--save-topk") {
+            out.save_topk = std::filesystem::path(value("--save-topk"));
+        } else if (option == "--kld-base") {
+            out.kld_base = std::filesystem::path(value("--kld-base"));
         } else if (option == "--disjoint") {
             out.disjoint = true;
         } else if (option == "--device") {
@@ -233,6 +264,11 @@ Options parse_options(int argc, char** argv) {
     if (out.context < 2 ||
         (!out.disjoint && (out.stride == 0 || out.stride >= out.context))) {
         usage_error("context/stride must satisfy context>=2 and 1<=stride<context");
+    }
+    // Both reference flags need a distribution per target; the default width matches llama.cpp's
+    // --kl-divergence.
+    if (out.score_topk == 0 && (out.save_topk.has_value() || out.kld_base.has_value())) {
+        out.score_topk = kDefaultScoreTopK;
     }
     return out;
 }
@@ -336,6 +372,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     engine_options.device           = options.device;
     engine_options.max_context      = options.context;
     engine_options.score_width      = options.score_width;
+    engine_options.score_topk       = static_cast<int>(options.score_topk);
     engine_options.kv_cache         = options.kv;
     engine_options.kv_tail_tokens   = options.kv_tail_tokens;
     engine_options.lm_head_q4       = options.lm_head_q4;
@@ -396,6 +433,36 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
                  ninfer::product::format_pretty_duration(preflight_seconds));
 
     const std::filesystem::path output_directory = prepare_output_directory(options, load, corpus);
+    const std::uint32_t effective_score_width =
+        options.score_width == 0 ? 1024 : options.score_width;
+    const TopKReferenceProtocol reference_protocol{
+        .corpus_id        = corpus.corpus_id,
+        .model_name       = load.model_name,
+        .kv_dtype         = kv_name(options.kv),
+        .context          = options.context,
+        .stride           = options.disjoint ? options.context : options.stride,
+        .score_width      = effective_score_width,
+        .disjoint_windows = options.disjoint,
+        .top_k            = options.score_topk,
+        .scored_tokens    = total_scored_tokens,
+    };
+    // The KLD reference is consumed window by window in scored order, so it is loaded once up
+    // front and its protocol verified against this run before anything is scored.
+    std::vector<ninfer::ScoredTarget> kld_reference;
+    std::size_t kld_cursor = 0;
+    KldAccumulator kld;
+    if (options.kld_base) {
+        kld_reference =
+            ninfer::perplexity::load_topk_reference(*options.kld_base, reference_protocol);
+        logger->info("KLD reference | {} | {} targets | top-K {}",
+                     options.kld_base->string(),
+                     ninfer::product::format_pretty_count(kld_reference.size()),
+                     options.score_topk);
+    }
+    // This run's own distribution, collected only to be persisted by --save-topk.
+    std::vector<ninfer::ScoredTarget> saved_targets;
+    if (options.save_topk) { saved_targets.reserve(total_scored_tokens); }
+
     const Clock::time_point scoring_started      = Clock::now();
     logger->info("scoring | {} streams | {} tokens | {} windows",
                  ninfer::product::format_pretty_count(streams.size()),
@@ -428,20 +495,38 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
                 stream.tokens.begin() + static_cast<std::ptrdiff_t>(window.input_begin),
                 stream.tokens.begin() + static_cast<std::ptrdiff_t>(window.input_end));
             const Clock::time_point window_started = Clock::now();
-            std::vector<float> logprobs;
+            std::vector<ninfer::ScoredTarget> scored;
             try {
-                logprobs = engine.score_tokens(std::move(input), window.first_target);
+                scored = engine.score_tokens(std::move(input), window.first_target);
             } catch (const std::exception& error) {
                 throw std::runtime_error("scoring " + stream.source.id + " window " +
                                          std::to_string(window_index) + " failed: " + error.what());
             }
             const std::size_t expected = window.target_end - window.target_begin;
-            if (logprobs.size() != expected) {
+            if (scored.size() != expected) {
                 throw std::runtime_error("scoring returned an invalid target count for " +
                                          stream.source.id);
             }
             ScoreAggregate window_score;
-            window_score.add(logprobs);
+            window_score.add(scored);
+            if (options.kld_base) {
+                // Target j of this window is the stream token at target_begin + j: that is the
+                // token both distributions were conditioned on producing.
+                for (std::size_t index = 0; index < expected; ++index) {
+                    if (kld_cursor + index >= kld_reference.size()) {
+                        throw std::runtime_error("KLD reference ran out of targets");
+                    }
+                    kld.add(scored[index], kld_reference[kld_cursor + index],
+                            stream.tokens[window.target_begin + index]);
+                }
+                kld_cursor += expected;
+            }
+            if (options.save_topk) {
+                // Last use of this window's targets: they move into the persisted reference.
+                saved_targets.insert(saved_targets.end(),
+                                     std::make_move_iterator(scored.begin()),
+                                     std::make_move_iterator(scored.end()));
+            }
             stream_score.add(window_score);
             overall.add(window_score);
             domains[stream.source.domain].add(window_score);
@@ -501,6 +586,32 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
                  overall.ppl(), ninfer::product::format_pretty_duration(scoring_seconds),
                  ninfer::product::format_pretty_rate(
                      static_cast<double>(overall.scored_tokens) / scoring_seconds, "tok"));
+
+    // The top-K instrument. --save-topk persists this run as a future baseline; --kld-base
+    // compares this run against a persisted one. Both are gated on the scored positions rather
+    // than on the run, and the reference's protocol was checked before scoring began.
+    if (options.save_topk) {
+        if (saved_targets.size() != total_scored_tokens) {
+            throw std::runtime_error("top-K reference does not cover every scored token");
+        }
+        ninfer::perplexity::save_topk_reference(*options.save_topk, reference_protocol,
+                                                saved_targets);
+        logger->info("top-K reference saved | {} | {} targets | top-K {}",
+                     options.save_topk->string(),
+                     ninfer::product::format_pretty_count(saved_targets.size()),
+                     options.score_topk);
+    }
+    std::optional<ninfer::perplexity::KldSummary> kld_summary;
+    if (options.kld_base) {
+        if (kld_cursor != kld_reference.size()) {
+            throw std::runtime_error("KLD reference has unused targets");
+        }
+        kld_summary = kld.summary();
+        logger->info("KLD vs {} | {} targets | median {:.6g} | mean {:.6g} | same-top {:.4f}",
+                     options.kld_base->string(), kld_summary->targets, kld_summary->median,
+                     kld_summary->mean, kld_summary->same_top);
+    }
+
     json domain_reports = json::array();
     for (const auto& [domain, aggregate] : domains) {
         json item      = aggregate_json(aggregate);
@@ -509,8 +620,24 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     }
 
     const ninfer::MemorySummary memory = engine.memory_summary();
+    json kld_report = nullptr;
+    if (kld_summary) {
+        kld_report = json{
+            {"targets", kld_summary->targets},
+            {"top_k", options.score_topk},
+            {"support", "union of both top-K sets plus the target token"},
+            {"direction", "KLD(candidate || reference)"},
+            {"median", kld_summary->median},
+            {"mean", kld_summary->mean},
+            {"p99", kld_summary->p99},
+            {"p99_9", kld_summary->p999},
+            {"max", kld_summary->maximum},
+            {"same_top", kld_summary->same_top},
+            {"mean_target_logprob_delta", kld_summary->mean_target_logprob_delta},
+        };
+    }
     json report{
-        {"schema_version", 4},
+        {"schema_version", 5},
         {"metric",
          {{"name", "fixed-window truncated-context causal perplexity"}, {"log_base", "natural"}}},
         {"artifact",
@@ -545,6 +672,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
           {"prefill_chunk_tokens", 1024},
           {"score_tile_tokens", 1024},
           {"score_width_tokens", options.score_width == 0 ? 1024 : options.score_width},
+          {"score_topk_tokens", options.score_topk},
           {"kv_dtype", kv_name(options.kv)},
           {"kv_tail_tokens", options.kv_tail_tokens}}},
         {"timing",
@@ -557,6 +685,14 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
         {"streams", std::move(stream_reports)},
         {"domains", std::move(domain_reports)},
         {"overall", aggregate_json(overall)},
+        {"topk",
+         {{"enabled", options.score_topk != 0},
+          {"top_k", options.score_topk},
+          {"reference_saved",
+           options.save_topk ? options.save_topk->string() : std::string()},
+          {"reference_loaded",
+           options.kld_base ? options.kld_base->string() : std::string()}}},
+        {"kld", kld_report},
     };
 
     const std::filesystem::path temporary = output_directory / "report.json.tmp";
@@ -576,7 +712,14 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
               << corpus.mode << ", context/stride: " << options.context << '/'
               << (options.disjoint ? options.context : options.stride)
               << (options.disjoint ? " (disjoint windows)" : "") << ", score-width: "
-              << (options.score_width == 0 ? 1024 : options.score_width) << "\n\n";
+              << (options.score_width == 0 ? 1024 : options.score_width) << '\n';
+    if (options.score_topk != 0) {
+        std::cout << "top-K: " << options.score_topk << " tokens per scored target";
+        if (options.save_topk) { std::cout << ", reference saved to " << *options.save_topk; }
+        if (options.kld_base) { std::cout << ", reference loaded from " << *options.kld_base; }
+        std::cout << '\n';
+    }
+    std::cout << '\n';
     std::cout << std::left << std::setw(24) << "domain" << std::right << std::setw(16) << "tokens"
               << std::setw(16) << "mean_nll" << std::setw(16) << "ppl" << '\n';
     for (const auto& [domain, aggregate] : domains) {
@@ -586,8 +729,30 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     }
     std::cout << std::left << std::setw(24) << "overall" << std::right << std::setw(16)
               << overall.scored_tokens << std::setw(16) << std::fixed << std::setprecision(6)
-              << overall.mean_nll() << std::setw(16) << overall.ppl() << "\n\n"
-              << "score rate: " << std::setprecision(1)
+              << overall.mean_nll() << std::setw(16) << overall.ppl() << "\n\n";
+    if (kld_summary) {
+        std::cout << "KLD(candidate || reference) over " << kld_summary->targets
+                  << " targets, top-K " << options.score_topk << '\n'
+                  << "support: union of both top-K sets plus the target token, both sides\n"
+                  << "         renormalized over it; a missing side value is floored at that\n"
+                  << "         side's top-K minimum. Only incremental KLD has meaning.\n"
+                  << std::left << std::setw(24) << "median" << std::right << std::setw(16)
+                  << std::fixed << std::setprecision(6) << kld_summary->median << '\n'
+                  << std::left << std::setw(24) << "mean" << std::right << std::setw(16)
+                  << kld_summary->mean << '\n'
+                  << std::left << std::setw(24) << "P99" << std::right << std::setw(16)
+                  << kld_summary->p99 << '\n'
+                  << std::left << std::setw(24) << "P99.9" << std::right << std::setw(16)
+                  << kld_summary->p999 << '\n'
+                  << std::left << std::setw(24) << "max" << std::right << std::setw(16)
+                  << kld_summary->maximum << '\n'
+                  << std::left << std::setw(24) << "same_top" << std::right << std::setw(16)
+                  << std::setprecision(4) << kld_summary->same_top << '\n'
+                  << std::left << std::setw(24) << "mean_target_dlogp" << std::right
+                  << std::setw(16) << std::setprecision(6)
+                  << kld_summary->mean_target_logprob_delta << "\n\n";
+    }
+    std::cout << "score rate: " << std::setprecision(1)
               << static_cast<double>(overall.scored_tokens) / scoring_seconds << " tok/s\n"
               << "report: " << final << '\n';
     return 0;

@@ -352,7 +352,8 @@ std::string Engine::token_bytes(TokenId token) const {
     return impl_->active->frontend.token_bytes(token);
 }
 
-std::vector<float> Engine::score_tokens(std::vector<TokenId> tokens, std::uint32_t first_target) {
+std::vector<ScoredTarget> Engine::score_tokens(std::vector<TokenId> tokens,
+                                               std::uint32_t first_target) {
     nvtx::ScopedRange score_range(nvtx::Name::Score, nvtx::Category::Scoring,
                                   static_cast<std::uint64_t>(tokens.size()));
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
@@ -367,8 +368,8 @@ std::vector<float> Engine::score_tokens(std::vector<TokenId> tokens, std::uint32
     }
     PreparedPrompt prompt      = prepare_tokens(std::move(tokens), false);
     const std::size_t expected = prompt.summary().prompt_tokens - first_target;
-    std::vector<float> result  = std::visit(
-        [&](auto& core) -> std::vector<float> {
+    std::vector<ScoredTarget> result = std::visit(
+        [&](auto& core) -> std::vector<ScoredTarget> {
             using CoreState = std::remove_cvref_t<decltype(core)>;
             if constexpr (std::is_same_v<CoreState, std::unique_ptr<Impl::ScoringCore>>) {
                 return core->score(std::move(prompt.impl_->value), first_target);
