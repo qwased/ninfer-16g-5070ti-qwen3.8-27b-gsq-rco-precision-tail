@@ -733,16 +733,21 @@ above, which shares the route.
 **Ring population — which routes write it, and the one behavioural wrinkle.** After the fix every
 route that appends fills the ring for its own rows: the fused small-T entry shadows its step (the
 main model's decode path), and the Prompt launcher shadows its chunk (prefill, and bf16's short-window
-decode steps). The ring is still read only by the small-T family; `fp8`, `nvfp4` and `k8v4` carry no
-tail code at all, so their ring is allocated but never written or read (deviation #2). One wrinkle is
-worth stating because it is *not* a defect but makes a multi-chunk step deviate from the newest-N
-definition: a chunked small-T launch derives its exact/quantized boundary from the *chunk's* last
-position, not the step's newest, because the rows after the chunk have not been appended yet. The
-consequence is that a chunk merges a **superset** of the exact keys the newest-N rule would pick —
-i.e. it is never less accurate than the documented boundary — but the difference is visible to a
-strict oracle, so the oracle's chunked case keeps the whole step inside the tail (see
-`run_fused_chunked_ring_case`). The new oracle guards for all of this are
-`run_prompt_ring_write_case` (Prompt write, small-T read) and `run_fused_chunked_ring_case` (a chunk
+decode steps). Each writer keeps only the newest `64 * ring_pages` positions
+(`kv_tail_row_in_ring`, `ops/common/kv_tail_element.cuh`): the ring is a circular buffer of that many
+slots, so a launch wider than the ring (a prefill chunk longer than the retention) would otherwise
+place two rows on one slot with no ordering between the racing writers. A launch that already fits
+keeps every row, so nothing else changes. The ring is still read only by the small-T family; `fp8`,
+`nvfp4` and `k8v4` carry no tail code at all, so their ring is allocated but never written or read
+(deviation #2). One wrinkle is worth stating because it is *not* a defect but makes a multi-chunk step
+deviate from the newest-N definition: a chunked small-T launch derives its exact/quantized boundary
+from the *chunk's* last position, not the step's newest, because the rows after the chunk have not
+been appended yet. The consequence is that a chunk merges a **superset** of the exact keys the
+newest-N rule would pick — i.e. it is never less accurate than the documented boundary — but the
+difference is visible to a strict oracle, so the oracle's chunked case keeps the whole step inside the
+tail (see `run_fused_chunked_ring_case`). The new oracle guards for all of this are
+`run_prompt_ring_write_case` (Prompt write, small-T read; its `N = 64 / prompt = 128` variant is the
+one whose single launch is wider than the ring) and `run_fused_chunked_ring_case` (a chunk
 whose `column_begin` is above zero); both fail before the fix and pass after. `run_path_parity_case`
 bounds the merge's numeric floor (above). `ninfer_softmax_attention_test` is green (`ORACLE_EXIT=0`).
 

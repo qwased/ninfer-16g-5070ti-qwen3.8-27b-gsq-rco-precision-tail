@@ -47,6 +47,11 @@ __global__ void causal_attention_small_t_tail_shadow_kernel(
     const std::int64_t column_base =
         static_cast<std::int64_t>(column_begin) + static_cast<std::int64_t>(batch) * full_width;
     const int position = pos[column_base + token];
+    // Keep only the rows inside the newest `ring_pages * 64` positions: a launch wider than the ring
+    // (a Prompt prefill chunk, which this kernel also serves) would otherwise alias two rows onto one
+    // slot with no ordering between them (kv_tail_row_in_ring). The newest valid token is the launch's
+    // newest position, matching the tail partition's `pos[last]` window.
+    if (!kv_tail_row_in_ring(pos[column_base + valid - 1], position, ring_pages)) { return; }
     const int ring     = batch * ring_pages + ((position >> kPagedKVPageShift) % ring_pages);
     // The body kernel offsets this same source by the flat column base before it quantizes, so the
     // ring has to read the identical rows: a chunked launch starts above column 0 and a sequence

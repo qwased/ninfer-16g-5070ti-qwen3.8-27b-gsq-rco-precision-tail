@@ -12,13 +12,32 @@
 #include "ops/common/mma.cuh"
 
 #include "core/dtype.h"
+#include "core/paged_kv_cache.h"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
+#include <cstdint>
 #include <type_traits>
 
 namespace ninfer::ops {
+
+// The exact-tail ring (`PagedKVExactTailView`) is a circular buffer of `kPagedKVPageSize * ring_pages`
+// slots holding a sequence's newest positions. A single launch that covers more positions than there
+// are slots cannot place every row: positions `p` and `p + kPagedKVPageSize * ring_pages` address the
+// same slot, and the winner between the racing writers is unordered. Keep only the rows in the newest
+// `capacity` positions -- the newest `retention <= capacity` are all the tail partial reads -- which is
+// collision-free because any two kept positions lie in an interval shorter than `capacity`. A launch
+// whose span already fits (`<= capacity`) keeps every row, so the ordinary path is unchanged.
+// `newest_position` is the launch's newest position; positions are non-decreasing across a step's
+// rows, the same `pos[last]` invariant the tail partition's window uses. Every ring writer must call
+// this: the fused small-T shadow, the Prompt shadow and `ops::kv_cache_append`.
+__device__ __forceinline__ bool kv_tail_row_in_ring(std::int32_t newest_position,
+                                                    std::int32_t position,
+                                                    std::int32_t ring_pages) noexcept {
+    const std::int64_t capacity = static_cast<std::int64_t>(kPagedKVPageSize) * ring_pages;
+    return static_cast<std::int64_t>(newest_position) - position < capacity;
+}
 
 template <typename Elem>
 struct KvTailElement;

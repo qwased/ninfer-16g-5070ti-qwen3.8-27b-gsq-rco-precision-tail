@@ -138,6 +138,12 @@ packages, each mapped to concrete evidence. **Update on every step.** Status val
    touching an append path: **every route that appends rows must write the ring for those rows**, and
    the source offset must match the body kernel's flat column base.
 
+## Independent review (PORT-REVIEW-PLAN §8) — 2026-10-06
+
+| # | Check | Status | Evidence / command |
+|---|---|---|---|
+| R1 | PORT-REVIEW-PLAN §8 sweep: oracle re-run reproduces every guard and the merge's numeric floor; four latent/gap findings recorded | **DONE** | `.deps\run-oracle.bat` → `softmax_attention: PASS`, `ORACLE_EXIT=0` (`.deps/review-oracle.out`), incl. guards `fused-append empty-body`, `fused-append crossing`, `prompt-route ring write`, `fused-append chunked ring write`, `PATHPT rel_l2=1.8609e-03 max_abs=4.8828e-04`, `TAILGAIN`/`WIDETAIL`, graph-family `grid.y` pairs. Findings (detail in `PORT-JOURNAL.md` Step 57): (F1) `causal_small_t_tail_partition` starves the tail when `total_active == 1` (`small_t.cuh:175-177` floors after the clamp) — unreachable on the 82-SM target, no oracle coverage for `total_active<=2`; **(F3) FIXED — Step 58**: the ring shadow wrote every launch row to `(p/64)%page_count` with no newest-N filter, so a launch wider than `64*page_count` aliased two rows onto one slot (reachable with `prefill_chunk=1024` and `N≲960`); now gated by `kv_tail_row_in_ring` (`ops/common/kv_tail_element.cuh`) at all three ring writers (fused small-T shadow, Prompt shadow, `ops::kv_cache_append`), with case (0g) `prompt-ring … T=136 … tail=64` failing pre-fix (`ORACLE_EXIT=1`, `.deps/review-oracle-prefix.out`) and passing post-fix (`.deps/review-oracle-f3final.out`); (F4) the generation-route "character-identical 1078-char" claim has no artifact (`.deps/wpf2/longgen-{t0,t1024}.out` are 2 bytes); (F6) `report.json` hardcodes `prefill_chunk_tokens`/`score_tile_tokens = 1024` (`apps/perplexity/main.cpp:684-685`) |
+
 ## Outstanding characterisation (non-blocking; not acceptance criteria)
 
 - **Plan §5 "performance" row.** The end-to-end decode shape (prefill flat, decode a few percent

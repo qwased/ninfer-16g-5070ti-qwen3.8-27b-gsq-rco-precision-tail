@@ -90,6 +90,10 @@ __global__ void kv_cache_append_tail_bf16_kernel(const __nv_bfloat16* __restrict
     const int token    = tmp / Geometry::KVHeads;
     const int d        = vec * VecElems;
     const int position = positions[0] + token;
+    // Keep only the newest `ring_pages * 64` rows: an append wider than the ring would otherwise
+    // place two rows on one slot with no ordering between them (kv_tail_row_in_ring). `positions[0]`
+    // anchors the step and every append is contiguous, so the last token is the newest position.
+    if (!kv_tail_row_in_ring(positions[0] + tokens - 1, position, ring_pages)) return;
     const int ring     = (position / kPagedKVPageSize) % ring_pages;
     const std::int64_t src_off =
         static_cast<std::int64_t>(d) + static_cast<std::int64_t>(kKVCacheAppendFullHeadDim) *

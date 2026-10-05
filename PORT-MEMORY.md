@@ -698,3 +698,28 @@ pass the criterion), so it catches a future structural regression without being 
 `--greedy --seed 0 --max-new 256`, `rk4v4-e8`, tail0 vs tail1024 → **character-identical** 1078-char
 continuations (100% shared prefix). Post-fix only: no pre-fix `ninfer.exe` survives the in-place
 rebuild, so the pre-fix contrast for this route is the scoring A/B.
+
+## 5.15 Independent review (§8) and the ring-overflow fix (Step 57/58)
+
+A fresh-session review per `PORT-REVIEW-PLAN.md` §8 re-ran the oracle (green, `ORACLE_EXIT=0`) and
+recorded four findings + one debunked subagent claim in `PORT-DOD.md` (R1) and `PORT-JOURNAL.md`
+Steps 57–58. One was a real reachable defect and is now fixed:
+
+**F3 — the exact-tail ring writers streamed their whole launch with no newest-N filter.** The ring is
+`ring_pages` pages of 64 slots, so positions `p` and `p + 64*ring_pages` address the same slot; a
+launch covering more positions than the ring has slots raced two writers per slot with no ordering.
+The harness never hit it (`populate_tail` keeps every tail case within one ring capacity), but the
+Prompt route launches the whole prefill chunk, so with `prefill_chunk = 1024` and `N ≲ 960` a step
+aliased its own first rows onto its newest ones and the following tail read merged stale slots.
+**Fix:** `kv_tail_row_in_ring(newest_position, position, ring_pages)` in `ops/common/kv_tail_element.cuh`
+(the narrow tail header all three writers include) keeps a row iff it is within the newest
+`64*ring_pages` positions — collision-free, and a superset of the `retention <= capacity` the tail
+reads. Wired at the fused small-T shadow (`pos[column_base+valid-1]`), `ops::kv_cache_append`
+(`positions[0]+tokens-1`) and, through the fused kernel, the Prompt route. A launch whose span already
+fits (`<= capacity`) keeps every row, so `tail=0` and the ordinary path are unchanged. **Guard**
+`run_prompt_ring_write_case(h24, {bf16,rk8v4}, {fragmented,offset}, N=64, prompt=128, decode=8)` fails
+pre-fix (`ORACLE_EXIT=1`, `.deps/review-oracle-prefix.out`) and passes post-fix
+(`.deps/review-oracle-f3final.out`). Remaining review items (not fixed, non-blocking): F1 the
+`total_active == 1` partition hole (unreachable on 82 SMs), F4 the generation-route claim has no saved
+artifact, F5 the parity floor was unarchived (reproducible by re-running the oracle), F6
+`report.json`'s hardcoded tile metadata. See Step 57 for the full list.

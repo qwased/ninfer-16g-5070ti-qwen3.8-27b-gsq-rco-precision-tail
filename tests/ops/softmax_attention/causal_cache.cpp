@@ -4956,6 +4956,19 @@ int run_tail_cases() {
             run_prompt_ring_write_case(h24, plan, MappingPattern::Offset, 128, 128, 8, 2372u);
     }
 
+    // (0g) TOPTEST: the ring write when a single launch is wider than the ring. Here N = 64 is one
+    // 64-slot page while the Prompt step carries 128 rows, so a naive whole-launch write aliases
+    // positions 0..63 onto 64..127's slots with no ordering between the two writers. The write must
+    // keep only the newest ring capacity (kv_tail_row_in_ring), and the small-T tail then reads the
+    // newest 64 (72..135) intact. The pre-fix kernel races every slot of the first 64 rows; the
+    // harness deliberately keeps other tail cases within one ring capacity, so this is the one that
+    // exercises the overflow. See run_prompt_ring_write_case.
+    for (const CachePlan& plan : {kPlanBf16, kPlanRk8v4}) {
+        failures +=
+            run_prompt_ring_write_case(h24, plan, MappingPattern::Fragmented, 64, 128, 8, 2385u);
+        failures += run_prompt_ring_write_case(h24, plan, MappingPattern::Offset, 64, 128, 8, 2386u);
+    }
+
     // (0e) TOPTEST: the small-T merge's numeric floor. The same two-step sequence is run once with
     // the whole window inside the exact tail (N = window) and once with the tail off, on identical
     // bf16 rows; only the final small-T step's output is compared, and each run is also checked

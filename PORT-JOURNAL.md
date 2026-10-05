@@ -2157,3 +2157,165 @@ a tight golden. Docs: `docs/performance.md` (the floor table), `PORT-MEMORY.md` 
 `BUILD_EXIT=0`. The host syntax check `m5-check-host.bat` (`/Zs`, absolute cl path — never
 `call env-port.bat >nul`) preceded it, `HOST_EXIT=0`. Post-run: no `ninfer`/`perplexity` processes,
 `nvidia-smi` back to 48 MiB.
+
+## Step 57 — independent review per `PORT-REVIEW-PLAN.md` §8
+
+Task: read `PORT-DOD.md` + `PORT-MEMORY.md` + `PORT-REVIEW-PLAN.md`, walk the §8 suggested review
+order, and record what turns up as one row in `PORT-DOD.md` plus this Step. A claim is `DONE` only
+with a command that reproduces it. Four read-only subagents did the code reading (partition; the two
+fixes + guards; scoring/KLD; docs-vs-artifacts); the main agent did the state checks and ran the
+oracle. Every subagent finding recorded below was **re-verified by the main agent** before being
+written (one was a misread — see F-none).
+
+### §8.1 State (`PORT-REVIEW-PLAN` §1) — MATCHES
+`main @ f723a59f`, clean. The four `port/*` tips (`3037bb98`, `155fd1ab`, `6bfc36f7`, `edf39f23`)
+are all ancestors of `main` (`git merge-base --is-ancestor`), and each named merge carries its
+branch as second parent (`964d7be6→52b36257`, `a36746db→6bfc36f7`, `b691646e→155fd1ab`,
+`e8b22921→edf39f23`), so the branches are stale-but-merged and can be pruned. Diffstats match the
+brief exactly (`src include apps` 40 files +2167/−98; tests 6 files +1914/−64; docs 8 files
++611/−29). The "four `wip(unverified)`" note is off by one on the label — `f19425f1` is `wip(attn)`,
+not `wip(unverified)` — and older `wip*` commits predate the port; all are history, none survives
+unreviewed (every branch tip is in `main`).
+
+### §8.4 The oracle, re-run (the one command-reproducible check) — PASS
+`.deps\run-oracle.bat` (no redirect of `env-port.bat`; binary current: `ninfer_tests.exe` 03:51:49 >
+newest source 03:51:11). Output `.deps/review-oracle.out`: `softmax_attention: PASS`,
+`ORACLE_EXIT=0`, and the guard/quality markers are all present — `fused-append empty-body cache
+write` ×4, `fused-append crossing build` ×4, `prompt-route ring write` ×4, `fused-append chunked
+ring write` ×2, `PATHPT rel_l2=1.8609e-03 max_abs=4.8828e-04` ×2, `TAILGAIN` ×8, `WIDETAIL` ×8, and
+the graph-family block (`graph family=0 grid.y=8|16` for every pair). So §4 rows 1/2/3/5/6/8/9 are
+command-reproduced. Post-run: no `ninfer`/`perplexity` processes, `nvidia-smi` = 48 MiB.
+
+### Findings (all latent — none blocks the DoD as scoped; none is a regression)
+
+**F1 — `causal_small_t_tail_partition` starves the tail when `total_active == 1` (latent, function-level).**
+`small_t.cuh:169-179`: `body_active` is clamped to `total_active - 1` (`:176`, `body_limit` when the
+tail has keys) and only *then* floored at 1 (`:177`). When `total_active == 1` and `tail_keys > 0`,
+the clamp sets `body_active = 0`, the floor raises it back to 1, and `tail_active = total_active - 1
+= 0`: the tail kernel returns before writing (`small_t_tail.cuh:121`) and the reducer reads split 0
+only, so keys `[body_window, window)` are in *no* partial — silently dropped (with `tail_keys ==
+window` every output is 0). The comment at `:153-168` argues the case away but nothing asserts
+`total_active >= 2`. **Reachability:** needs `total_active == 1`, which on this 82-SM host requires
+`KVHeads <= sms*ctas_per_sm < 2*KVHeads` (`wave_splits == 1`) — a 2-4 SM MIG/part slice, not the
+target. **Coverage gap:** no oracle case reaches `total_active <= 2`. **Disposition:** add the
+precondition (or an assertion) if multi-tenant part-slices become a target; not a live 3090 bug.
+
+**F3 — the ring shadow has no newest-N filter, so a single launch can alias within the ring (latent, reachable).**
+`small_t_tail_shadow.cuh:37-63` streams the whole `valid` row set and writes every row to slot
+`(position>>6) % ring_pages` (`:50,62-63`) — no "newest N only" filter and no intra-launch ordering.
+Two positions in one launch collide iff they differ by `64*ring_pages`; since the ring is
+`page_count = ceil(N/64)` pages, a launch is safe **iff its position span <= 64*page_count**. The
+fused small-T shadow is always safe (width <= 8 <= 64). The Prompt shadow launches once for the
+whole chunk (`prompt.cu:307-319`), so with default `prefill_chunk = 1024` (`apps/cli/options.h:25`)
+and `N` small enough that `64*ceil(N/64) < 1024` (i.e. `N <= 960`), a 1024-wide prompt step aliases
+positions `p` and `p+64*page_count` and the losing write is undefined → later tail reads can merge a
+pre-N row. **Not a regression:** pre-fix the Prompt route wrote *nothing* (unconditionally wrong), so
+the fix is strictly better; this is the residual hole. **Coverage gap:** `run_prompt_ring_write_case`
+uses `prompt_tokens == tail_tokens == 128` (capacity == width, zero collisions) and the chunked guard
+is width <= 9, so no case exercises a launch span > capacity. Docs (`docs/performance.md` "Ring
+population", deviation #6/#7) do not state the span <= capacity precondition.
+
+**F4 — the generation-route identity claim has no durable artifact (evidence gap).**
+`PORT-MEMORY.md` §5.14 / Step-55 text claims tail0 vs tail1024 produced "character-identical 1078-char
+continuations (100% shared prefix)". `.deps/wpf2/longgen-t0.out` and `-t1024.out` are **2 bytes each**
+(the generated text went to stdout, which was not captured; the `.err` files hold only timing). So the
+post-fix generation A/B is asserted but not reproducible from `.deps/` — the scoring A/B (`docs/
+performance.md` Decode-width KLD) is the durable evidence for the Prompt-route repair. This mirrors the
+already-recorded §7 gap that the *pre-fix* generation A/B is unreproducible (no pre-fix binary); the
+post-fix side now also lacks a saved output.
+
+**F5 — the `run_path_parity_case` numeric floor is reproducible but was never archived (evidence gap, minor).**
+The parity table's numbers are in no saved `.deps` log (the oracle logs stop at the graph-family/PASS
+block). Re-running the oracle reproduces them exactly — this Step's run printed `PATHPT
+rel_l2=1.8609e-03 max_abs=4.8828e-04` (bf16, W=496/N=496, both mappings), matching the doc. So
+§4 row 8 *is* command-reproducible; only the raw capture is missing.
+
+**F6 — `report.json` misreports the effective tile (metadata, minor).**
+`apps/perplexity/main.cpp:684-685` hardcodes `prefill_chunk_tokens` and `score_tile_tokens` to `1024`,
+so a `--score-width 8` run records `score_tile_tokens: 1024` when the tile was 8 (and an
+INT8-aligned/non-default `prefill_chunk` is not reflected either). Scoring is unaffected;
+`score_width_tokens` (`:686`) and `reference_protocol.score_width` (`:448-456`) record the requested
+width, which equals the effective `min(W, prefill_chunk)` whenever `W <= prefill_chunk`.
+
+**F2 — inverted comment in the chunked-ring guard (cosmetic).**
+`tests/ops/softmax_attention/causal_cache.cpp:4875` says "a chunk's boundary is never older than the
+step's". The direction is the opposite: a chunk's boundary `max(0, p_k+1-N)` is `<=` the step's
+(`p_k <= p_last`), i.e. *older or equal* — which is exactly why the chunk merges a superset of exact
+keys and is the more accurate of the two. The assertion logic (keep the step inside the tail) is
+correct, so this is comment-only.
+
+**F-none — a subagent "finding" that did not survive verification.**
+The docs-vs-artifacts subagent reported the A4 gate as unsupported ("tail=0 W=1 8.423 vs W=1024
+8.391, 0.38% apart"). Re-reading the artifacts (`.deps/m5-a4b-rk8v4-t0-w1-c1024` = **6.488674** vs
+`-w1024` = **6.485412**, 0.05%; `-t1024-w1` = **6.466459**, strictly lower) shows the §5.13 claim is
+correct and its numbers are the ones on disk. Recorded so the misread is not mistaken for a defect.
+
+### Verified sound (no finding)
+- Merge correctness on every wired path, tail-off bit parity, graph-family stability, the 64 MiB + 4
+  MiB memory model, the 18/18 decode-width KLD matrix, the WP-F MTP table, and the llama.cpp `kvarn4`
+  cross-check all trace to raw artifacts and/or this run (`docs/performance.md` vs `.deps/*/report.json`
+  audited: headline tables MATCH, several to the last digit).
+- Reducer agreement: body, tail and reducer all call `causal_small_t_active_splits` with the same
+  `(window, launch_capacity, tokens, wave_splits, Int8)` tuple; the tail's indices `[body_active,
+  total_active)` always match `active_split_count`. No drop/double.
+- `--score-width`: `min(W, prefill_chunk)` is the only clamp; the workspace is planned over `[1, chunk]`
+  so any `W` is covered; `W=0` is bit-identical to the old 1024 tiles.
+- KLD instrument: union-of-top-K + target, renormalized, `direction = KLD(candidate||reference)` is
+  correct; `--score-topk 128` is accepted (strict `>` bound at all three layers); `same_top` is the
+  exact argmax with a smaller-id tie-break; top-K is over the full-vocab post-softmax distribution.
+- Fix A (`56fc8384`) and Fix B (`b99ba8d5`) implement exactly what `PORT-MEMORY.md` claims
+  (re-derived: the new append range equals the old on `body_window > 0`; the shadow source index now
+  matches the body kernel's `D*KVHeads*column_base` offset). All five guards fail on the pre-fix
+  kernel, so none is a pure passthrough tripwire.
+
+### Not done here (as scoped)
+Doc-only record; no fix was implemented (AGENTS.md: implement a fix when requested). No commit made
+(AGENTS.md: create commits only when requested) — the port protocol §6.2 would normally commit
+code+memory together; offer to commit on request. `PORT-MEMORY.md` §5 was not extended (the task
+scoped the record to `PORT-DOD.md` + this Step).
+
+## Step 58 — F3 fix: the exact-tail ring write keeps only the newest ring capacity
+
+The §8 review (Step 57) found that the exact-tail ring writers stream the **whole** launch into the
+ring with no "newest-N" filter. The ring is `ring_pages` pages of 64 slots, so positions `p` and
+`p + 64*ring_pages` address the same slot; a single launch covering more positions than there are
+slots therefore races two writers per slot with **no ordering guarantee** — the later-positioned row
+does not necessarily win. The harness never hit it because `populate_tail` deliberately keeps every
+tail case within one ring capacity ("Tail cases keep tokens <= 64 * page_count, so none occur",
+`causal_cache.cpp:1592`), but the production Prompt route launches the whole chunk at once
+(`prompt.cu:307-319`), so with the default `prefill_chunk = 1024` and `N ≲ 960`
+(`64*ceil(N/64) < 1024`) a prefill step aliases its own first rows onto its newest ones. The tail read
+that follows then merges stale slots.
+
+**Fix (`kv_tail_row_in_ring`, one predicate, all three writers).** Added
+`kv_tail_row_in_ring(newest_position, position, ring_pages)` to
+`src/ops/common/kv_tail_element.cuh` — the narrow tail header both write kernels already include (not
+`paged_kv_address.cuh`, which is included across the tree and would force a much wider rebuild). It
+keeps a row iff `newest_position - position < 64*ring_pages`, i.e. only the newest `capacity`
+positions. Two kept positions lie in an interval shorter than `capacity`, so the written set is
+collision-free; and since the tail reads the newest `retention <= capacity`, nothing the tail needs is
+dropped. A launch whose span already fits (`<= capacity`) keeps **every** row, so the ordinary path is
+bit-identical to before. Each writer supplies its own newest position:
+- fused small-T shadow (`small_t_tail_shadow.cuh:49-54`): `pos[column_base + valid - 1]`;
+- `ops::kv_cache_append` tail kernel (`append/kernel.cuh:92-96`): `positions[0] + tokens - 1`
+  (the append is contiguous);
+- the Prompt route uses the same fused kernel, so it is covered by the first.
+The `pos[last]` = newest invariant is the same one the tail partition's window already relies on
+(`small_t.cu:284-289`, `tail_covers`).
+
+**Guard (case 0g).** `run_prompt_ring_write_case(h24, plan, mapping, 64, 128, 8, seed)` — N = 64 is
+one 64-slot page, the Prompt step carries 128 rows, so `0..63` aliases onto `64..127`. Added for
+bf16 and rk8v4 × fragmented/offset. It is a **real fail-without-fix case** (not a tripwire): with the
+two filter calls neutered and the same tree rebuilt (`.deps/build-target.bat ninfer_tests`,
+`BUILD_EXIT=0`), the oracle reports `exact-tail-k/v: exact mismatch` on all four cases and
+`ORACLE_EXIT=1` / `softmax_attention: FAIL` (`.deps/review-oracle-prefix.out`); with the fix restored
+and rebuilt (`BUILD_EXIT=0`), `ORACLE_EXIT=0` / `softmax_attention: PASS` with the four
+`prompt-ring … T=136 … tail=64/bf16` cases green (`.deps/review-oracle-f3final.out`). No other case
+moved (the `tail=128` prompt-ring, the crossing/chunked/empty-body guards and the parity floor are all
+still green), which is the "span <= capacity keeps every row" clause doing its job.
+
+**Scope / residual.** The `p + 64*ring_pages` aliasing was the `prefill_chunk > capacity` regimen; it
+is now impossible for a single launch to write two rows to one slot. The pre-fix behaviour was not a
+regression (pre-`b99ba8d5` the Prompt route wrote the ring at all, so the fix is strictly better than
+both prior states). `tail=0` and every span-fitting launch are untouched. Build/run: two chunked
+incremental builds; after each GPU run, no `ninfer`/`perplexity` processes and `nvidia-smi` = 48 MiB.
