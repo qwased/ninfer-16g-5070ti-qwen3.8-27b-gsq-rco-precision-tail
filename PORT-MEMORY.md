@@ -508,9 +508,31 @@ merged to `main` after each landed sub-step.
   engine refusal figure). D1/D2/D4 not run — no pre-port build tree (multi-hour, >100 GB) and the
   product ships only `ninfer-serve.exe` (D4 non-gating). WP-E: `docs/performance.md` decode-width KLD
   section + `PORT-DOD.md` §7.3 `BLOCKED`→`NEGATIVE`. `PORT-M5-PLAN.md` §9 records the outcome.
-- **M5 FOLLOW-UP (the real remaining work):** fix the body+tail merge (newest rows not correctly handed
-  from the exact ring into the quantized body cache across rounds?), add a large-window oracle case
-  (window ≫ 67 keys, `ring_pages ≥ 3`), then re-run WP-B/C/F. Until then the tail's benefit is
-  **unproven** and `--kv-tail-tokens` should not be recommended.
+- **ROOT CAUSE of the body+tail defect (Step 46, code-derived).** It is not the merge and not the
+  split partition (both were exonerated). The **fused-append small-T kernel only writes the quantized
+  cache from *body* splits**: `causal_small_t_tail_partition` sets `body_active = 0` when
+  `body_window == 0` ("an empty body asks for none"), and both body kernels return at
+  `if (split >= active_split_count) return;` *before* the fused-append block
+  (`small_t_bf16.cuh:134`/`:143`, `small_t_i8.cuh:223`/`:232`). So while the exact tail covers the
+  whole window (`window ≤ N`, i.e. the earliest rows of any small-T-built sequence), **nothing is
+  appended to the quantized body cache** — the shadow kernel writes only the *ring*. Each current-step
+  row is only ever appended at its own step, so those rows are a **permanent hole**. Once the window
+  grows past N the body reads `[0, window−N)` from the cache and hits the hole. The append ownership
+  (`append_end = window` on the *last body split*) fixes this only when a body split exists.
+- **Why this matches every measured signature:** (a) `ctx = N` (whole window) is clean — the body
+  never reads the cache; (b) every `ctx > N` with a body is broken, worse as N/window shrinks the tail;
+  (c) `bf16` body+tail vs bf16 reference = KLD 0.137 (unwritten cache rows are read regardless of
+  precision); (d) tail-on KLD is ~storage-independent (garbage dominates) while tail-off spans 6×;
+  (e) the in-tree oracle never hits it — it drives the **cached** entry, whose ring+cache both come
+  from `kv_cache_append`, which has no `body_active == 0` skip.
+- **Trigger:** any run that feeds the *first* tokens through the small-T route, i.e. `--score-width ≤ 8`
+  from position 0 (the M5 harness), or a product sequence whose first N tokens are decoded width ≤ 8
+  before a prompt-route prefill. A normal `width > 8` prefill writes `[0, prefill)` and hides it.
+- **M5 FOLLOW-UP (the real remaining work):** make the append own the newest rows **independent of the
+  body split count** (e.g. have the tail/shadow path also quantize the current-step rows into the body
+  cache when `body_active == 0`, or drop the `body_active == 0` early-return gating for the append),
+  then add a large-window oracle case (window ≫ 67 keys, `ring_pages ≥ 3`, `body_window > 0` **and**
+  the earliest rows built through the small-T fused path), and re-run WP-B/C/F. Until then the tail's
+  benefit is **unproven** and `--kv-tail-tokens` should not be recommended.
 - Runs are strictly serial, single-owner, single GPU (5070 Ti); after **every** run check
   `tasklist`/`nvidia-smi` for orphan processes (user requirement) before starting the next.

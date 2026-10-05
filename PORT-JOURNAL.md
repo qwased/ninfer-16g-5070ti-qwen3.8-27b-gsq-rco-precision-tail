@@ -1687,3 +1687,36 @@ Completed the plan's storage and context coverage (W=8, 32,764 scored tokens, pe
 
 All measurements are recorded in `docs/performance.md` ("Decode-width KLD") with the raw harnesses in
 `.deps/` (`run-m5-{save,kld,wpb,thresh,ctxext,wpc,wpf}`).
+
+### Step 46 — root cause of the body+tail defect (code-derived, no GPU)
+
+Traced the WP-B defect to source. It is **not** the merge, **not** the split partition (both were
+exonerated earlier), and **not** double-counting (the Step 44 hypothesis). Root cause:
+
+- The fused-append small-T kernel writes the quantized cache **only from body splits**.
+  `causal_small_t_tail_partition` (`small_t.cuh:164-171`) sets `body_active = 0` when
+  `body_window == 0` ("an empty body asks for none"). Both body kernels then exit at
+  `if (split >= active_split_count) return;` — before their fused-append block
+  (`small_t_bf16.cuh:134`, `small_t_i8.cuh:223`) — for *every* split in the launch.
+- So while the exact tail covers the whole window (`window ≤ N`), **no row is written to the quantized
+  body cache**. The shadow kernel writes only the *ring*. Each row is appended at its own step only, so
+  the rows processed in that phase are a **permanent hole**; once the window grows past N the body reads
+  `[0, window−N)` from the cache and hits it.
+- The fused-append ownership (`append_end = window` on the last body split,
+  `small_t_bf16.cuh:168-170`, `small_t_i8.cuh:260-262`) patches this **only when a body split exists**.
+
+Evidence mapping (every measured signature, one mechanism):
+
+| observation | explanation |
+|---|---|
+| `ctx = N` (whole window) clean | body never reads the cache → hole unread |
+| every `ctx > N` with a body broken, worse as N/window falls | the read hole `[0, window−N)` shrinks in fraction as window grows |
+| bf16 body+tail vs bf16 ref = KLD 0.137 | unwritten rows are read whatever the precision |
+| tail-on KLD ≈ storage-independent, tail-off spans 6× | garbage dominates; body coding no longer matters |
+| oracle passes | it drives the **cached** entry; ring+cache both come from `kv_cache_append`, which writes every row unconditionally (no `body_active == 0` skip) |
+
+Trigger: `--score-width ≤ 8` from position 0 (perplexity builds the whole context through the small-T
+route — `program_impl.cpp:740-792` loops `cursor = 0` in `score_tile` increments), or any product
+sequence whose first N tokens are decoded at width ≤ 8 before a `width > 8` prefill. A normal prefill
+writes `[0, prefill)` and hides it. Recorded in `PORT-MEMORY.md` §5.13 and `PORT-M5-PLAN.md` §9; the fix
+is to make the append own the newest rows independent of the body split count, then re-run WP-B/C/F.

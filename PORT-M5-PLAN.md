@@ -178,11 +178,19 @@ merge defect; repeat after the fix.
 **WP-E — DONE.** `docs/performance.md` gained the decode-width KLD / llamacpp / speculation sections;
 `PORT-DOD.md` §7.3 `BLOCKED`→`NEGATIVE` with the M5 evidence.
 
-**Follow-up (the real remaining work):** fix the body+tail merge (leading hypothesis: with a non-empty
-body the newest rows are not correctly handed from the exact ring into the quantized body cache across
-rounds, so later rounds' bodies read un-written rows — see Step 44/§8 deviation #3), add a large-window
-oracle case (window ≫ 67 keys, `ring_pages ≥ 3`), then re-run WP-B/C/F. Until then the tail's benefit
-is unproven and `--kv-tail-tokens` should not be recommended.
+**Follow-up (the real remaining work) — root cause now closed (Step 46).** The defect is not the merge
+and not the split partition. The fused-append small-T kernel writes the quantized cache **only from
+body splits**; when `body_window == 0` the partition sets `body_active = 0` and both body kernels
+return before their fused-append block, so while the tail covers the whole window (`window ≤ N`) the
+rows are never quantized into the body cache (the shadow kernel writes only the ring). Those rows are
+appended only at their own step, so they are a permanent hole; once `window > N` the body reads
+`[0, window−N)` and hits it. This explains `ctx = N` clean, every `ctx > N` broken, the bf16 0.137
+(self-precision) tell, the storage-independent tail-on KLD, and why the oracle (which drives the
+*cached* entry via `kv_cache_append`, with no `body_active == 0` skip) never sees it. Fix: make the
+append own the newest rows independent of the body split count; then add a large-window oracle case
+(window ≫ 67 keys, `ring_pages ≥ 3`, `body_window > 0`, earliest rows built through the fused path) and
+re-run WP-B/C/F. Until then the tail's benefit is unproven and `--kv-tail-tokens` should not be
+recommended.
 
 ## 8. Discipline and risks
 
