@@ -2109,3 +2109,51 @@ whose routes merge it (bf16 + the INT8 family); fp8/nvfp4/k8v4 stay inert by des
 `run-m5-wpf.sh` dropped it and all 22 runs died instantly with `CreateFileW: Win32 error 3` at
 artifact inspect, which looks exactly like a deleted file (cmd/PowerShell/`ninfer.exe` cannot resolve
 the wrong name, while the correct one is fine). Always copy the path; never retype it.
+
+## Step 56 — the merge's numeric floor, measured directly (the tail is not the culprit)
+
+Item 2 of the M5 follow-up list: is the ~9.2e-4 mean-KLD floor (whole-window bf16 tail vs a bf16-tail0
+reference) a numeric limit or a residual defect? Answer: **numeric** — and now measured directly rather
+than inferred. New oracle case `run_path_parity_case` (`tests/ops/softmax_attention/causal_cache.cpp`,
+wired into `run_tail_cases` as case 0e).
+
+**Method.** One persistent cache, a Prompt-width step (488 rows) then a small-T step (8 rows) — the
+`run_prompt_ring_write_case` shape, chosen because it is the one in which *both* routes write the exact
+ring. The sequence runs twice: once with the whole window inside the tail (`N = window = 496`, so
+`body_window == 0` and the exact-tail partial scores everything) and once with the tail off (`N = 0`,
+the bf16 body scores everything). Both runs read identical exact-bf16 rows — the tail run from the ring
+the two steps filled (independently pinned by the 0c/0d guards below), the body run from the bf16 body
+cache — so the only differences are which of the two byte-equal kernels scores the keys and how they
+are grouped into splits: the tail partition keeps the body one split short of the reducer's range
+(`causal_small_t_tail_partition`), so the tail divides the window into one fewer split. Only the final
+small-T step's output is compared, and each run is also checked against the plain causal FP32 oracle.
+bf16 is the only plan that isolates this: on a quantized storage the tail replaces quantized rows with
+exact ones, so the gap would measure the body's quantization instead.
+
+**Result** (two mappings; oracle green, `ORACLE_EXIT=0`):
+
+| mapping | tail vs FP32 | body vs FP32 | tail vs body | max abs |
+|---|---:|---:|---:|---:|
+| fragmented | 2.0365e-03 | 2.0290e-03 | 1.8609e-03 | 4.8828e-04 |
+| offset | 2.0205e-03 | 2.0210e-03 | 1.8360e-03 | 4.8828e-04 |
+
+The two paths are equally near the oracle (each uses ~17–20% of the bf16 criterion's 2.8e-3) and their
+mutual gap is *below* the sum of their errors — a largely shared realization error, not an extra one.
+The decisive tell is `max abs = 4.8828e-04 = 2^-11`, **exactly one bf16 ULP** for a magnitude in
+`[0.125, 0.25)`: the biggest disagreement between the two paths is a single bf16 rounding step. That is
+the signature of one arithmetic under two split groupings; a dropped, duplicated or mis-addressed key
+would show many ULPs or a non-power-of-two maximum. So the floor is the small-T path's own fp32/bf16
+reduction order (the probability rounded to bf16 before the P·V MMA, `exp2_approx`), and lowering it
+means a higher-precision probability path in the *body* kernel too — a merge-fidelity follow-up, not a
+tail fix.
+
+**Guard.** `run_path_parity_case` asserts `rel_l2(tail, body) <= 2 × criterion` — the triangle bound
+that already follows from both passing the criterion, so it is a structural-defect tripwire rather than
+a tight golden. Docs: `docs/performance.md` (the floor table), `PORT-MEMORY.md` §5.14, `PORT-DOD.md`
+"outstanding characterisation".
+
+**Build/run note.** Only the edited host TU + relink: `build-target.bat ninfer_tests` →
+`[3/4] Building CXX … causal_cache.cpp.obj` / `[4/4] Linking CXX executable tests\ninfer_tests.exe`,
+`BUILD_EXIT=0`. The host syntax check `m5-check-host.bat` (`/Zs`, absolute cl path — never
+`call env-port.bat >nul`) preceded it, `HOST_EXIT=0`. Post-run: no `ninfer`/`perplexity` processes,
+`nvidia-smi` back to 48 MiB.

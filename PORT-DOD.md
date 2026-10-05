@@ -149,12 +149,17 @@ packages, each mapped to concrete evidence. **Update on every step.** Status val
 - **M4** (plan §4, optional: exact pool on host/disk tier; per-request tail observability API) is not
   started, by design — the plan gates it on a real need after M3 ("仅在 M3 后确有需求时启动").
 - **WP8** (transaction/rollback) remains deferred; see deviation #4.
-- **Merge numeric fidelity — the tail's own floor (Step 55).** After the two write-side fixes the
+- **Merge numeric fidelity — the tail's own floor (Steps 55/56).** After the two write-side fixes the
   tail-on mean KLD against an exact reference settles at ~9.2e-4 (`same_top` ~0.986) even when the body
   is *empty* and every merged row is exact bf16 — i.e. the residual is the small-T path's fp32/bf16
-  reduction order, not a data defect. It is the figure a future merge-fidelity change would have to
-  beat, and it is what caps the tail's benefit for the coarsest bodies. Not a gate; recorded so it is
-  not re-discovered as a defect.
+  reduction order, not a data defect. **Confirmed directly (Step 56)** by the new oracle case
+  `run_path_parity_case`: the whole-window tail path and the whole-window body path, on identical bf16
+  rows, each sit at ~2.0e-3 vs the FP32 oracle (~17% of the bf16 criterion) and differ from each other
+  by `rel_l2 ≈ 1.86e-3` with **max abs exactly one bf16 ULP (2^-11 = 4.8828e-04)** — the signature of
+  one arithmetic under two split groupings, not a dropped/mis-addressed key. It is the figure a future
+  merge-fidelity change would have to beat, and it caps the tail's benefit for the coarsest bodies.
+  Not a gate (the case's assertion is only the triangle bound `2 × criterion`); recorded so it is not
+  re-discovered as a defect.
 - **Generation-route A/B is not reproducible pre-fix** (Step 55): the fix was rebuilt in place, so the
   pre-fix `ninfer.exe` no longer exists. The pre-fix contrast for that route is the scoring A/B, which
   shares it. Re-running a pre-port-style generation A/B would need a second build tree (as WP-D D1/D2

@@ -692,13 +692,35 @@ A bf16 body with an exact tail should be no worse than rk8v4's, and it now is (0
 post-fix bf16 is at the *same* level as the quantized tier rather than two orders above it, and its max
 KLD is the smallest of the three. The rk8v4 cell is bit-identical pre/post fix (the same double to the
 last digit, 0.0011331605820924095) and the tail-off control stays exactly KLD 0 / `same_top` 1.0 — the
-fix is tail-on/Prompt-route-only. **The residual ~1e-3 is the merge's own numeric floor, not a
-remainder of the defect:** the whole-window case (`ctx 2048`, `N=2048`, so the body is *empty* and the
-merge is a single tail partial over exact bf16 values) lands on the same figure — pre-fix 0.20684 →
-post-fix **0.00091878**, `same_top` 0.9861 — and the Step-41 whole-window rk8v4 case gave 0.000912. So
-after the fix the tail's benefit is bounded by the small-T path's fp32/bf16 reduction order, ~1.4% of
-top-1 flips on this corpus, not by anything structural. Improving that fidelity is a follow-up
-opportunity, not a blocker.
+fix is tail-on/Prompt-route-only.
+
+**The residual ~1e-3 is the merge's own numeric floor, not a remainder of the defect** — and the new
+oracle case `run_path_parity_case` now measures it directly instead of inferring it. The whole-window
+case (`ctx 2048`, `N=2048`, so the body is *empty* and the whole window is scored by the exact-tail
+partial over exact bf16 values) lands on the same figure as the mixed body+tail case — pre-fix 0.20684
+→ post-fix **0.00091878**, `same_top` 0.9861 — and the Step-41 whole-window rk8v4 case gave 0.000912.
+The parity case runs the *same* two-step sequence (a Prompt-width step then a small-T step, so both
+routes write the ring) twice — once with the whole window inside the exact tail and once with the tail
+off — on identical bf16 rows, and compares only the final step's output, each also judged against the
+plain causal FP32 oracle:
+
+| mapping | tail vs FP32 | body vs FP32 | tail vs body | max abs |
+|---|---:|---:|---:|---:|
+| fragmented | 2.0365e-03 | 2.0290e-03 | **1.8609e-03** | **4.8828e-04** |
+| offset | 2.0205e-03 | 2.0210e-03 | **1.8360e-03** | **4.8828e-04** |
+
+The two paths are *equally* close to the FP32 oracle — each uses ~17% of the bf16 criterion's 2.8e-3
+allowance — and their mutual gap is smaller than the sum of their errors, i.e. a largely shared
+realization error rather than an extra one. The tell is `max abs = 4.8828e-04 = 2^-11`, exactly one
+bf16 ULP for a value in `[0.125, 0.25)`: the largest disagreement between the two paths is a single
+bf16 rounding step, which is precisely what "the same attention computed with a different split
+grouping" produces. The body kernels and the exact-tail kernel round the attention probabilities to
+BF16 (`__float2bfloat16`) before the P·V MMA and `exp2_approx` the exponentials, and the tail
+partition only divides the window into one fewer split (`causal_small_t_tail_partition`); a structural
+defect — a dropped, duplicated or mis-addressed key — would show as many ULPs, not one. So after the
+fix the tail's benefit is bounded by the small-T path's own fp32/bf16 rounding order, ~1.4% of top-1
+flips on this corpus, and lowering it means a higher-precision probability path in the *body* kernel
+too: a follow-up opportunity, not a blocker and not a tail fix.
 
 **Generation route: a >64-token prompt, greedy, tail0 vs tail1024** (`ninfer` cli, `rk4v4-e8`,
 `--max-new 256 --max-context 4096 --greedy --seed 0`, a 362-token prompt — one Prompt-route prefill
@@ -721,8 +743,8 @@ i.e. it is never less accurate than the documented boundary — but the differen
 strict oracle, so the oracle's chunked case keeps the whole step inside the tail (see
 `run_fused_chunked_ring_case`). The new oracle guards for all of this are
 `run_prompt_ring_write_case` (Prompt write, small-T read) and `run_fused_chunked_ring_case` (a chunk
-whose `column_begin` is above zero); both fail before the fix and pass after, and
-`ninfer_softmax_attention_test` is green (`ORACLE_EXIT=0`).
+whose `column_begin` is above zero); both fail before the fix and pass after. `run_path_parity_case`
+bounds the merge's numeric floor (above). `ninfer_softmax_attention_test` is green (`ORACLE_EXIT=0`).
 
 ### Cross-product check — llama.cpp `kvarn4` (same model family)
 

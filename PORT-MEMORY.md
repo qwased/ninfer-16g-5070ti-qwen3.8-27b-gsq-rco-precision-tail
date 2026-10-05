@@ -672,13 +672,27 @@ tail-off is bit-identical across builds (the paired control). The tail's cost dr
 pre-`56fc8384` `ninfer.exe`, exactly as `PORT-M5-PLAN.md` §11.3 recorded), so the tail-off row
 matching byte-for-byte across the two builds is what makes the comparison a valid paired A/B.
 
-**Numeric floor of the merge (Step 55).** bf16 `ctx 2048 --score-width 8` vs the same bf16-tail0
-reference: `N=1024` post-fix 0.00093566, and the **whole-window** probe `N=2048` (body empty → the
-merge is a single tail partial over exact bf16 values) post-fix **0.00091878** (pre-fix 0.20684),
-`same_top` 0.9861 — the same figure, so the residual ~1e-3 is the small-T path's own fp32/bf16
-reduction order (~1.4% top-1 flips on this corpus), not a remnant of the defect. This is the number a
-future merge-fidelity change would have to beat; it is also why `bf16` tail-on now sits in the same
-band as `rk8v4` (0.00113) instead of two orders above it.
+**Numeric floor of the merge (Step 55; measured directly in Step 56).** bf16 `ctx 2048
+--score-width 8` vs the same bf16-tail0 reference: `N=1024` post-fix 0.00093566, and the
+**whole-window** probe `N=2048` (body empty, so the whole window is scored by the exact-tail partial
+over exact bf16 values — `tail_active == total_active - 1` splits, not one) post-fix **0.00091878**
+(pre-fix 0.20684), `same_top` 0.9861 — the same figure, so the residual ~1e-3 is the small-T path's
+own fp32/bf16 reduction order (~1.4% top-1 flips on this corpus), not a remnant of the defect.
+
+Step 56 settles it at the attention output with a new oracle case, `run_path_parity_case`: the same
+two-step sequence (a Prompt-width step then a small-T step, so *both* routes write the ring) run twice,
+once with the whole window inside the exact tail and once with the tail off, on identical bf16 rows;
+only the final step's output is compared, each run also judged against the plain causal FP32 oracle.
+The two paths are *equally* near the oracle (tail 2.0365e-03 vs body 2.0290e-03, fragmented; 2.0205e-03
+vs 2.0210e-03, offset — each ~17% of the 2.8e-3 bf16 criterion) and their mutual gap is 1.8609e-03 /
+1.8360e-03 with **max abs 4.8828e-04 = 2^-11, exactly one bf16 ULP**. One ULP is the signature of the
+same arithmetic under a different split grouping (the body kernels and the exact-tail kernel both round
+the probabilities to BF16 and `exp2_approx` them; the tail partition only divides the window into one
+fewer split), whereas a dropped/duplicated/mis-addressed key would show many ULPs. So the floor is
+numeric. This is the number a future merge-fidelity change would have to beat; it is also why `bf16`
+tail-on now sits in the same band as `rk8v4` (0.00113) instead of two orders above it. Guard:
+`run_path_parity_case` asserts `rel_l2(tail, body) <= 2 × criterion` (the triangle bound given both
+pass the criterion), so it catches a future structural regression without being tight.
 
 **Generation route (Step 55).** `ninfer.exe`, 362-token prompt (one Prompt-route prefill step),
 `--greedy --seed 0 --max-new 256`, `rk4v4-e8`, tail0 vs tail1024 → **character-identical** 1078-char
