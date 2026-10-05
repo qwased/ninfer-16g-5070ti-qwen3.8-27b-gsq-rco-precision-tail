@@ -528,11 +528,14 @@ merged to `main` after each landed sub-step.
 - **Trigger:** any run that feeds the *first* tokens through the small-T route, i.e. `--score-width ≤ 8`
   from position 0 (the M5 harness), or a product sequence whose first N tokens are decoded width ≤ 8
   before a prompt-route prefill. A normal `width > 8` prefill writes `[0, prefill)` and hides it.
-- **M5 FOLLOW-UP (the real remaining work):** make the append own the newest rows **independent of the
-  body split count** (e.g. have the tail/shadow path also quantize the current-step rows into the body
-  cache when `body_active == 0`, or drop the `body_active == 0` early-return gating for the append),
-  then add a large-window oracle case (window ≫ 67 keys, `ring_pages ≥ 3`, `body_window > 0` **and**
-  the earliest rows built through the small-T fused path), and re-run WP-B/C/F. Until then the tail's
-  benefit is **unproven** and `--kv-tail-tokens` should not be recommended.
+- **M5 FOLLOW-UP (partly CLOSED, Step 48).** The cache hole is **fixed** (`56fc8384`, Step 47 plan in
+  §10): `body_active` floors at 1 whenever the tail has keys and the fused append is owned by the
+  last body split, hoisted above the empty-score-range return. Acceptance re-run on the harness that
+  exposed it: rk8v4 KLD 0.022539 -> 0.001133 (W=8) and 0.038912 -> 0.000933 (W=1) at ctx 2048 / N=1024,
+  tail-on now beats the tail-off control (0.002416), whole-window unchanged (0.001068 -> 0.001096),
+  `tail=0` bit-identical (oracle `N=0` parity PASS). The `window <= N` ppl moved -0.16% (fp32
+  split-order price, an improvement). **Still open:** `bf16` storage + tail is broken at scale for a
+  *separate* reason (whole-window vs `bf16 tail0` = 0.207; not the hole, not the ring element type) --
+  a second open defect, not a regression. `apps/perplexity` gained `--kv-tail-type bf16|f16`.
 - Runs are strictly serial, single-owner, single GPU (5070 Ti); after **every** run check
   `tasklist`/`nvidia-smi` for orphan processes (user requirement) before starting the next.

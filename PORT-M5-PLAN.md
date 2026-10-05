@@ -240,3 +240,14 @@ order); bounded ~`S·ε` ≈ 1e-6…8e-6, three-to-four orders below the defect 
   reads the hole). Plus a direct invariant check that the quantized cache holds `[0, window)` after
   an empty-body fused step.
 - Re-run WP-B/C/F only after the fix lands and the oracle passes.
+
+### 10.1 Execution outcome (Step 48)
+
+The fix landed as `56fc8384` and the acceptance re-run passed: rk8v4/int8 KLD drops 20-42x (0.022539 →
+0.001133 at W=8; 0.038912 → 0.000933 at W=1, ctx 2048, N=1024), tail-on now beats the tail-off control
+(0.002416), the whole-window case is unchanged (0.001068 → 0.001096) and `tail=0` stays bit-identical
+(oracle `N=0` bit parity PASS). The `window ≤ N` ppl moved −0.16% (the fp32 split-order price, an
+improvement). **One separate defect remains:** `bf16` storage + tail is broken at scale independent of
+this hole and of the ring element type (whole-window vs `bf16 tail0` = 0.207) — tracked as a new open
+item, not a regression. `apps/perplexity` now exposes `--kv-tail-type bf16|f16`. See `PORT-JOURNAL.md`
+Step 48 for the raw numbers.

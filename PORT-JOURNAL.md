@@ -1744,3 +1744,42 @@ Re-derived the fix's exact blast radius from the partition code:
 - **Fix plan** → `PORT-M5-PLAN.md` §10. Two files change behaviour (`small_t.cuh`,
   `small_t_bf16.cuh`, `small_t_i8.cuh`); `append_end` (tail-aware fused append) exists in exactly those
   two kernels, so fp8/nvfp4/k8v4 (untailed) and the prompt route are out of scope.
+
+### Step 48 — the fix lands, and the acceptance re-run
+
+Implemented the Step 47 plan (`56fc8384`): `small_t.cuh` floors `body_active` at 1 whenever the tail
+has keys; both body kernels hoist the fused append above the empty-score-range early return and switch
+the owner to the last body split. `ptcheck` on `small_t.cu` + `small_t_i8_w1_h24_append.cu` is clean;
+`ninfer_tests` builds; the full FP32 oracle suite is `PASS` (`softmax_attention: PASS`, `ORACLE_EXIT=0`),
+including the `N=0` bit-parity regression → `tail=0` is untouched.
+
+**Acceptance re-run (perplexity KLD, the harness that exposed the defect).** All against the saved
+`bf16 tail0` reference for the same protocol:
+
+| case | before | after | |
+|---|---|---|---|
+| rk8v4, `--score-width 1`, ctx 2048, N=1024 (the probe) | 0.038912 | **0.000933** | 42x |
+| rk8v4, `--score-width 8`, ctx 2048, N=1024 | 0.022539 | **0.001133** | 20x |
+| rk8v4, `--score-width 8`, ctx 2048, N=2048 (whole window) | 0.001068 | **0.001096** | unchanged |
+| rk8v4, `--score-width 1`, ctx 2048, N=0 (control) | — | **0.002416** | tail-on now beats it |
+
+The hole is closed: the tail's benefit is real on rk8v4/int8 at both widths and the fix leaves the
+whole-window case (and `tail=0`) alone. Whole-window ppl (rk8v4, ctx=N=1024, W=1) moved
+6.476584746 → 6.466458648 (−0.16%): the fp32 split-order effect of moving one split tail→body,
+amplified over 2046 tokens; it is an *improvement*, not a regression.
+
+**New open finding — `bf16` body + tail is broken separately.** Re-running the bf16 probe
+(`bf16`, W=8, ctx 2048, longtext) gives 0.137362 → 0.132846, i.e. the fix barely moves it. Isolating:
+- `bf16`, N=2048 = whole window (body contributes **nothing**, so the fix provably cannot change it),
+  vs the `bf16 tail0` reference = **0.206837** (median 0.0218, p99 3.96, max 16.3).
+- `bf16` with `--kv-tail-type bf16` (ring matches the body precision) = **0.133214**, i.e. the F16 ring
+  is not the cause.
+- The `bf16 tail0` self-comparison is exactly 0 (same_top 1.0), so the reference and instrument are
+  consistent.
+
+So bf16 storage + tail is wrong at scale (window ~2048, ring_pages 33) for a reason unrelated to the
+cache hole and unrelated to the ring element type — most likely the bf16 tail read/merge. bf16 was only
+a diagnostic probe here (the plan's tailed storages are int8/rk8v4/rk4v4-e8) and the oracle's
+small-window bf16 tail cases pass, so this is recorded as a **second, separate open defect**, not a
+regression from this fix. `apps/perplexity` gained `--kv-tail-type bf16|f16` to make the ring precision
+selectable (used above). Raw reports: `.deps/m5-fix-*`.

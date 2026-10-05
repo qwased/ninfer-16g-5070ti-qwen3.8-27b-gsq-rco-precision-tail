@@ -75,9 +75,11 @@ struct Options {
 #else
     ninfer::KvCacheStorage kv = ninfer::KvCacheStorage::Fp8E4M3Row256;
 #endif
-    // Exact KV tail: the newest N tokens per sequence stay unquantized (BF16) and attention merges
-    // an exact tail partial with the quantized body. Zero disables it.
-    std::int32_t kv_tail_tokens = 0;
+    // Exact KV tail: the newest N tokens per sequence stay unquantized and attention merges an exact
+    // tail partial with the quantized body. Zero disables it; the ring element type is F16 or BF16
+    // (see --kv-tail-type), independent of the body coding.
+    std::int32_t kv_tail_tokens      = 0;
+    ninfer::KvTailType kv_tail_type  = ninfer::KvTailType::Float16;
     bool quick                  = false;
     bool lm_head_q4                     = false;
     bool lm_head_q6                     = false;
@@ -115,7 +117,7 @@ std::string usage_text() {
            "        probability. Only incremental KLD between runs has meaning)\n"
            "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] [--output "
            "<directory>]\n"
-           "       [--kv-tail-tokens N]\n"
+           "       [--kv-tail-tokens N] [--kv-tail-type bf16|f16]\n"
            "       [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--mtp-experts-q4] "
            "[--gdn-state-fp16]\n"
            "       [--mlp-a8-decode] [--no-prefill-a8] [--rope-yarn] [--rope-yarn-factor F]\n"
@@ -217,6 +219,15 @@ Options parse_options(int argc, char** argv) {
             out.kv_tail_tokens =
                 parse_integer<std::int32_t>(value("--kv-tail-tokens"), "kv-tail-tokens");
             if (out.kv_tail_tokens < 0) { usage_error("--kv-tail-tokens must be non-negative"); }
+        } else if (option == "--kv-tail-type") {
+            const std::string_view dtype = value("--kv-tail-type");
+            if (dtype == "bf16") {
+                out.kv_tail_type = ninfer::KvTailType::BFloat16;
+            } else if (dtype == "f16") {
+                out.kv_tail_type = ninfer::KvTailType::Float16;
+            } else {
+                usage_error("--kv-tail-type must be bf16 or f16");
+            }
         } else if (option == "--output") {
             out.output = std::filesystem::path(value("--output"));
         } else if (option == "--lm-head-q4") {
@@ -375,6 +386,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     engine_options.score_topk       = static_cast<int>(options.score_topk);
     engine_options.kv_cache         = options.kv;
     engine_options.kv_tail_tokens   = options.kv_tail_tokens;
+    engine_options.kv_tail_type     = options.kv_tail_type;
     engine_options.lm_head_q4       = options.lm_head_q4;
     engine_options.lm_head_q6       = options.lm_head_q6;
     engine_options.embedding_q4     = options.embedding_q4;
@@ -674,7 +686,8 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
           {"score_width_tokens", options.score_width == 0 ? 1024 : options.score_width},
           {"score_topk_tokens", options.score_topk},
           {"kv_dtype", kv_name(options.kv)},
-          {"kv_tail_tokens", options.kv_tail_tokens}}},
+          {"kv_tail_tokens", options.kv_tail_tokens},
+          {"kv_tail_type", options.kv_tail_type == ninfer::KvTailType::BFloat16 ? "bf16" : "f16"}}},
         {"timing",
          {{"load_seconds", load.load_seconds},
           {"read_and_tokenize_seconds", preflight_seconds},
