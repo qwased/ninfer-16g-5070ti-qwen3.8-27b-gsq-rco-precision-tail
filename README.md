@@ -1,236 +1,234 @@
-# NInfer · Windows 16GB · Qwen3.8-27B GSQ-RCO
+# NInfer 16G · Qwen3.8-27B GSQ-RCO · KV 精度尾巴移植
 
 **简体中文** | [English](README.en.md)
 
-**RTX 5070 Ti / RTX 5080 / RTX 5090 · 本地推理与托盘管理**
+**RTX 5070 Ti / RTX 5080 / RTX 5090 · Windows 16GB · 本地推理**
 
-https://github.com/user-attachments/assets/9695e989-e3f2-4727-8735-48d00910d90a
+本仓库 = **RTX 50 系列 Windows 16GB 的 NInfer 成品分支**（Qwen3.8-27B GSQ-RCO Q3、CUDA 13 Native 引擎、托盘管理器）**+ 已完成的「KV 精度尾巴（precision tail）」移植**。
 
-**[下载引擎和模型（夸克网盘）](https://pan.quark.cn/s/28b896c4b0c0)** · **[单独打开视频](https://github.com/user-attachments/assets/9695e989-e3f2-4727-8735-48d00910d90a)** · **[5070 Ti 中文指南](docs/rtx-5070ti-windows.md)** · **[English guide](docs/rtx-5070ti-windows.en.md)** · **[下载与模型转换说明](docs/rtx-5070ti-windows-downloads.md)**
+本 README 记录本次**移植工作**的成果；产品安装、下载与部署请看 [RTX 5070 Ti Windows 指南](docs/rtx-5070ti-windows.md)（[English](docs/rtx-5070ti-windows.en.md)）与[下载说明](docs/rtx-5070ti-windows-downloads.md)。
 
-面向希望在 **Windows、约 16GB 独立显存**上运行 Qwen3.8-27B GSQ-RCO 的用户。本分支整理了 CUDA 13 Native 引擎、Windows 托盘管理器与日常启动配置：通过网页管理模型、保存参数、查看运行监控，并提供 **GSQ-RCO GGUF → `.ninfer`** 的转换步骤。
-
-下载目录包含 **Swift S 和 Swift XXS 两套模型**，模型合计约 **20 多 GB 磁盘空间**，完整运行目录当前约 **23.5 GB**，建议预留至少 **30 GB 磁盘空间**。这是文件占用，不是显存要求。
-
-**本仓库提供的预编译引擎与配套 `.ninfer` 模型成品，发布支持范围仅限 RTX 50 系列；本分支实测硬件为 RTX 5070 Ti 16GB。** RTX 5080、RTX 5090 的显存容量、可用上下文和合适参数因硬件而异，本分支尚未逐卡实测。
-
-**独立显存 16GB 及以上的 RTX 30 / RTX 40 系列，理论上也可以尝试，但本分支没有相应实测。** 其他系列需要针对目标显卡从源码构建引擎，并按相应配方转换模型；RTX 50 系列成品不能直接当作通用部署包。RTX 30 / 40 的常用构建架构分别为 `86` / `89`，当前成品引擎仅包含 `sm_120a` 机器码。不要直接套用相同的上下文容量或性能结论。可以把本仓库和对应部署指南交给 AI，协助完成源码构建、GGUF 转换和启动配置。
-
-本仓库：**[ninfer-16g-5070ti-5080-5090-qwen3.8-27b-gsq-rco](https://github.com/Ryan-gsq/ninfer-16g-5070ti-5080-5090-qwen3.8-27b-gsq-rco)**。上游汇总仓库：**[iamwavecut/ninfer-all](https://github.com/iamwavecut/ninfer-all)**。原始推理引擎：**[Neroued/ninfer](https://github.com/Neroued/ninfer)**。
-
-本分支在上游基础上提供 Windows / RTX 5070 Ti 构建、显存策略和管理器。下方保留上游项目的重要信息和贡献者出处，方便继续查阅。
+- 本仓库：**[qwased/ninfer-16g-5070ti-qwen3.8-27b-gsq-rco-precision-tail](https://github.com/qwased/ninfer-16g-5070ti-qwen3.8-27b-gsq-rco-precision-tail)**
+- 直接上游（本分支的基线）：**[Ryan-gsq/ninfer-16g-5070ti-5080-5090-qwen3.8-27b-gsq-rco](https://github.com/Ryan-gsq/ninfer-16g-5070ti-5080-5090-qwen3.8-27b-gsq-rco)**
+- 上游汇总仓库：**[iamwavecut/ninfer-all](https://github.com/iamwavecut/ninfer-all)**；原始推理引擎：**[Neroued/ninfer](https://github.com/Neroued/ninfer)**
 
 ---
 
-## 上游项目概览
+## TL;DR
 
-以下内容译自上游介绍。其中的硬件、模型、历史测试限制与性能数字属于上游工作，**不是本分支 Windows 16GB 运行包的实测或保证**。当前 RTX 5070 Ti 参数与性能请看 [Windows 部署指南](docs/rtx-5070ti-windows.md)。
+- 把 beellama.cpp 的 **KV 精度尾巴（KVCPT，`--kv-tail-tokens`）** 移植进 NInfer：给每个序列**最近 N 个 token 保留一份精确（F16）K/V 影子环**，attention 时把量化 body 与精确 tail **各算一次 FP32 partial，再做 online-softmax 合并**。
+- **零回退**：验收 64/64 格输出**逐字节相同**（含 MTP 投机、视觉、ctx 8192/32768、8 种存储），**显存逐位可复现**，decode **0/64** 格超过 2%。
+- **收益已量化**：decode-width KLD 在 **24/24** 格下降，收益随 body 变粗**单调递增**（`int8` 1.02–1.09× < `rk8v4` 2.04–2.41× < `rk4v4` 2.26–3.14× < `rk4v4-e8` 2.97–5.01×）。
+- 代价：N=1024、C=1 时**每序列 64 MiB** + 4 MiB 回滚预留；tail 打开时 decode 约 **−6%**（指示值），移植本身（tail 默认关闭）decode 中位 **−0.18%**。
+- 过程中发现并修复了**两个环写入缺陷**和一个环形容量越界守卫——它们是"收益一开始测不出来"的真正原因。见 §5。
 
-上游汇总线将多个 [NInfer](https://github.com/Neroued/ninfer) 分支整合到一起，覆盖 RTX 3090、RTX 4090、RTX 5090 和 RTX PRO 6000 Blackwell，并在此基础上继续开发。基础来自 [ashalliants/ninfer-3090](https://github.com/ashalliants/ninfer-3090) 的 `master`：包括 v0.11.0 和多 GPU 流水线阶段，其中大部分由 [Warlax](https://github.com/WarlaxZ) 编写，延续了 [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) 从 Neroued NInfer 开始的工作。
+## 1. 精度尾巴是什么
 
-另外还整合了 [TertiumOrganum1/ninfer-3090](https://github.com/TertiumOrganum1/ninfer-3090) 的补丁、[UDPSendToFailed/ninfer-4090](https://github.com/UDPSendToFailed/ninfer-4090) 及其贡献者的思路、提交给 [Neroued/ninfer](https://github.com/Neroued/ninfer) 的开放 PR，以及以下作者的工作：
+量化 KV cache 里最新的若干行被量化误差污染，而 attention 对**最近的 token 最敏感**。精度尾巴把"最近 N 个 token"的 K/V **不量化**保存进一个**设备端精确池**（影子环），attention 时：
 
-- [IMGillusion](https://github.com/IMGillusion/ninfer-disk-kv)
-- [Mirko Covizzi](https://github.com/MirkoCovizzi/ninfer-rtx5090-mobile)
-- Ian Ranson（[Wallawalla47](https://github.com/Wallawalla47/ninfer-custom)）
-- [tmark00](https://github.com/tmark00/ninfer)
-- David Oelfke（[gzenz/ninfer](https://github.com/gzenz/ninfer)）
+1. **body partial** —— 对量化 K/V 正常跑一遍 attention，得到 `(acc_b, m_b, l_b)`；
+2. **tail partial** —— 对精确 K/V 再跑一遍，得到 `(acc_t, m_t, l_t)`；
+3. **FP32 合并** ——
 
-各项改动保留原作者署名；[维护者与改动对应表](docs/maintainer/consolidated-line.md)列出作者和涉及文件。
-
-下文之外的引擎说明，例如构建、软件包、服务 API、支持模型和参数，可参考 **[NInfer-3090 原始 README](https://github.com/ashalliants/ninfer-3090#readme)** 与 **[NInfer-4090 原始 README](https://github.com/UDPSendToFailed/ninfer-4090#readme)**。上游新增的、会影响数值或服务行为的功能通常需要手动开启，有三项例外：
-
-- 按显卡实测 device profile 选择内核路线；`--device-profile off` 保留编译时的路线表。
-- 将 prefill chunk 对齐到显卡 SM 的完整调度批次；`NINFER_PREFILL_ALIGN=0` 保留用户请求的 chunk。
-- TertiumOrganum1 的三值权重预填充 tile；`NINFER_T2_A8_TILE=off` 恢复被替换的内核。
-
-## 上游参考性能
-
-下列数字测于 2026 年 9 月，每种显卡各一张，采用 greedy 采样；除特别标注外，均为单请求。具体设置和完整数据见[参考测试](docs/performance/reference-2026-09.md)。
-
-| 项目 | RTX 3090 | RTX 4090 | RTX 5090 | RTX PRO 6000 |
-|---|---:|---:|---:|---:|
-| **Ternary Bonsai 2 27B**，短对话（DFlash2，7 个草稿） | 202 tok/s | 256 tok/s | 397 tok/s | 381 tok/s |
-| 读入 261K-token 文档后的解码速度（最快草稿方案） | 90 tok/s | 123 tok/s | 218 tok/s | 218 tok/s |
-| 261K-token 输入的首 token 延迟 | 215 s | 102 s | 82 s | 78 s |
-| 填满后仍找到全部三个检索目标的最大上下文 | 970,752 | 958,464 | 978,944 | 1,048,576\* |
-| 八请求并发总吞吐（MTP，3 个草稿） | 551 tok/s | 824 tok/s | 1,063 tok/s | 1,155 tok/s |
-| **Qwen3.8-27B**，短对话（DFlash2，7 个草稿） | 118 tok/s | 149 tok/s | 236 tok/s | 237 tok/s |
-| 填满后仍找到全部三个检索目标的最大上下文 | 417,792 | 405,504 | 872,448 | 1,048,576\* |
-| 八请求并发总吞吐（MTP，3 个草稿） | 329 tok/s | 442 tok/s | 690 tok/s | 739 tok/s |
-
-\* 这是引擎上限。RTX PRO 6000（96 GB）在各种 KV 格式和草稿方案下都能以该容量启动；填满后，两个模型均找到三个目标中的两个。
-
-- **与同卡此前的 `master` 比较：**261K-token Bonsai 输入在 RTX 3090 上从 315 秒降至 215 秒，4090 从 138 秒降至 102 秒，5090 从 115 秒降至 82 秒；24 GB 显卡上随后进行的 `rk4v4` 解码快了 11–13%。短上下文解码仍受读取权重带宽限制，速度基本不变。Qwen3.8 在 RTX 5090 上的 8K–32K 输入预填充反而慢了 8–10%。
-- **RTX 3090 的 device profile：**262K 下的 `rk4v4` 验证注意力比编译路线快 3.2 倍。三张卡上的快速 prompt 内核配合 FP16 P·V 累加，使 prompt 注意力耗时减少 19–30%。
-- **草稿长度：**DFlash2 的 7 个草稿最适合短回答；长文档后的最佳范围为 3–7。MTP 目前最多支持 15 个草稿，但最快通常为 3–5。
-- **超过原生窗口：**在约 880K tokens 下，Bonsai 2 在所有卡上都找到三个预埋代码；达到 1,048,576 tokens 时，仅 RTX 5090 和 RTX PRO 6000 能容纳，但会漏掉约 943K 位置的目标。
-- **RTX PRO 6000：**96 GB 显存让所有配置都能以 1,048,576-token 上限启动，并至少剩余 50 GiB。与 RTX 5090 相比，预填充快 4–6%，解码慢 2–3%。
-
-## 上游汇总线增加了什么
-
-- **GGUF 块量化格式。** 支持按张量选择 ggml 量化类型的 Qwen3.8-27B GGUF，例如 ISTA-DASLab 的 GSQ-RCO，无需重新量化。`qwen3_8_27b_gguf` 配方原样复制每个量化张量的数据块；运行时直接计算全部 15 种 dense ggml 块格式。解码和验证使用向量内核，每列只解码一次权重；prompt 使用 llama.cpp 的整数 Tensor Core 内核。MTP、DFlash2、Vision 的使用方式与官方产物一致。3.5-bit GSQ-RCO IQ3_S 的 WikiText-2 困惑度为 7.071，与模型卡的 7.07 一致，官方产物为 7.286；权重占用从 15.9 GiB 降为 10.95 GiB。IFBench 为 80.3%，AIME 2025/2026 均为 100%，GPQA-Diamond 为 88.4%；官方产物分别为 77.7、96.7、96.7、87.4。无推测解码时，RTX 3090 为 59.9 对 40.3 tok/s，RTX 5090 为 107.5 对 88.1；RTX 4090 开启 MTP 后为 146 对 109 tok/s。详见 [GGUF 块格式](docs/gguf.md)。
-- **按显卡实测的设备路线。** 每种操作和宽度优先查显卡 profile，再查针对单卡调优的编译路线表。已内置 RTX 3090、4090、5090 及 RTX PRO 6000 Blackwell 三个版本（Workstation、Max-Q、Server）的实测 profile。其他 GPU 首次启动自动校准一次，约 20–40 秒，随后保存结果；`ninfer-calibrate` 可按需重测。3090 的 262K `rk4v4` 验证注意力快 3.2 倍；三张卡都启用 FP16 P·V 累加（该注意力耗时减少 15–17%，困惑度不变）与快速 prompt 内核（prompt 注意力耗时减少 19–30%）。当两个候选 token 分数接近时，同一 greedy 请求单独执行或与其他请求组成批次，可能比以前更容易给出不同答案。`--device-profile off` 保留此前 master 的编译调度。详见[设备 profile](docs/device-profiles.md)。
-- **Blackwell 默认构建中的 FP8 / NVFP4 加速。** 所有 `120a` 构建都会编译 FP8 A8 与 NVFP4 W4A4 Tensor Core 单元，`mma.sync` 兼容路径也能使用其专用路线。此前 NVFP4 产物会在该路径启动失败，FP8 预填充则走反量化路线。RTX PRO 6000 上，Qwen3.8-27B NVFP4/FP8 产物的 4096-token 预填充为 11,822 tok/s，与 Native 构建差距在 1.4% 内；Qwen3.6-35B-A3B NVFP4 为 30,938 tok/s。
-- **更快的长上下文注意力。** INT8 系列 small-T 内核增加了分层策略，在 producer warp 之间分摊 QK 乘积，并提前一整轮读取下一块 key。快速 prompt 内核支持 `rk8v4`、`rk4v4`、`rk4v4-e8`、`rk2v4-e8`；所有 prompt 内核都将 chunk 对齐到完整 SM 调度批次，沿用 Ian Ranson 快速内核的思路。RTX 3090 的 131K `rk8v4` 输入耗时从此前 master 的 101 秒降至 76 秒。
-- **MTP 最多 15 个草稿。** 超过 8 列验证窗口时，按上下文区间分别构建 CUDA Graph，使 `--spec mtp --draft-tokens 10..15` 能正常启动；此前会在 graph update 时失败。
-- **BF16 KV 与 CUDA Graph。** 修复此前 master 中默认 BF16 KV 的 MTP 启动失败，以及 Qwen3.8 在无推测解码、512/1024 上下文时的启动失败。原因是 Graph 规划器把 BF16 使用 prompt 内核（最多 128 keys）和使用 small-T 内核的窗口共用了同一 executable；现在会向 attention op 查询每次捕获实际选择的路线。
-- **完整参考测试。** 覆盖 RTX 3090、4090、5090 上的 Ternary Bonsai 2 27B / Qwen3.8-27B：完整窗口、各卡能启动并填满的最大上下文、1–15 个草稿、多请求并发，以及同机器上的此前 master。见 [2026 年 9 月参考测试](docs/performance/reference-2026-09.md)。
-- **Ternary Bonsai 2 27B。** PrismML 的[三值 Qwen3.8-27B](https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf) 使用 `t2_g128_fp16` 权重，每权重 2.125 bits，从 PQ2_0 GGUF 导入时不重新舍入。检查点中的 Hadamard 旋转融合到各投影输入的 norm 和 gate；token 表与输出头仍保持三值。`bonsai2_27b_ternary` 配方加入 ProCreations 为 Bonsai 训练的 MTP 头、DFlash2 adapter，以及精确 proposal 头。
-- **三值投影的整数激活。** 解码、推测验证以及不超过 192 tokens 的 prompt 使用 s8 激活 small-T 内核；更长输入使用 int8 激活 GEMM，将不整齐的尾部补齐到成本最低的 tile。输出头、draft 头、proposal 头也走同一路线。
-- **RTX 3090 调优。** 旋转 producer 每个 1024 点变换使用 4 个 warp；INT8 KV 的 small-T 注意力按完整 SM 批次启动分片；GDN 记录将窗口暂存共享内存；三值目标模型的 DFlash2 adapter 使用 Q4。
-- **DFlash2 与 Vision 叠加驻留。** 图像编码可以借用 drafter 的显存，使 DFlash2、Vision 和完整 262,144-token 窗口同时装入一张 24 GB 卡。
-- **服务修复。** 强制 `tool_choice` 会在生成提示中打开指定调用，模板默认思考让位于该要求。上下文缓存无法容纳请求时只让该请求失败（HTTP 429），不拖垮引擎。Paged KV 耗尽会报告页号，连续三次耗尽将引擎标为不健康。修复私有缓存回收、demand window 和零价值候选的捕获搜索，减少长 agent 会话重新预填充。
-- **构建。** 测试适配 CUDA 13 的 `cudaGraphGetEdges`。
-
-### 来自 TertiumOrganum1 的工作
-
-来源：[TertiumOrganum1/ninfer-3090](https://github.com/TertiumOrganum1/ninfer-3090)。
-
-- **`rk4v4-e8` KV。** Key 与 `rk8v4` 一样先旋转，再按 8 维组映射到 int4 的 E8 格点；Value 保留 `rk8v4` 的 int4 平面。E8 KV 编码最早由 UDPSendToFailed 与 Daniel Parker 在 NInfer-4090 中引入。每 token、每 KV head 占 280 bytes，而 `rk8v4` 为 408。Ternary Bonsai 2 的 262,144 窗口可节省 2.0 GiB；两个并发槽各放一个完整窗口（共 524,288 tokens，`rk8v4` 为 519,744）后还剩 5.7 GiB。131K / 250K 的三个预埋目标仍全部找到；快速语料困惑度从 5.631 变为 5.650。
-- **三值预填充的 128×64 int8 tile。** 激活按 token 和 128 列组量化，int32 求和覆盖整个权重组。与被替换的内核（`NINFER_T2_A8_TILE=off`）相比，Bonsai 2 在 8K、32K、64K 下的预填充分别快 33%、21%、15%，快速语料困惑度保持 5.631。
-- **工具调用。** 对格式损坏的调用区域尽量恢复已读内容，避免把标记泄漏到答案中。
-- **共享前缀捕获。** 若替换共享前缀捕获实际释放的空间少于预估，就放弃该候选；此前会使引擎持续失败并返回 503，直到重启。
-- **构建。** `sm_120a`（RTX 50 系列）可使用 `mma.sync` 兼容路径构建。
-
-### 来自 NInfer-4090 的工作
-
-来源：[NInfer-4090](https://github.com/UDPSendToFailed/ninfer-4090)，除标注外作者为 UDPSendToFailed，已在汇总线中重新实现。
-
-- **全程序 CUDA 构建**（Matt Anderson）。Core 和 ops 静态库不再使用可重定位设备代码，ptxas 能内联按动态 lane 计算的 shuffle，并跨循环安排加载；需要 stack frame 的内核减少约五分之一，服务端二进制增大约四分之一。
-- **从共享内存读取 scale。** INT8 注意力的 query/key/value scale 改为从共享内存读取，不再从计算出的 lane 做 shuffle。配合全程序构建，`rk8v4` 验证注意力耗时减少 9–21%；Bonsai 2 在 64K 下的 MTP 步耗时减少 6.6%，8K 及以上预填充快 2–7%，答案不变。
-- **服务 socket 使用 `TCP_NODELAY`。** 流式 token 写出后立即发送。
-- **可选 SFU sigmoid / SiLU / softplus。** `-DNINFER_SFU_SIGMOID_SILU=ON` 用 `ex2.approx` 和正确舍入的倒数替代 `expf` 与除法。Bonsai 2 在 8K 以上预填充快约 2%，快速语料困惑度从 5.6306 变为 5.6309，MTP 解码不变。`-DNINFER_SFU_SOFTPLUS=ON` 对 GDN decay gate 的 softplus 使用同样思路；当 e^x 小于 1/16 时改用 log1p 级数，保留长记忆 head 的慢衰减精度，困惑度为 5.6302。
-- **超过 262,144 的 key。** 当分片跨度超过暂存的 64 个页 ID 时，small-T 注意力从块表读取每页物理索引，将可见 key 上限提高到 1,048,576。
-- **四倍原生窗口与 YaRN。** 原生 262,144 模型的 `--max-context` 可达到 1,048,576。超出原生窗口后可用普通 RoPE，或通过 `--rope-yarn` 使用 YaRN；默认 factor 为 Qwen 文档中的 `--max-context / 262144`，计算与 Hugging Face / vLLM 一致。Bonsai 2 配合 `rk2v4-e8` 的三目标测试，在文档 33%、66%、90% 位置放入代码：500,000 tokens 不开 YaRN 找到全部三个；开启后在 131,072、500,000、1,000,000 下都只找到两个。因此默认不开，除非普通 RoPE 已无法回答。`--rope-yarn-factor F` 可为所有位置固定 factor，不随窗口变化。
-- **`rk2v4-e8` KV**（与 Daniel Parker 合作，他也通过 Neroued/ninfer#173 向上游提出该方案）。旋转并按 G64 缩放的 key 每 8 维仅占两个字节：一个记录最近的 E8 240 根向量，另一个记录 4-bit 对数半径和有符号残差轴。每 token、每 KV head 为 216 bytes，`rk4v4-e8` 为 280，`rk8v4` 为 408。这是 24 GB 卡上能与 Bonsai 2 同时容纳 1,048,576 tokens 的格式；不开推测剩 2.8 GiB，MTP 剩 1.3 GiB。两个完整 262,144 窗口剩 7.7 GiB。代价是质量：快速语料困惑度从 5.631 增为 5.820（`rk4v4-e8` 为 5.651），DFlash2 草稿接受率从 54.4% 降为 51.8%，解码慢 4%。131,072 / 250,000 tokens，以及 1,048,576 窗口中的 500,000-token 输入，都找到三个目标。
-- **Windows D3D12 驻留内存池**（与 keylimesoda 合作）。`-DNINFER_D3D12_RESIDENCY=ON` 提供 `--wddm-evictable-budget`：设备内存池来自最高优先级驻留的共享 D3D12 heap，再导入 CUDA；KV 容量按 WDDM 可驱逐其他分配来安排。上游记录当时没有 Windows 测试机，因此只做过 MinGW 语法检查，并非运行验证。
-
-其他来自 4090 分支的思路包括：服务端默认思考级别、最多 15 个 MTP 草稿、`/metrics` 和 `/slots`（Sergiusz Michalik）及 `/props`、从 `NINFER_WEBUI_DIR` 编译内嵌 WebUI、仅受上下文约束的输出上限、块采样器候选驻留共享内存、可选 bf16 残差加法（`-DNINFER_BF16_RESIDUAL_ADD=ON`）、分块 GDN 预填充的向量存储，以及受限分片编译和 ptxas 报告构建选项。
-
-### 来自其他分支的工作
-
-- **Host 缓存下方的磁盘层**（[IMGillusion](https://github.com/IMGillusion/ninfer-disk-kv)）。`--disk-kv-path DIR` 将被驱逐会话的 KV 页与状态图像写入按 prompt 摘要索引、带 CRC 检查和 LRU 管理的文件，重启后仍保留。`--disk-kv-restore` 可从相同已存前缀恢复，只预填充剩余部分。Bonsai 2 + MTP 中，一个 17,444-token 输入被另两个请求驱逐后，从磁盘恢复耗时由 9.6 秒降至 1.2 秒，重启后为 1.0 秒，答案一致；DFlash2 与无推测解码也可恢复。Windows 的 `-DNINFER_DIRECTSTORAGE=ON` 构建可用 `--disk-kv-directstorage` 经 DirectStorage 读取；上游当时与 D3D12 一样尚未实测。
-- **自适应 MTP**（[Mirko Covizzi](https://github.com/MirkoCovizzi/ninfer-rtx5090-mobile)）。`--adaptive-mtp` 根据实测草稿存活率和轮次成本，每轮在 K 个草稿中验证 3..K 个，并为各宽度准备 CUDA Graph。RTX 3090 上的 Bonsai 2、K=5，59% 轮次验证 5 个，23% 验证 4 个，18% 验证 3 个；没有超过固定 K=3：短输入为 200 对 204 tok/s，8K 为 150 对 163。各宽度 Graph 也占显存，因此 Huihui 的 198,400-token 缓存在开启后无法再装入 24 GB 卡。宽度改变可能让接近同分的 token 结果不同，与切换固定窗口时类似。
-- **快速 INT8 prompt 注意力**（Ian Ranson，[Wallawalla47](https://github.com/Wallawalla47/ninfer-custom)）。每个 warp 将 query 行、score、output 留在寄存器中，每 64-key tile 用 FP16 累加 P·V。汇总线将其扩展到 `rk8v4` 和打包 key 编码，并让 device profile 在更快时开启；三张实测卡的 prompt 注意力耗时减少 19–30%。`--fast-prefill-kernel` 可强制开启。Bonsai 2 的 64K `rk8v4` 快速语料困惑度从 5.2074 变为 5.2079，131K 三目标测试全部找到。
-- **Agent 工具调用格式。** 除 Qwen 格式外，支持 `<function name=...>`、`<invoke name=...>`、`<function_calls>`、`<param name=...>`，并经过同一恢复流程；来自 Pavel Kochubey 的上游 PR #300，经 Wallawalla47 引入。
-- **结构化输出。** `--structured-output` 启用 xgrammar，支持推测解码；来自 Andrey Shvartsman 的上游 PR #294。
-- **首 token 对数概率。** 开启 `--first-token-logprobs` 后，Chat Completions 请求可使用 `top_logprobs` 获取第一个生成 token 及其候选的对数概率（IMGillusion）。
-- **滚动保留。** `--context-cache-policy rolling` 让一个长会话不断向前移动已缓存边界（IMGillusion）。
-- **释放分叉检查点。** `--release-diverged-checkpoints` 优先丢弃所属会话已经不再使用的私有检查点；Ian Ranson 根据 pkochubey 的上游 PR #300 实现。
-- **Blackwell NVFP4 专家权重库。** Mykhailo Dementii 的上游 PR #286–#290。Qwen3.6-35B-A3B NVFP4 检查点可用 `--recipe qwen3_6_35b_a3b_nvfp4` 转换，并运行于任意 `120a` 构建。RTX 5090 Native 构建（`-DNINFER_SM120_NATIVE=ON`）上，20.6 GB 纯文本产物的 4K 预填充为 27,663 tok/s、解码 397 tok/s。预填充把激活量化为 4 bits，走 Blackwell 独有 W4A4，所以 sm_8x 构建会拒绝这种权重库。
-- **N-gram 复制草稿**（remesis、Ian Ranson）。搭配 drafter 时，可根据最近 12 个 token 的匹配，从已有 prompt、工具结果或输出中复制最多 15 个 token 供验证（`--ngram-draft-tokens`、`--ngram-min-match`）。开启 `--spec` 后默认启用；每个复制 token 都由目标模型验证，属于精确推测。可选 RAM 归档 `--ngram-archive-mib` 为同一 `X-NInfer-Draft-Session` 后续请求保留已完成请求的复制来源。
-- **Hybrid 前缀缓存**（Ian Ranson，[Wallawalla47](https://github.com/Wallawalla47/ninfer-custom)）。`--use-alt-prefix-caching` 用按内容寻址、跨请求共享的 64-token KV 块和稀疏状态快照替换检查点目录，按可用显存和一个 `--host-cache-mib` Host 预算安排容量。围绕默认目录还增加了可选近期访问驱逐、先降级到 Host（`--recency-eviction`），按需扩展回答的 Device KV 租用量（`--kv-lease-growth`），统一 Host 保留预算（`--host-cache-mib`），对重写会话自动设置消息边界锚点（`--auto-long-anchors`）；默认还会复用中止请求已预填充内容，并在目录满时以 LRU 替换自动共享前缀。
-- **请求接纳与缓存驱逐**（Gideon Zenz、David Oelfke、Ian Ranson）。`--thorough-admission-search` 最多花 250 ms 检查所有复用候选；`--value-aware-demote` 按检查点重建成本排序驱逐；`--concurrent-prefill` 在其他请求预填充时接纳新请求；`--recover-invariant-failures` 在内部不变量失败后继续服务。
-- **草稿与采样**（Gideon Zenz）。`--mtp-attention-window N` 让 MTP 草稿头只关注开头 64 个 key 和最近 N 个，避免草稿读取量随历史持续增长，最终 token 仍由目标模型验证。思考结束后的采样可切到单独预设（temperature 0.2），支持服务端 `--post-thinking*` 或请求中的 `post_thinking` 对象。
-- **服务功能**（Gideon Zenz、Ian Ranson）。`GET /stats` 提供全部 Engine 计数和等待队列，可用主端口或独立 `--stats-port`；[`tools/monitor`](tools/monitor/README.md) 提供终端仪表盘与卡死 watchdog；支持请求日志轮转（`--request-log-max-mib`）。还提供 `--assistant-prefill`、`--unconstrained-response-format`、`--lenient-assistant-history`、`--derive-session-keys`；Anthropic 流每个心跳发送协议 `ping` 事件；分组 `--help`、`--log-colours`、统计面板 `--log-stats-panel`，以及每个产品二进制中的 build id。
-- **CPU 视觉与位置插值**（David Oelfke）。`--vision-residency cpu` 使用 Host FP32 权重和 CPU 线程编码图片，不分配设备 Vision 显存；`--rope-scaling-factor` 配合 `--rope-scaling-original-context` 对超过原生窗口的位置做插值。
-- **内核与转换**（Ian Ranson、Duncan Betts）。包含兼容构建的 decode Graph 程序依赖启动（`-DNINFER_PDL=ON`）、长上下文上短 prefill 步的 split-KV 注意力、通用 BF16 GEMM fallback、混合格式 MTP 权重库、所有宽度的融合 RMSNorm 与 NVFP4 attention 输入，以及 ModelOpt NVFP4/FP8、Quasar NVFP4 和 `grouped_mse` scale 搜索转换器；还提供基于预构建 vcpkg 树的 Windows 原生构建。
-- **统一 Linear 模板**（Neroued）。上游带 sliced-K 调度的 Q4/Q5/Q6/Q8 A16 模板与汇总线原路线并存。每张卡只在两轮实测更快的宽度使用它们：Q5 从约 8 列到 96（3090）、128（4090）、1024（5090），各形状快 1.5–1.7 倍；Q6 为 4–32 列；Q4 从 25 列开始；Q8 的适用宽度随卡变化。Q4 解码和验证宽度保留原内核。`NINFER_LINEAR_ROUTES=legacy|unified` 可强制路线表。
-- **FP8 / NVFP4 / BF16 模板与融合投影**（Neroued）。上游统一模板及各格式融合投影，包括 attention/GDN 输入及卷积形式、LinearAdd、SwiGLU、Q8 pair、top-k heads、Q8 grouped convolution、context-KV materialization，都按同样原则与原路线并存：每种形状和 Op 测两轮，在哪些宽度更快才选用。3090 的原 FP8 / NVFP4 A16 路线会在宽输入上循环 small-T，统一模板在验证和预填充宽度分别快 1.7–7 倍、2.5–44 倍，4090 类似；5090 的 FP8/NVFP4/BF16 在多数 A16/A8/A4 宽度快 1.1–3 倍。Q8 投影多数宽度保留原路线；统一 SwiGLU 的 gate/up 投影在激活阶段保持 FP32。
-- **两阶段 GDN 预填充**（Neroued）。16 tokens 及以上的 prompt chunk 可以先完成 Q/K 归一化、gate 因子和每 chunk 求解，再做 FP32 状态递推并写出结果，替代原 WY、状态传递和输出内核。3090/4090/5090 在 16–8192 tokens 各宽度的 GDN Op 快 1.4–4.3 倍，内置 profile 因而采用此路线；由于递推只占 prefill 一小部分，3090 的 Qwen3.8 27B 整体 Engine prefill 变化约 1%。`NINFER_GDN_TWO_STAGE=0|1` 可强制选择。
-- **PackGQA**（Gideon Zenz）。INT8 prompt 内核可把同一 KV head 的 query heads 打包进 tile（`NINFER_PROMPT_PACK_GQA=1` 或 profile 的 `attn_pack_gqa`）。1024-token chunk 在 32K / 131K 上下文中，3090 快 2.7%，4090 / 5090 分别慢 0.5% / 3.9%，因此内置 profile 均未开启。
-- **引擎与服务修复。** 包括 worker OOM 恢复（David Oelfke 编写、Ian Ranson 移植）；`--kv-headroom-mib`、`--cuda-graph-allowance-mib`、`--thinking-budget-message`（Ian Ranson）；`--webui-mcp-proxy` 转发 WebUI MCP 流量、E8 根码查表解码、按 SM 数量设置 RMSNorm 阈值（[tmark00](https://github.com/tmark00/ninfer)）；带拓扑分类的 MTP Graph profile（Mykhailo Dementii，上游 PR #221）；可直接打开的服务 URL 与 CORS 预检回显（pelebel、natpate）。还有 GGUF 转换源（giveen）、Q6 配方（bingchengcc）、稀疏 MoE/NVFP4/attention epilogue 调优（Mykhailo Dementii、Duncan Betts、MOVIBALE）、带引号标记与重复参数工具调用修复（Fedor Suchkov、adubkov）、Copilot 工具格式（Damian Sromek）。
-
-[维护者与改动对应表](docs/maintainer/consolidated-line.md)列出各项改动涉及的文件和测试。
-
-## 运行示例
-
-以下是上游参考测试使用的命令，**不等于本分支 16GB 运行包的默认配置**。从下方模型表选择相应产物并交给 `ninfer-serve`。原始命令行服务默认在 `127.0.0.1:8080` 提供 OpenAI / Anthropic API，自动选择显卡 profile；[参考表](docs/performance/reference-2026-09.md)记录了这些配置的实测。
-
-<details>
-<summary>Ternary Bonsai 2 27B：单请求综合配置，DFlash2 五草稿与完整 262,144 窗口</summary>
-
-```bash
-ninfer-serve Ternary-Bonsai-2-27B-ninfer-v3.ninfer --model-id bonsai2-27b \
-  --max-context 262144 --kv-capacity 262144 --kv-dtype rk8v4 --gdn-state-fp16 \
-  --spec dflash2 --draft-tokens 5
+```
+g   = max(m_b, m_t)
+acc = acc_b·exp(m_b − g) + acc_t·exp(m_t − g)
+l   = l_b  ·exp(m_b − g) + l_t  ·exp(m_t − g)
+out = acc / l
 ```
 
-5 个草稿是综合选择：短回答 7 个更快，长文档后最佳为 3–7 个，见[草稿长度测试](docs/performance/reference-2026-09.md#draft-length)。图片输入可添加 `--vision --vision-residency overlay --vision-max-merged 12288`；图像编码借用 drafter 显存，完整窗口仍可装入 24 GB 卡。
-</details>
+合并严格对齐上游 `fattn-tail.cuh`：**不是各自归一后相加**，而是两份未归一 partial 的 online-softmax 合并；两侧都在 **FP32 域**完成（body 的量化域在 body FA 内已还原为 FP32 并归一）。
 
-<details>
-<summary>Ternary Bonsai 2 27B：通过 proposal 头生成 MTP 草稿</summary>
+关键设计取舍（决定了零回退）：
 
-```bash
-ninfer-serve Ternary-Bonsai-2-27B-ninfer-v3.ninfer --model-id bonsai2-27b \
-  --max-context 262144 --kv-capacity 262144 --kv-dtype rk8v4 --gdn-state-fp16 \
-  --spec mtp --draft-tokens 3 --lm-head-draft
-```
-</details>
+- **不新增 Op 家族、不改 CUDA Graph family 序列**。tail 合并放在既有 **small-T 家族内部**：会话内的 family 序列（prompt → small-T）与不开 tail 时完全相同，因此没有额外 graph 重捕获。`retention_tokens`（即 N）进引擎身份 key，而**每个 query 的动态窗口只作为运行时输入**。
+- **写入采用 fused 双写**：在写量化 body 的**同一个 kernel** 内，把未量化的 K/V 原值再写一份进精确环（一次读、无双份量化）；同一 ubatch 内重复命中同一 slot 时按"最后一次写入获胜"去重。
+- **精确池只放 Device**，不参与 host/disk tier；draft（MTP）缓存**按构造不含 tail**，所以 `--kv-tail-tokens` 只让*验证器*变准。
 
-<details>
-<summary>Ternary Bonsai 2 27B：24 GB 卡的大上下文示例，958,464 tokens，<code>rk4v4</code></summary>
+## 2. 支持范围与显存代价
 
-```bash
-ninfer-serve Ternary-Bonsai-2-27B-ninfer-v3.ninfer --model-id bonsai2-27b \
-  --max-context 958464 --kv-capacity 958464 --kv-dtype rk4v4 --gdn-state-fp16 --rope-yarn
-```
+| 项 | 取值 |
+|---|---|
+| 合并生效的存储 | `bf16` 与 **INT8 族**：`int8`、`rk8v4`、`rk4v4`、`rk4v4-e8`、`rk2v4-e8` |
+| 分配但**惰性**的存储 | `fp8`、`nvfp4`、`k8v4`（解码后的 key plane 处于旋转坐标系，未实现尾巴行旋转；开 tail 与关 tail 的字节完全一致） |
+| 生效路由 | **small-T decode 路由**（query 宽度 ≤ 8）。prompt/prefill 路由**只写不合并** |
+| 环元素类型 | `--kv-tail-type f16`（默认，10 位尾数）或 `bf16`（7 位尾数，链路验证形态）；两者同为 16-bit，池大小/页几何/`MemorySummary` 完全相同 |
+| 精确环常驻 | `round_up(N,64) × 65,536 × C` 字节（C = `--max-concurrency`，1..8） |
 
-RTX 5090 使用 `rk4v4` 可容纳 1,048,576-token 上限，包括 DFlash2 或 MTP；`rk8v4` 为 978,944。填到 1,048,576 时，无论 YaRN 还是普通 RoPE，都找到 33%、66% 的代码，但漏掉 90%（约 943K）的目标；约 880K 以内，三张卡均找到全部目标。
-</details>
+| N | C=1 | C=2 | C=4 | C=8 |
+|---:|---:|---:|---:|---:|
+| 512 | 32 MiB | 64 MiB | 128 MiB | 256 MiB |
+| 1024 | **64 MiB** | 128 MiB | 256 MiB | 512 MiB |
+| 2048 | 128 MiB | 256 MiB | 512 MiB | 1024 MiB |
 
-<details>
-<summary>Ternary Bonsai 2 27B：自适应 MTP，加磁盘层保留被驱逐的会话</summary>
+实测（27B 成品，C=1，N=1024）：`kv_exact_history_bytes` = 67,108,864 B（**64 MiB 整**，与模型预测 **0% 误差**），`kv_rollback_reserve_bytes` = 4,194,304 B（单页 4 MiB），`runtime_reservation_bytes` 净增 **68 MiB**。
 
-```bash
-ninfer-serve Ternary-Bonsai-2-27B-ninfer-v3.ninfer --model-id bonsai2-27b \
-  --max-context 198400 --kv-capacity 198400 --kv-dtype rk8v4 --gdn-state-fp16 \
-  --spec mtp --draft-tokens 5 --lm-head-draft --adaptive-mtp \
-  --disk-kv-path /var/cache/ninfer --disk-kv-gib 64 --disk-kv-restore
-```
-</details>
+## 3. 新增接口
 
-<details>
-<summary>Qwen3.8-27B：24 GB 卡，DFlash2 五草稿、245,760-token <code>rk4v4</code></summary>
+| 入口 | 选项 | 说明 | 默认 |
+|---|---|---|---|
+| `ninfer` / `ninfer-serve` | `--kv-tail-tokens N` | 保留每序列最近 `N` 个 token 为未量化精确 K/V；`0` 关闭 | `0` |
+| `ninfer` / `ninfer-serve` | `--kv-tail-type bf16\|f16` | 精确环元素类型 | `f16` |
+| `ninfer-perplexity` | `--score-width W` | 以宽度 `W` 的 attention query tile 评分；`W ≤ 8` 才驱动 small-T 路由、让 tail 的开关差异可见 | `1024` |
+| `ninfer-perplexity` | `--save-topk <path>` / `--kld-base <path>` | 把本次的逐目标 next-token 分布存为 KLD 参考 / 载入参考并报告 KLD（top-K 通道，对齐 llama.cpp） | — |
 
-```bash
-ninfer-serve Qwen3.8-27B-NInfer/qwen3_8_27b.ninfer --model-id qwen3.8-27b \
-  --max-context 245760 --kv-capacity 245760 --kv-dtype rk4v4 --gdn-state-fp16 \
-  --spec dflash2 --draft-tokens 5
-```
+引擎身份 tag 增加了 tail 维度（否则不同 tail 配置会共用同一 engine 身份）；`config-calculator.html` 与启动期容量规划都按并发放进了 tail 项。
 
-相同推测方案换成 `rk8v4`，RTX 4090 可放 167,936 tokens，3090 可放 176,128；RTX 5090 两种格式都能放完整 262,144。
-</details>
+## 4. 验证结果
 
-<details>
-<summary>为没有内置 profile 的显卡测量配置</summary>
+验收报告全文：**[PORT-VERIFY-REPORT.zh.md](PORT-VERIFY-REPORT.zh.md)**（[English](PORT-VERIFY-REPORT.en.md)）。原则是"**任何结论都必须有一条能复现它的命令**"。
 
-```bash
-ninfer-calibrate --print > my-gpu.json
-```
+- 硬件：RTX 5070 Ti 16 GB，`sm_120a`，CUDA 13.3，空闲基线 48 MiB
+- 模型：`Qwen3.8-27B-GSQ-RCO-IQ3_XXS-vision-bf16-mtp.ninfer`（10.33 GiB）
+- 对照：移植前成品引擎（`ninfer-package`，仅 serve）vs 移植后 `build-port` 引擎
+- 纪律：GPU 严格串行单所有者；每片跑完 `nvidia-smi` 必须回到 48 MiB
 
-引擎首次启动会自动执行；手动运行可在驱动或时钟变化后刷新 profile。详见[设备 profile](docs/device-profiles.md)。
-</details>
+### 4.1 Arm A —— 无负面影响（移植前 vs 移植后）
 
-## 上游模型产物
+| 配置 | 格数 | 一致性 |
+|---|:--:|---|
+| MTP 关 × 视觉{关,开} × ctx{8192,32768} | 32 | **32/32 IDENTICAL** |
+| MTP 开 `--draft-tokens 2` × 视觉{关,开} × ctx{8192,32768} | 32 | **32/32 IDENTICAL** |
+| **合计（8 种存储）** | **64** | **64/64 IDENTICAL，0 DIFFERS，0 MISSING** |
 
-这张表保留上游发布的模型，体积、组件和要求各不相同；它们不是顶部下载目录中那两份 Swift text/MTP 模型的说明。
+| 指标 | 结果 |
+|---|---|
+| **显存** | **64/64 格逐位相同** → 精确通过 |
+| **decode Δ%** | 中位 **−0.18**，范围 −0.71…+0.15，**0/64 超过 2%** → 通过 |
+| prefill Δ% | 中位 −1.25，离散度 −28.1…+20.4 → **不可判别**（同二进制重跑的离散度大于前后差异，见报告 §3.2） |
 
-| 模型 | 产物 | 说明 |
+补充观察：MTP 开与关的输出**逐字节相同**（贪心验证器精确）；视觉格确实送入图像（提示词 1,214 vs 188 token）且仍逐字节相同；同二进制重跑 16/16 逐字节相同，即跨进程贪心解码自稳定。
+
+### 4.2 Arm B —— 尾巴收益（decode-width KLD，W=8，评分 32,767 token）
+
+参考 = 每 ctx 的 `bf16`-tail0 top-K 100。**收益倍率（tail0 / tailN 的 mean KLD）：**
+
+| ctx | tail | int8 | rk8v4 | rk4v4 | rk4v4-e8 |
+|---|---:|---:|---:|---:|---:|
+| 8192 | 1024 | 1.09× | 2.20× | 2.47× | 3.25× |
+| 8192 | 2048 | 1.09× | 2.30× | 2.87× | 4.04× |
+| 8192 | 4096 | 1.05× | 2.41× | 3.14× | 5.01× |
+| 32768 | 1024 | 1.02× | 2.04× | 2.26× | 2.97× |
+| 32768 | 2048 | 1.03× | 2.18× | 2.53× | 3.70× |
+| 32768 | 4096 | 1.05× | 2.27× | 2.87× | 4.46× |
+
+| # | 子判据 | 结果 |
 |---|---|---|
-| Ternary Bonsai 2 27B | [WaveCut/Ternary-Bonsai-2-27B-NInfer-v3](https://huggingface.co/WaveCut/Ternary-Bonsai-2-27B-NInfer-v3) | 8.87 GiB。三值文本网络、token 表和输出头，含 Vision、Bonsai 专用 MTP 头、DFlash2 adapter 与精确 proposal 头。仅适用于此汇总线。 |
-| Qwen3.8-27B GSQ-RCO IQ3_S | [WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3](https://huggingface.co/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3) | 13.99 GiB。逐字节保留 ISTA-DASLab 的 3.5-bit GGUF 块，包含其 Q6_K MTP 头、Vision、DFlash2 adapter 和 proposal 头。仅适用于此汇总线。 |
-| Qwen3.8-27B | [neroued/Qwen3.8-27B-NInfer](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) | 19 GiB，`groupwise-int`（Q4/Q5）；参考测试使用的官方产物。 |
-| Qwen3.8-27B，abliterated 版本 | [WaveCut/Huihui-Qwen3.8-27B-abliterated-NInfer-v3](https://huggingface.co/WaveCut/Huihui-Qwen3.8-27B-abliterated-NInfer-v3) | 19.03 GiB，官方 `qwen3_8_27b` 配方，含 MTP、DFlash2 和 proposal 头。 |
-| Qwen3.6-35B-A3B NVFP4 | [WaveCut/Qwen3.6-35B-A3B-NVFP4-NInfer-v3](https://huggingface.co/WaveCut/Qwen3.6-35B-A3B-NVFP4-NInfer-v3) | 20.39 GiB。原样保留 RedHatAI NVFP4 专家权重编码，含 Q8 投影、Vision、MTP、proposal 头，需要 `sm_120a` GPU。 |
+| B1 | 每格 `mean KLD(tailN) ≤ mean KLD(tail0)` | **通过 — 0 违反 / 24** |
+| — | `same_top(tailN) ≥ same_top(tail0) − 0.002` | **通过 — 0 违反 / 24**（每格都上升） |
+| B2 | `ppl(tailN) ≤ ppl(tail0)` | **22/24** — 2 例例外（int8/ctx8192：t2048 +0.050%、t4096 +0.002%，噪声量级） |
+| B3 | 收益随 body 粗细单调 `int8 ≤ rk8v4 ≤ rk4v4 ≤ rk4v4-e8` | **6/6 (ctx × N) 组合通过** |
 
-原始 README 列出的官方 NInfer 产物也可在此汇总线加载。[权重转换说明](docs/weight-conversion.md)介绍 [Bonsai](docs/weight-conversion.md#ternary-bonsai-2-27b) 和 [GSQ-RCO](docs/weight-conversion.md#a-mixed-precision-qwen38-27b-gguf) 产物的生成方法。
+尾巴同时大幅压低最坏误差：`rk4v4-e8` ctx 8192 的 KLD 最大 **3.38 → 0.92 / 0.33 / 0.74**。
 
-## 构建示例
+### 4.3 Arm B3 —— MTP 接受率（仅移植后）
 
-<details>
-<summary>Linux + CUDA 13.1</summary>
+| 场景 | 结论 |
+|---|---|
+| **尾巴关闭** | 猜测路径**完全未受移植影响**：与移植前成品、与 MTP 关的输出都逐字节相同 |
+| 整窗、短提示词（4× 样本） | `rk8v4` 在 ±2 点内并略正（+0.7/+0.8 点）；最粗的 `rk4v4-e8` 收敛到 **−2.05/−1.92 点**（±2 点边界，已到样本分辨极限） |
+| **长提示词（生产 body+tail 场景）** | 8 格中 6 格为正，幅度 **+2 至 +7 点**（两个负值都很小：−1.31、−1.84 点） |
+
+机理：草稿缓存 `mtp_kv` **按构造不含 tail**，`--kv-tail-tokens` 只让**验证器**变准；一致度变化幅度随 body 变粗放大——实测正是这一形态。
+
+### 4.4 A4 —— 尾巴关闭的一致性与 FP32 oracle
+
+`run-oracle.bat` → `softmax_attention: PASS`，`ORACLE_EXIT=0`（94 秒）。全部守卫在场：`fused-append empty-body cache write` ×4、`fused-append crossing build` ×4、`prompt-route ring write` ×8、`fused-append chunked ring write` ×2、`PATHPT` ×2、`TAILGAIN` ×12、`WIDETAIL` ×8、`graph family=` ×8。`tail = 0` 的逐位一致与 graph family 稳定性都在同一次运行内被断言。
+
+### 4.5 结论一览
+
+| 论点 | 结果 |
+|---|---|
+| **C1a** 移植未改变生成结果（MTP 关与开） | **通过** — 64/64 逐字节相同 |
+| **C1b** 性能与显存无回退 | **显存精确通过**；**decode 通过**；prefill **不可判别** |
+| **C1c** 视觉理解输出未变 | **通过** — 全部 `--vision` 格逐字节相同 |
+| **C2** 尾巴带来显著质量收益 | **通过** — decode-width KLD 24/24 改善，随 body 粗细单调 |
+| **C3** MTP 猜测仍可用、未被拖累 | **通过** — 关尾无变化；长上下文为正收益 |
+| **A4** 尾巴关闭即移植前路径 | **通过** — `ORACLE_EXIT=0` |
+
+## 5. 移植中发现并修复的写入缺陷
+
+收益一开始**测不出来**，根因不在合并、而在**环的写入侧**——两个真正的缺陷加一个容量守卫，都是"只有跑起来才能发现"的：
+
+1. **fused-append 的分片在 `body_window == 0` 时从不量化尾部行**（`56fc8384`）。当精确尾巴覆盖整个窗口时，分区把 `body_active = 0`，每个分片都在 fused-append 块之前返回，于是这些行**从未进入量化缓存**；之后 `window > N` 的 body 会读到一个永久空洞。
+2. **`Prompt` 路由从不写环**（`b99ba8d5`）。prompt 路由只"写"，但它根本没写影子环，导致后续 small-T 步骤读不到。
+3. **环形写入越界守卫**（`205ea411`）：把精确环的写入限制在其容量之内。
+
+修复后：`bf16` body+tail 对 `bf16` 参考的 mean KLD 从 **0.13284577 → 0.00093566（−142×）**，最大 16.29 → 0.475，`same_top` 0.9004 → 0.9867；同一协议下 `rk8v4` 格在修复前后**逐位相同**，`bf16` tail-off 对照仍为 KLD 0 / `same_top` 1.0——即修复**只影响 tail 打开**的情形。新增守卫测试：`run_fused_empty_body_append_case`、`run_fused_crossing_case`、`run_prompt_ring_write_case`、`run_fused_chunked_ring_case`。
+
+## 6. 里程碑与工作包
+
+| 里程碑 | 状态 | 内容 |
+|---|---|---|
+| **M0** KVarN 决策 | DONE | 同模型对照（`llamacpp` vs `ninfer-package`，IQ3_XXS）：本机切片上 KVarN 相对 f16/q8_0 无可测 ppl 惩罚，亦无质量上的借用理由；测试基线钉死 `sm_120a / 5070 Ti` |
+| **M1** 静态 BF16 tail 功能闭环 | DONE | FP32 oracle 对 BF16 + INT8 族（fused/cached）与 batched masked 全绿；显存与模型 **0% 误差** |
+| **M2** F16 默认 + 图形稳定 | DONE | 环元素类型成为配置维度（`--kv-tail-type`）；F16 在全部 `WIDETAIL` 用例不低于 BF16，**取为默认** |
+| **M3** 并发与投机 | DONE | `payload_bytes == round_up(N,64)*65,536*C + C*4 MiB` 对 C=1..8 精确成立；draft 缓存按构造无 tail；有/无投机端到端复测无回归 |
+| **M4** 可选 tier（host/disk） | 不在范围 | — |
+| **M5** 尾巴收益 + MTP 影响 | DONE | 建立仪器（`--score-width` + KLD），找到并修复 §5 的两个缺陷，收益全矩阵成立 |
+
+工作包 WP1–WP7、WP9、WP10 全部 DONE；**WP8（事务/回滚）为有意推迟**（M1 功能闭环为 device-only、C=1，任何 failure 路径都未被触达），其回滚预留 `R` 已在 WP5 的容量核算里就位。
+
+## 7. 用法示例
 
 ```bash
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=86
-cmake --build build --target ninfer-serve ninfer-calibrate
+# 服务端 / CLI 开启尾巴（默认 f16 环，N=1024）
+ninfer-serve models/qwen3_8_27b.ninfer --kv-dtype rk8v4 --kv-tail-tokens 1024
+ninfer       models/qwen3_8_27b.ninfer --kv-dtype rk4v4-e8 --kv-tail-tokens 1024 --spec mtp --draft-tokens 2
+
+# 离线：decode-width 评分 + KLD（对齐 llama.cpp 的 top-K 通道）
+ninfer-perplexity models/qwen3_8_27b.ninfer --kv-dtype bf16     --kv-tail-tokens 0    --save-topk out/bf16-t0.topk
+ninfer-perplexity models/qwen3_8_27b.ninfer --kv-dtype rk4v4-e8 --kv-tail-tokens 1024 --kld-base out/bf16-t0.topk --score-width 8
 ```
 
-`CMAKE_CUDA_ARCHITECTURES`：RTX 30 系列为 `86`，RTX 40 系列为 `89`，RTX 50 系列和 RTX PRO 6000 Blackwell 为 `120a`，后者使用三值路线需要的 `mma.sync` 兼容路径。可选开关见 [Linux 构建指南](docs/rtx-3090-linux.md#build-options)。上游 Windows 构建、发行包、测试和基准流程参见 [NInfer-3090 README](https://github.com/ashalliants/ninfer-3090#readme)。本分支 Windows RTX 5070 Ti 的构建方法见顶部专用指南。
-</details>
+复现整套验收的命令见 [PORT-VERIFY-REPORT.zh.md §8](PORT-VERIFY-REPORT.zh.md)。
 
-## 许可证
+## 8. 已知缺口（如实交代）
 
-与上游一致，采用 Apache-2.0。Bonsai 产物中的权重来自 PrismML、ProCreations 和 Qwen，均为 Apache-2.0；相关声明见其模型卡。
+- **B2 ppl**：24 格中 2 格不成立（`int8`/ctx 8192，+0.050%/+0.002%），属噪声量级；同样这两格在 KLD 与 `same_top` 上均改善。`int8` 收益最小，其 ppl 变动低于 32,767 token 困惑度的分辨力。
+- **B3 短提示词的 ±2 点判据**已达样本分辨极限；单次 256 token 下的 −5.47 点在 4× 样本下未复现（−2.05 点）。
+- **B3 的 ctx 轴在短提示词下是空的**——该参数改变分配量而非工作量；真正跑上下文长度需用 `--messages FILE`。
+- **prefill ≤2%** 在这些提示词长度下无法用"每格一次请求"评判，已记"不可判别"；decode（稳态）稳定。
+- **64K 上下文**不在范围：本地唯一语料切片约 32.7K token。
+- **数值底**：`bf16` body + tail 依赖约 1e-3 的 mean-KLD 数值底（一个 bf16 ULP），这也是 `bf16` 只能做 Arm B 参考、不做候选的原因。
+- **性能特征化未完成**：body+tail 双写的 `kv_cache_append_bench` 扫描与更长的 decode 基准仍是计划 §5 的待办；§4.3 的 −6% 只是 24-token 的指示值。
+- **`fp8` / `nvfp4` / `k8v4`** 上的 tail 为惰性（设计如此），DoD §7.3 已按"tail 可生效的存储"收窄。
+
+## 9. 代码规模与文档索引
+
+相对直接上游 `b06908ba`：**116 个提交**，**69 个文件**，**+10,920 / −191** 行。
+
+核心新增/改动：
+
+| 区域 | 文件 |
+|---|---|
+| 精确环元素泛型 | `src/ops/common/kv_tail_element.cuh` |
+| tail partial kernel | `src/ops/softmax_attention/dense/causal_cache/small_t_tail.cuh` |
+| fused 双写（shadow） | `.../causal_cache/small_t_tail_shadow.cuh` |
+| small-T 家族分片/合并与环写入 | `.../causal_cache/small_t*.cuh`、`prompt.cu`、`small_t.cu` |
+| 配置链 | `apps/cli/{main,options}.{cpp,h}`、`src/serve/serve_options.{cpp,h}`、`include/ninfer/types.h`、`src/runtime/engine/` |
+| 评分仪器 | `apps/perplexity/{main,evaluation}.{cpp,h}`、`include/ninfer/ops/target_logprobs.h`、`src/ops/kernel/target_logprobs.cuh` |
+| 容量/显存 | `src/core/paged_kv_cache.{cpp,h}`、`src/models/qwen3_5/program/planning/startup.{cpp,h}` |
+| 测试 | `tests/models/qwen3_5/test_exact_tail_capacity.cpp`（新增）、`tests/ops/softmax_attention/causal_cache.cpp`、`tests/test_perplexity_evaluation.cpp` |
+
+文档索引：
+
+| 文档 | 内容 |
+|---|---|
+| [PORT-VERIFY-REPORT.zh.md](PORT-VERIFY-REPORT.zh.md) / [.en.md](PORT-VERIFY-REPORT.en.md) | **验收报告**（本文 §4 的全文与复现命令） |
+| [PORT-DOD.md](PORT-DOD.md) | DoD / 里程碑 / 工作包审计表（含 V0–V7 验收行） |
+| [PORT-JOURNAL.md](PORT-JOURNAL.md) | 按顺序的执行日志（含命令与实测值） |
+| [PORT-MEMORY.md](PORT-MEMORY.md) | 可复用经验与陷阱（harness、kill 语义、就绪判据等） |
+| [PORT-M5-PLAN.md](PORT-M5-PLAN.md) / [PORT-REVIEW-PLAN.md](PORT-REVIEW-PLAN.md) / [PORT-VERIFY-PLAN.md](PORT-VERIFY-PLAN.md) | M5 收益战役、独立代码评审、验收计划 |
+| [PORT-BEELLAMA-SPEC.md](PORT-BEELLAMA-SPEC.md) | 移植算法参考（只搬算法、不搬代码） |
+| [precision-tail-port-plan.md](precision-tail-port-plan.md) | 实施计划（设计 + WBS + 里程碑 + 验证矩阵） |
+| [kvarn-kv-tail-feasibility-report.md](kvarn-kv-tail-feasibility-report.md) | 可行性报告 |
+| [docs/performance.md](docs/performance.md) §"KV precision tail" | 已发布的实测（显存 / ppl / F16-vs-BF16 / decode-width KLD） |
+
+## 10. 快速开始、下载与许可
+
+产品安装、Windows 部署、参数与模型转换请看 **[RTX 5070 Ti Windows 指南](docs/rtx-5070ti-windows.md)**；预编译引擎与配套 `.ninfer` 模型成品见**[下载说明](docs/rtx-5070ti-windows-downloads.md)**（**[夸克网盘](https://pan.quark.cn/s/28b896c4b0c0)**）。构建方式见 [AGENTS.md](AGENTS.md) 与[构建系统](docs/maintainer/build-system.md)。
+
+本仓库的 Windows / RTX 5070 Ti 构建、显存策略与管理器来自直接上游 [Ryan-gsq](https://github.com/Ryan-gsq/ninfer-16g-5070ti-5080-5090-qwen3.8-27b-gsq-rco)；上游汇总线来自 [iamwavecut/ninfer-all](https://github.com/iamwavecut/ninfer-all)，原始引擎来自 [Neroued/ninfer](https://github.com/Neroued/ninfer)，各项改动保留原作者署名（[维护者与改动对应表](docs/maintainer/consolidated-line.md)）。精度尾巴算法移植自 beellama.cpp 的 KVCPT（**只搬算法、不搬代码**），参考 [PORT-BEELLAMA-SPEC.md](PORT-BEELLAMA-SPEC.md)。
+
+许可证见 [LICENSE](LICENSE)。
