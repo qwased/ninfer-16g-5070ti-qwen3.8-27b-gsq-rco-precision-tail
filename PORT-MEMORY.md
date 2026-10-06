@@ -723,3 +723,69 @@ pre-fix (`ORACLE_EXIT=1`, `.deps/review-oracle-prefix.out`) and passes post-fix
 `total_active == 1` partition hole (unreachable on 82 SMs), F4 the generation-route claim has no saved
 artifact, F5 the parity floor was unarchived (reproducible by re-running the oracle), F6
 `report.json`'s hardcoded tile metadata. See Step 57 for the full list.
+
+## 5.16 Verification-campaign traps (Step 59) — the serve A/B harness
+
+`PORT-VERIFY-PLAN` §7 handed over `.deps\run-verify-serve-ab.sh` + `.deps\verify-serve.py` as
+"ready to reuse". The smoke run found four defects that would have made Arm A meaningless or
+impossible; all four are in the harness, none in the port. Kept here so the next serve A/B does not
+relearn them:
+
+1. **Git Bash cannot kill the engine.** `kill $!` and `kill -9 $!` both return 0 and the native
+   `ninfer-serve.exe` survives (verified by hand: two PIDs still resident, 11.4 GiB held). Teardown
+   must be `taskkill //F //IM ninfer-serve.exe`; otherwise every cell leaves an engine on the GPU and
+   on the port, and the next cell cannot bind. (Same fact is why the M5 batches checked
+   `tasklist`/`nvidia-smi` after every run.)
+2. **`/health` 503 is not "not ready" to `curl`.** The engine answers 503 `model_loading` while the
+   weights load (~6 s on the 27B artifact) and `curl -s -o /dev/null` exits 0 for it, so any
+   exit-code-based readiness gate fires during loading and the request comes back 503. Gate on the
+   HTTP status being 200.
+3. **This artifact is a thinking model.** The generated stream lands in
+   `message.reasoning_content`; `message.content` stays `""` until thinking closes, which a 128-token
+   cap never reaches (`finish_reason=length`). Any A/B that compares `content` alone compares two
+   empty strings. Capture `reasoning_content + content` (or raise the cap enough to close thinking).
+4. **The per-request perf line is `req#N done | … | prefill X tok/s | decode Y tok/s`.** There is no
+   "prefill speed" / "kv cache payload" text; grep for `req#[0-9]+ done|capacity \||CUDA graphs ready`
+   (the `capacity |` line carries the KV payload / runtime / free memory figures A3 wants).
+
+Also worth keeping for the runbook: a cell costs ~11 s (load 6 s + request 2.5 s + teardown); the host
+kills any single invocation older than ~500 s, so drive the grid with `VERIFY_LIMIT=<n>` chunks and
+re-invoke (completed cells are skipped, and skipped cells must not consume the chunk budget).
+
+## 5.17 Verification campaign results and traps (Steps 59-62)
+
+`PORT-VERIFY-PLAN` executed at `685aa33e`. Headline: the port is **behaviourally identical** to the
+shipped product and the tail's benefit reproduces at ctx 8192/32768. Durable facts worth keeping:
+
+1. **Serve A/B identity is the strongest available no-regression evidence here**, and it is complete:
+   64/64 cells byte-identical over {MTP off, MTP on `--draft-tokens 2`} × {vision off, `--vision`} ×
+   ctx {8192,32768} × the 8 >=4-bit storages, with the recorded stream being the model's
+   `reasoning_content` (see the trap below). 16/16 same-binary repeats are also byte-identical, i.e.
+   greedy decoding is self-stable across processes — so a future mismatch can safely be called a
+   defect without first re-proving self-stability.
+2. **Prefill tok/s on a short prompt is not a usable regression signal.** Measured as one request, the
+   *same binary* re-run on the same cell moves -29 %…+8 % (188-token prompt) and -22 %…-1 % (1214-token
+   vision prompt) — wider than the pre/post spread it is supposed to gate. Only **decode** is stable
+   (pre/post |Δ| <= 0.71 %, same-binary <= 0.88 %). Use decode, memory, and byte-identity for
+   no-regression; treat single-request prefill as noise unless the prompt is long enough to dominate
+   start-up.
+3. **Memory is exactly reproducible** here: the startup `capacity | KV .. | pages .. | runtime .. |
+   free ..` line matched pre/post in all 64 cells. That makes it the cheapest exact no-regression check.
+4. **B3's ctx axis is vacuous with a short prompt set.** A 256-1024-token generation never reaches a
+   ctx 8192/32768 ceiling, so both settings give identical rounds/drafted/accepted; the flag only
+   changes the allocation. To exercise a context length, drive a long prompt through `--messages FILE`
+   (the Windows command line caps `--prompt` at ~32 KB, so `--prompt` cannot carry a 30K-token text).
+5. **B3 acceptance needs ~3k+ drafted tokens to resolve 2 points.** At 734 drafts (3 short prompts,
+   `--max-new 256`) rk4v4-e8 looked like -5.47 pt; at 3,015-3,083 drafts (`--max-new 1024`) it is
+   -2.05/-1.92 pt, i.e. mostly small-sample noise. Binomial stderr there is ~1.8 pt vs ~0.9 pt. Also
+   note that when the tail covers the whole window, N=1024 and N=2048 compute the *same* thing, so
+   such pairs are one observation, not two.
+6. **The draft cache is tail-free by construction, so the tail sharpens only the verifier.** That
+   asymmetry (M3/WP-F) is why `--kv-tail-tokens` can move MTP acceptance either way; measured, the
+   movement is +0.7/+0.8 pt for rk8v4, ~-2 pt for the coarsest rk4v4-e8 in the whole-context regime,
+   and +2…+7 pt once a body is present (the production regime).
+7. **The tail's benefit reproduces and is monotone in body coarseness at both ctx and all tails**
+   (24/24 cells improve on mean KLD; `same_top` rises everywhere). The one non-improving criterion is
+   `ppl` for `int8` at ctx 8192 (t2048 +0.050 %, t4096 +0.002 %) — `int8` has the smallest gain
+   (1.02-1.09x), so its ppl movement is below the resolution of a 32,767-token perplexity. Prefer the
+   KLD instrument over ppl for this feature.

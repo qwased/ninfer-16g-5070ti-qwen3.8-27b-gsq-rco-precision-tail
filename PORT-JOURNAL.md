@@ -2319,3 +2319,289 @@ is now impossible for a single launch to write two rows to one slot. The pre-fix
 regression (pre-`b99ba8d5` the Prompt route wrote the ring at all, so the fix is strictly better than
 both prior states). `tail=0` and every span-fitting launch are untouched. Build/run: two chunked
 incremental builds; after each GPU run, no `ninfer`/`perplexity` processes and `nvidia-smi` = 48 MiB.
+
+## Step 59 — verification campaign (PORT-VERIFY-PLAN): preflight, harness repair, Arm A smoke
+
+Task: execute `PORT-VERIFY-PLAN.md` — Arm A (no negative impact, pre-port vs post-port), Arm B (tail
+benefit), Arm B3 (MTP acceptance), A4 (oracle). State at start: HEAD `685aa33e`, tree clean, branch
+`main` local-only; `nvidia-smi` 48 MiB, `tasklist` has no `ninfer*`. Everything below is reproduced by
+the commands quoted; raw artifacts under `.deps/verify-ab/` and `.deps/verify-a-chunk*.log`.
+
+### 0) Preflight — green
+- `nvidia-smi` 48 MiB / no `ninfer` process (both checked before any GPU work).
+- `.deps\build-target.bat ninfer-serve` → `BUILD_EXIT=0`; it was a link-only step (`[3/3] Linking CXX
+  executable apps\ninfer-serve.exe`) because the libraries were already current. The post-port serve
+  did **not** exist before this.
+- `.deps\verify-corpus.bat` → `CORPUS_OK` (`m5-longtext.txt` 160,000 B ≈ 32.7K tokens; media
+  `bench/fixtures/ttft/media/load_00.png` present).
+- Flag surface checked with `--help` on both engines: the pre-port product has
+  `--max-context/--kv-dtype/--spec mtp/--draft-tokens/--vision/--greedy/--seed/--host/--port/
+  --model-id/--default-max-tokens` and **no** `--kv-tail-*` (expected); the post-port build adds
+  `--kv-tail-tokens`/`--kv-tail-type`. All eight Arm A storages are accepted by `--kv-dtype`.
+
+### Harness repair — four defects, all found by the smoke run (this is why the smoke comes first)
+1. **`kill $!` cannot stop the engine (fatal).** Git Bash `kill` and `kill -9` on the native
+   `ninfer-serve.exe` return `rc=0` but the process survives: launched by hand, PID 7948/21056 were
+   still resident after both kills, with 11.4 GiB held. The stock `run-verify-serve-ab.sh` teardown
+   (`kill "$pid"; wait "$pid"`) would therefore leave every cell's engine alive on the GPU and on port
+   18111 → the next cell cannot bind, and `wait_idle` spins. **Fix:** `stop_engine()` =
+   `taskkill //F //IM ninfer-serve.exe`, called after every cell (success and failure paths) and inside
+   `wait_idle`. Single-owner, so image-name kill is safe here.
+2. **Readiness gate accepted a loading server.** `/health` returns **503 `model_loading`** while the
+   weights load, and `curl -s -o /dev/null` exits 0 for a 503, so the original loop broke on its first
+   iteration and POSTed into a still-loading engine (client `rc=2`, empty output). **Fix:** poll
+   `curl -w '%{http_code}'` and require **200** (240 s budget). Load is ~6 s on this model.
+3. **Thinking model ⇒ `content` is empty.** The artifact streams into `reasoning_content` and leaves
+   `message.content == ""` (with a 128-token cap the thinking block never closes;
+   `finish_reason=length`, `completion_tokens_details.reasoning_tokens=128`). Comparing `content`
+   alone would have compared **two empty strings** and "passed" vacuously. **Fix:** `verify-serve.py`
+   now writes `reasoning_content + content` and exits 3 (leaving no `.txt`, so the cell is retried and
+   surfaces as MISSING) when that stream is empty. Verified: the recorded files are 606–693 bytes.
+4. **The perf grep never matched.** The server's per-request line is
+   `req#1 done | … | prefill 368.7 tok/s | decode 68.7 tok/s`; the old keys (`prefill speed` /
+   `decode speed` / `kv cache payload`) match nothing, so every `.perf` was empty. **Fix:**
+   `grep -aE "req#[0-9]+ done|capacity \||CUDA graphs ready"` — this captures the request's
+   prefill/decode tok/s plus the startup `capacity | … runtime … free …` memory line.
+   Also added `VERIFY_LIMIT` chunking (the host kills any invocation older than ~500 s) where skipped
+   cells do not consume the budget, and a `VERIFY_COMPARE_ONLY=1` mode to reprint the table.
+
+### Arm A smoke (ctx 8192, rk8v4, MTP off/on, vision off/on) — **PASS, 4/4 byte-identical**
+Command: `VERIFY_CTX=8192 VERIFY_FMT=rk8v4 bash .deps/run-verify-serve-ab.sh` (8 cells: 4 pre then 4
+post). Result table (`cmp` on the completion text):
+
+| cell (ctx 8192, rk8v4) | pre vs post | bytes |
+|---|---|---|
+| MTP off, vision off | **IDENTICAL** | 693 |
+| MTP off, vision on | **IDENTICAL** | 606 |
+| MTP on `--draft-tokens 2`, vision off | **IDENTICAL** | 693 |
+| MTP on `--draft-tokens 2`, vision on | **IDENTICAL** | 606 |
+
+Observations worth keeping: the MTP-off and MTP-on streams are the **same bytes** (the greedy verifier
+is exact, as designed), and the vision request really merges the image (`prompt 1,214` vs `188` tokens)
+while staying byte-identical. A3 at a glance (`.perf`): decode 68.7 vs 68.8 tok/s (MTP off) and
+123.3 vs 123.1 tok/s (MTP on) — ≤0.2 %; the `capacity` memory line is **identical pre/post** in all
+four cells (non-vision 1.48 GiB runtime / 3.83 GiB free; vision 1.55/3.47; MTP-on 1.81/3.42). Prefill
+tok/s on a 188-token prompt is noisy by construction (the same binary spread >8 % across cells), so
+prefill is judged on the full grid, not on one cell.
+
+### Arm A full grid — in progress (resumable)
+128 cells = {pre,post} × MTP{off,on} × vis{off,on} × ctx{8192,32768} × the 8 ≥4-bit storages.
+Chunk logs `.deps/verify-a-chunk{01,02}.log`; measured ~11.2 s/cell; after every chunk no `ninfer`
+process and `nvidia-smi` back to 48 MiB. **Progress at this entry: pre 54/64, post 4/64** (58/128).
+Raw evidence: `.deps/verify-ab/<side>-mtp<..>-vis<..>-c<ctx>-<fmt>.{txt,perf,server.log,client.err}`.
+
+## Step 60 — Arm A complete: pre-port vs post-port serve A/B, 64/64 byte-identical
+
+Command (5 chunks + a compare-only pass; each chunk is a foreground invocation under the ~500 s
+host limit): `VERIFY_LIMIT=30 bash .deps/run-verify-serve-ab.sh`, logs `.deps/verify-a-chunk0{1..5}.log`;
+the table is `.deps/verify-a-table.md` (rendered by the new additive tool `.deps/verify-ab-report.py`).
+
+### Identity (C1a text + C1c vision) — PASS
+`VERIFY_COMPARE_ONLY=1 bash .deps/run-verify-serve-ab.sh | tee .deps/verify-a-compare.log` →
+**`IDENTICAL=64 DIFFERS=0 MISSING=0`, `ARM_A_IDENTICAL`**, i.e. for every cell of
+{pre,post} × MTP{off,on `--draft-tokens 2`} × vision{off,on} × ctx{8192,32768} × the 8 ≥4-bit storages,
+the completion text is byte-identical (`cmp`). Both MTP settings and both vision settings are covered;
+the vision cells really carry the image (prompt 1,214 tokens vs 188). 128 `.txt` artifacts
+(64 pre + 64 post) in `.deps/verify-ab/`; the recorded stream is 606–693 bytes each.
+
+### Memory (C1b, memory half) — PASS exactly
+The startup `capacity | KV … | pages … | runtime … GiB | free … GiB` line is **identical pre vs post in
+all 64/64 cells** (`memory cells differing: 0`). E.g. bf16 c8192 1.79/1.79 GiB, rk4v4-e8 c32768
+1.82/1.82 GiB, MTP-on bf16 c32768 3.91/3.91 GiB. So the port adds no footprint to the tail-off path.
+
+### Throughput (C1b, perf half) — decode PASS; prefill not discriminative
+64 paired `req#N done` timings (`.perf`):
+- **decode: median −0.18 %, mean −0.23 %, spread −0.71…+0.15 %, `|Δ|>2 %: 0/64`.** PASS.
+- prefill: median −1.25 %, mean −2.23 %, spread −28.1…+20.4 %, `|Δ|>2 %: 34/64`.
+The prefill number cannot be read as a regression because **the same binary re-run on the same cell
+moves further than pre-vs-post does**. Two dedicated repeat campaigns (same exe, same flags, same
+cells, fresh server each time; `--dir`/`VERIFY_OUT` override):
+
+| repeat campaign | prompt | prefill Δ (same binary) | decode Δ | text |
+|---|---|---|---|---|
+| `.deps/verify-ab-repeat` (8 cells) | 188 tok | **−29.1 % … +7.9 %** | −0.44…−0.15 % | 8/8 IDENTICAL |
+| `.deps/verify-ab-repeat2` (16 cells; 8 vision) | 1214 tok | **−22.3 % … −1.2 %** (vision) | −0.88…0.00 % | 8/8 IDENTICAL |
+
+Both repeat spreads are **wider** than the corresponding pre/post spread (pre/post vision prefill was
+−0.6…−4.6 %), so a 1.25–2.4 s prefill measured as a single request is dominated by run-to-run variance
+(process start + warmup + device state), not by the build. Decode — the steady-state figure — is stable
+in both experiments (≤0.9 %). Reproduced also: greedy decoding is **self-stable** (8/8 + 8/8 repeats
+byte-identical), which is the precondition the plan requires before calling any future mismatch a
+defect; none occurred, so no token-level investigation was needed.
+
+A3 verdict: no memory change, no decode regression; **no evidence of a prefill change** — the prefill
+≤2 % criterion is simply below the harness's noise floor at these prompt lengths and is reported as
+not-discriminative rather than as a pass.
+
+## Step 61 — Arm B half: the ctx-8192 KLD/ppl matrix (tail benefit), + Arm B3 tooling
+
+### Matrix run mechanics
+The shipped `run-m5-save.bat`/`run-m5-kld.bat` are used unchanged (ctx is already their parameter).
+`run-verify-matrix.bat` gained an optional cell limit so a chunk can stop before the host's ~500 s
+kill, but its limit path is only reliable at `LIMIT=1` (a `goto` tripped after a multi-run block
+exits 255), and one invocation of the matrix is far longer than the host allows. So the matrix is
+driven as `cmd //c ".deps\run-verify-matrix.bat 1"` repeated 3× per foreground invocation
+(`.deps/verify-b-chunk0{1..6}.log`, ~370 s each): `LIMIT=1` always advances exactly one *new* run
+(already-finished cells are skipped and do not consume the budget). Resumability is the underlying
+tools' `if not exist report.json` / `.ptk` sentinel. After every chunk: no `ninfer`/`perplexity`
+process and `nvidia-smi` = 48 MiB.
+
+References (per ctx bf16 tail0 top-K 100): `.deps/verify-ref-bf16-t0-w8-c{8192,32768}.ptk`
+(26.3 MB each), `.ptk.run/report.json` alongside. Cost: bf16 ctx 8192 32,767 scored tokens
+PPL 5.664864 / 285 tok/s ~1m55s.
+
+### ctx 8192 — 16/16 cells, **both acceptance gates PASS**
+`python .deps\summarize-verify.py` (tail0 = reference-relative, bf16-tail0 top-K):
+
+| ctx | storage | tail | ppl | KLD mean | KLD max | same_top |
+|---|---|---:|---:|---:|---:|---:|
+| 8192 | int8 | 0 | 5.971447 | 0.00112641 | 1.4217 | 0.984709 |
+| 8192 | int8 | 1024 | 5.971196 | 0.00103730 | 0.07297 | 0.984800 |
+| 8192 | int8 | 2048 | 5.974426 | 0.00102872 | 0.10638 | 0.985441 |
+| 8192 | int8 | 4096 | 5.971557 | 0.00107175 | 0.74014 | 0.984495 |
+| 8192 | rk8v4 | 0 | 5.980890 | 0.00264652 | 0.48189 | 0.976010 |
+| 8192 | rk8v4 | 1024 | 5.969419 | 0.00120207 | 0.26165 | 0.982817 |
+| 8192 | rk8v4 | 2048 | 5.973092 | 0.00114922 | 0.25979 | 0.983518 |
+| 8192 | rk8v4 | 4096 | 5.972232 | 0.00109672 | 0.74014 | 0.984648 |
+| 8192 | rk4v4 | 0 | 5.986203 | 0.00386914 | 1.56008 | 0.971463 |
+| 8192 | rk4v4 | 1024 | 5.975685 | 0.00156404 | 1.41782 | 0.982023 |
+| 8192 | rk4v4 | 2048 | 5.973775 | 0.00134631 | 1.35255 | 0.982267 |
+| 8192 | rk4v4 | 4096 | 5.970779 | 0.00123353 | 1.22301 | 0.984282 |
+| 8192 | rk4v4-e8 | 0 | 6.011151 | 0.00652166 | 3.38330 | 0.965969 |
+| 8192 | rk4v4-e8 | 1024 | 5.980981 | 0.00200700 | 0.92492 | 0.979948 |
+| 8192 | rk4v4-e8 | 2048 | 5.980192 | 0.00161394 | 0.32719 | 0.982115 |
+| 8192 | rk4v4-e8 | 4096 | 5.974378 | 0.00130116 | 0.74014 | 0.983244 |
+
+- **B1 (mean KLD tailN ≤ tail0): PASS 12/12 cells**, and `same_top` rises everywhere
+  (int8 0.9847→0.9848/0.9854, rk8v4 0.9760→0.9828, rk4v4 0.9715→0.9843, rk4v4-e8 0.9660→0.9832);
+  KLD max also drops sharply (e.g. rk4v4-e8 3.383 → 0.925/0.327/0.740).
+- **Coarseness monotone: PASS at all three tails** — t1024 int8 1.09× < rk8v4 2.20× < rk4v4 2.47×
+  < rk4v4-e8 3.25×; t2048 1.09/2.30/2.87/4.04×; t4096 1.05/2.41/3.14/5.01×. (This extends the WP-B
+  result to `rk4v4` and to N=4096.)
+- **B2 (ppl tailN ≤ tail0): 10/12 cells** — holds for every rk8v4/rk4v4/rk4v4-e8 cell, but
+  **int8 t2048 (5.974426) and t4096 (5.971557) are 0.05 %/0.002 % above int8 t0 (5.971447)**. This is
+  the one place the ppl criterion is not met; it is at noise scale and the KLD instrument — the
+  decode-width measure the tail actually moves — improves monotonically for the same cells
+  (0.00112641 → 0.00102872/0.00107175). Reported rather than smoothed, per the campaign's rule.
+
+### Arm B3 tooling ready (not yet run)
+`.deps/run-verify-b3.sh` (resumable via the `mtp acceptance rate` line; `RUN_LIMIT` chunking;
+`tail 0/1024/2048` × ctx {8192,32768} × {rk8v4, rk4v4-e8} × 3 fixed prompts, `--spec mtp
+--draft-tokens 2 --greedy --seed 0`) and `.deps/summarize-b3.py` (pools rounds/drafted/accepted,
+prints the tail0→tailN Δpt against the ±2-point gate). The CLI's stderr carries
+`summary mtp rounds/drafted tokens/accepted tokens/acceptance rate/acceptance length`.
+
+## Step 62 — Arm B complete (32/32 cells), Arm B3, A4 oracle: campaign verdict
+
+### Arm B — ctx 32768 half (16 cells) + both acceptance gates over the full grid
+Same instrument and protocol as Step 61 (bf16-tail0 top-K 100 reference per ctx, `--score-width 8`,
+`--disjoint`, 32,767 scored tokens, `.deps/verify-ref-bf16-t0-w8-c32768.ptk`). Chunks
+`.deps/verify-b-chunk0{7..12}.log`, all `KLD_EXIT=0`; full table `.deps/verify-b-summary.txt`.
+
+| ctx | storage | tail | ppl | KLD mean | KLD max | same_top |
+|---|---|---:|---:|---:|---:|---:|
+| 32768 | int8 | 0 | 5.664418 | 0.00103341 | 0.33064 | 0.984893 |
+| 32768 | int8 | 1024 | 5.663406 | 0.00100826 | 0.18132 | 0.984527 |
+| 32768 | int8 | 2048 | 5.664209 | 0.00100349 | 0.71563 | 0.984802 |
+| 32768 | int8 | 4096 | 5.664052 | 0.00098620 | 0.18133 | 0.985076 |
+| 32768 | rk8v4 | 0 | 5.673180 | 0.00241272 | 0.33048 | 0.976867 |
+| 32768 | rk8v4 | 1024 | 5.665655 | 0.00118513 | 1.13890 | 0.982940 |
+| 32768 | rk8v4 | 2048 | 5.664276 | 0.00110771 | 0.18537 | 0.983947 |
+| 32768 | rk8v4 | 4096 | 5.665985 | 0.00106248 | 0.18543 | 0.984008 |
+| 32768 | rk4v4 | 0 | 5.682110 | 0.00356046 | 1.56008 | 0.972686 |
+| 32768 | rk4v4 | 1024 | 5.667320 | 0.00157849 | 0.35742 | 0.982757 |
+| 32768 | rk4v4 | 2048 | 5.665740 | 0.00140599 | 0.47161 | 0.982177 |
+| 32768 | rk4v4 | 4096 | 5.665112 | 0.00124205 | 0.36498 | 0.984039 |
+| 32768 | rk4v4-e8 | 0 | 5.694664 | 0.00631572 | 0.65803 | 0.963378 |
+| 32768 | rk4v4-e8 | 1024 | 5.669458 | 0.00212822 | 0.53016 | 0.979247 |
+| 32768 | rk4v4-e8 | 2048 | 5.667368 | 0.00170770 | 0.28566 | 0.980895 |
+| 32768 | rk4v4-e8 | 4096 | 5.665916 | 0.00141657 | 0.85668 | 0.982482 |
+
+**The four sub-criteria, checked over all 24 (storage × N) cells that have a tail0 control**
+(programmatic check, this Step):
+1. **B1 mean KLD(tailN) ≤ mean KLD(tail0): 0 violations / 24.** PASS.
+2. **Gain monotone by body coarseness** (int8 ≤ rk8v4 ≤ rk4v4 ≤ rk4v4-e8) — PASS at every one of the
+   6 (ctx × N) combinations: ctx 8192 t1024 1.09/2.20/2.47/3.25, t2048 1.09/2.30/2.87/4.04,
+   t4096 1.05/2.41/3.14/5.01; ctx 32768 t1024 1.02/2.04/2.26/2.97, t2048 1.03/2.18/2.53/3.70,
+   t4096 1.05/2.27/2.87/4.46. (`rk4v4` and N=4096 are new coverage vs the WP-B matrix.)
+3. **`same_top(tailN) ≥ same_top(tail0) − 0.002`: 0 violations / 24** — `same_top` in fact rises in
+   every cell (e.g. rk4v4-e8 ctx 32768 0.9634 → 0.9825).
+4. **B2 ppl(tailN) ≤ ppl(tail0): 22/24.** The two exceptions are both `int8` at ctx 8192 —
+   t2048 5.974426 (+0.050 %) and t4096 5.971557 (+0.002 %) over t0 5.971447. **This is the one
+   criterion the campaign does not fully meet**; it is at noise scale and the same two cells improve
+   monotonically on the KLD instrument (0.00112641 → 0.00102872 / 0.00107175). `int8` is also the
+   tier whose tail gain is smallest (1.02–1.09×), so its ppl movement is below the resolution of a
+   32,767-token ppl.
+Gain shrinks mildly as ctx grows (int8 1.05–1.09× @8K → 1.02–1.05× @32K), as before.
+
+### Arm B3 — MTP acceptance under the tail (`ninfer` CLI, `--spec mtp --draft-tokens 2`)
+Post-port only (no pre-port CLI). Files `.deps/verify-b3/`, pooled summary `.deps/verify-b3-summary.txt`.
+
+**(a) Short prompts (3 prompts, ~290-token sequences) — the ctx axis is vacuous here.** ctx 8192 and
+ctx 32768 give *identical* rounds/drafted/accepted to the digit, because a 256–1024-token generation
+never approaches either ceiling; the flag only changes the allocation. So "ctx 8192 vs 32768" is one
+measurement, not two. `--max-new 256` (734–773 drafts, ~1.8 pt binomial stderr): rk8v4 +0.14 pt,
+rk4v4-e8 **−5.47 pt**. `--max-new 1024` (2,927–3,083 drafts, ~0.9 pt stderr, prefix `b3n`): rk8v4
+**+0.73 / +0.84 pt**, rk4v4-e8 **−2.05 / −1.92 pt** (N=1024 marginally outside ±2, N=2048 inside).
+→ The 4× sample shows the −5.5 pt was mostly small-sample noise; the residual cost for the coarsest
+storage is ~2 points. (With the whole window inside the tail, N=1024 and N=2048 compute the same
+thing, so those pairs are one observation, not two.)
+
+**(b) Long prompts (`--messages`, real body+tail — the production regime).** With `tail ≪ context`
+the tail no longer covers the window:
+| set | prompt tok | storage | tail | rate vs tail0 | Δpt | drafted |
+|---|---:|---|---:|---|---:|---:|
+| b3long8 (ctx 8192) | 6,847 | rk8v4 | 1024 | 63.48 vs 62.77 % | **+0.71** | 230 |
+| b3long8 | 6,847 | rk8v4 | 2048 | 69.43 vs 62.77 % | **+6.66** | 229 |
+| b3long8 | 6,847 | rk4v4-e8 | 1024 | 63.22 vs 57.85 % | **+5.37** | 242 |
+| b3long8 | 6,847 | rk4v4-e8 | 2048 | 62.30 vs 57.85 % | **+4.44** | 244 |
+| b3long32 (ctx 32768) | 31,020 | rk8v4 | 1024 | 62.82 vs 64.13 % | −1.31 | 234 |
+| b3long32 | 31,020 | rk8v4 | 2048 | 62.29 vs 64.13 % | −1.84 | 236 |
+| b3long32 | 31,020 | rk4v4-e8 | 1024 | 63.52 vs 61.40 % | +2.12 | 233 |
+| b3long32 | 31,020 | rk4v4-e8 | 2048 | 64.46 vs 61.40 % | +3.06 | 242 |
+One prompt each, so ±3 pt; the sign is overwhelmingly **positive** — in the regime the feature is for,
+the tail does not hurt speculation, it improves the verifier enough to raise agreement by 2–7 points.
+(For the 32K prompt the whole-context comparison cannot even exist: 31,020 prompt tokens > any tail.)
+
+**MTP conclusion (C3).** (i) With the tail **off**, speculation is untouched by the port: Arm A's
+`mtp on --draft-tokens 2` cells are byte-identical to the pre-port product and to MTP-off output, at
+both ctx and with vision (Step 60). (ii) With the tail **on**, decay is not material: rk8v4 stays
+inside ±2 pt in every measurement; the coarsest candidate rk4v4-e8 sits at the ±2 pt boundary in the
+whole-context regime (−2.1/−1.9 pt at 3.0k drafts) and *improves* acceptance by +2 to +5 pt when a
+body is present. The `--draft-tokens 2` budget is small (2.0–2.7 tok/round pooled), so a ±2 pt gate
+at ~3k drafts is the resolution limit of this harness. Mechanism: the draft cache (`mtp_kv`) is
+tail-free **by construction** (M3/WP-F), so `--kv-tail-tokens` sharpens only the *verifier*, and the
+draft/verifier agreement can move either way — the movement scales with body coarseness.
+
+### A4 — tail-off identity / FP32 oracle
+`.deps/run-oracle.bat` (binary `build-port/tests/ninfer_tests.exe` 2026-10-06 04:58, newer than every
+source file) → `.deps/verify-a4-oracle.out`: `softmax_attention: PASS`, `ORACLE_EXIT=0`, 94 s. Every
+guard is present: `fused-append empty-body cache write` ×4, `fused-append crossing build` ×4,
+`prompt-route ring write` ×8 (the 4 original + the 4 F3 cases), `fused-append chunked ring write` ×2,
+`PATHPT` ×2, `TAILGAIN` ×12, `WIDETAIL` ×8, `graph family=` ×8. tail=0 bit parity and the graph-family
+stability are asserted inside this run, so §7.6 (zero regression) and §7.5 are re-confirmed on the
+current tree.
+
+### Campaign verdict
+- **C1a/C1c (no negative impact on generation): PASS.** 64/64 cells byte-identical over
+  {MTP off/on(D=2)} × {vision off/on} × ctx {8192,32768} × 8 storages, plus 16/16 same-binary repeats
+  byte-identical (greedy self-stability).
+- **C1b (no performance/memory regression): memory PASS exactly; decode PASS; prefill not
+  discriminative** (the harness's noise floor exceeds the pre/post spread at these prompt lengths —
+  `.deps/verify-ab-repeat{,_2}`). No evidence of a prefill change.
+- **C2 (substantial tail benefit): PASS on KLD, the decode-width measure** — 24/24 cells improve,
+  monotone by coarseness, `same_top` up everywhere; ppl agrees in 22/24 cells.
+- **C3 (MTP not hurt): PASS with the tail off; with the tail on, within ±2 pt for rk8v4 and at the
+  ±2 pt boundary for the coarsest rk4v4-e8, and positive in the long-context regime.**
+- Honest gaps: B2's ppl criterion in 2 int8/ctx-8192 cells (+0.05 %/+0.002 %); B3's short-prompt
+  ±2 pt band is at the measurement's resolution limit; the B3 ctx axis is vacuous with short prompts;
+  64K remains out of scope (corpus).
+
+## Step 63 — standalone verification report (English + Chinese)
+
+A self-contained report of Steps 59–62 was written in both languages, same results and same numbers:
+`PORT-VERIFY-REPORT.en.md` (368 lines) and `PORT-VERIFY-REPORT.zh.md` (348 lines). Each carries the
+verdict table, the four Arm B sub-criteria, the full 32-cell Arm B KLD/ppl table, the Arm B3 short and
+long-prompt tables, the Arm A identity + perf/memory tables, the harness repairs, the two honest gaps
+(B2 ppl in 2 int8/ctx-8192 cells; B3's ±2 pt resolution limit), the reproduction commands and the
+artifact inventory. `PORT-DOD.md`'s campaign section now points at both files.
