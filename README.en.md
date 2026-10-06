@@ -227,7 +227,7 @@ Documentation index:
 
 ## 10. Quick start, downloads and licence
 
-Product installation, Windows deployment, flags and model conversion are in the **[RTX 5070 Ti Windows guide](docs/rtx-5070ti-windows.en.md)**; the prebuilt engine and matching `.ninfer` model products are in the **[download instructions](docs/rtx-5070ti-windows-downloads.md)** (**[Quark Drive](https://pan.quark.cn/s/28b896c4b0c0)**). For building, see [AGENTS.md](AGENTS.md) and the [build system](docs/maintainer/build-system.md).
+Product installation, Windows deployment, flags and model conversion are in the **[RTX 5070 Ti Windows guide](docs/rtx-5070ti-windows.en.md)**; every adjustable flag (including the precision tail's memory cost and benefit) is in the **[parameter manual](docs/参数说明书.md)** (Chinese); the prebuilt engine and matching `.ninfer` model products are in the **[download instructions](docs/rtx-5070ti-windows-downloads.md)** (**[Quark Drive](https://pan.quark.cn/s/28b896c4b0c0)**). For building, see [AGENTS.md](AGENTS.md) and the [build system](docs/maintainer/build-system.md).
 
 This repository's Windows / RTX 5070 Ti build, memory policies and manager come from the direct upstream [Ryan-gsq](https://github.com/Ryan-gsq/ninfer-16g-5070ti-5080-5090-qwen3.8-27b-gsq-rco); the upstream consolidation is [iamwavecut/ninfer-all](https://github.com/iamwavecut/ninfer-all) and the original engine is [Neroued/ninfer](https://github.com/Neroued/ninfer), with every change keeping its author's credit ([maintainer map](docs/maintainer/consolidated-line.md)). The precision-tail algorithm was ported from beellama.cpp's KVCPT (**port the algorithm, never the code**); see [PORT-BEELLAMA-SPEC.md](PORT-BEELLAMA-SPEC.md).
 

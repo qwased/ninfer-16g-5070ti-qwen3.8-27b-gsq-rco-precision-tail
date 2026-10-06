@@ -7,15 +7,18 @@ Native SM120a Release 引擎和 **NInfer Manager 1.4.1** 托盘管理器。日�
 `NInferManager.exe`，模型管理和性能监控都在浏览器中完成，无需另外运行 Python、
 CMD 或 PowerShell 脚本。
 
-默认提供 **XXS 160K、S 128K** 两个配置，均使用 `strict` 显存策略。K 表示
-1024 tokens。本文说明怎么使用、文件放哪里、参数含义，以及实际测过什么。
+默认提供 **`gsq-vision-rk8v4-120k`（IQ3_XXS，120K）** 和
+**`gsq-iq3s-vision-rk8v4-56k`（IQ3_S，56K）** 两个配置，默认显存策略下开启视觉和
+KV 精度尾巴。K 表示 1024 tokens。本文说明怎么使用、文件放哪里、参数含义，以及实际测过什么。
 
 ## 1. 先启动管理器
 
 1. 从[夸克网盘下载完整运行目录](https://pan.quark.cn/s/28b896c4b0c0)，保存到固定目录，例如 `qwen27b`；若下载为压缩包，请先解压。不要只复制 EXE。
-2. 成品已包含 Swift S / XXS 两套 `.ninfer` 模型，合计约 20 多 GB 磁盘占用；完整运行目录当前约 23.5GB。保留 `model/` 中的完整模型文件；自行添加模型时，也要保留全部分卷。
+2. 成品已包含 GSQ-RCO IQ3_XXS / IQ3_S 两套 `.ninfer` 模型（约 10.3 GiB 和 11.9 GiB，
+   合计约 22 GiB）；完整运行目录约 23GB。保留 `model/` 中的完整模型文件；自行添加模型时，
+   也要保留全部分卷。
 3. 双击 `NInferManager.exe`。它没有主窗口或终端窗口，图标出现在 Windows 托盘中。
-4. 右键图标，选择“管理模型”检查配置；从“启动模型”的二级菜单选择 XXS 或 S。
+4. 右键图标，选择“管理模型”检查配置；从“启动模型”的二级菜单选择 IQ3_XXS 或 IQ3_S。
 5. 就绪后打开监控，或从托盘复制 API base 和模型名供客户端使用。
 
 | 模型已就绪 | 模型停止或尚未就绪 |
@@ -27,7 +30,7 @@ CMD 或 PowerShell 脚本。
 `http://127.0.0.1:18081/v1`。管理页面不需要鉴权，可以直接打开、收藏或刷新，重启后也不必从托盘重新进入。管理网页仍只监听本机。
 
 模型配置的“API 监听地址”可以选择 `127.0.0.1`（仅本机）或 `0.0.0.0`（局域网）。选择局域网后，管理器自动获取可用的局域网 IPv4，在界面和托盘显示 `http://局域网IP:端口/v1`；健康检查和监控仍通过本机地址连接。局域网设备使用显示的地址访问，不要把 `0.0.0.0` 当作客户端地址。Windows 防火墙需要允许该端口。
-XXS 和 S 对外都使用模型名 **`swift-1.5-qwen3.8-27b`**，一次只加载一个。
+IQ3_XXS 和 IQ3_S 对外都使用模型名 **`qwen3.8-27b-gsq-rco`**，一次只加载一个。
 启动、运行、停止期间禁用再次启动，避免重复加载。
 
 关闭浏览器不会停止模型；停止模型后管理页面仍可用；退出管理器会停止它启动的模型和
@@ -45,11 +48,11 @@ Windows 在这个用户**登录后**启动管理器，不需要管理员权限�
 | 独立设置 | 开启后的行为 |
 |---|---|
 | 随 Windows 启动 | 用户登录后启动托盘管理器 |
-| 自动启动默认模型 | 管理器启动后加载默认配置，出厂默认是 `xxs-160k` |
+| 自动启动默认模型 | 管理器启动后加载默认配置，出厂默认是 `gsq-vision-rk8v4-120k` |
 
 首次默认**关闭随 Windows 启动**，需要在网页或托盘手动开启；默认模型配置仍启用自动
-加载 XXS 160K。已有个人设置继续使用自己的值，不会因为升级重新开启这两项。是否随
-Windows 启动以实际登记和 Windows 的启动应用状态为准。
+加载 `gsq-vision-rk8v4-120k`（IQ3_XXS 120K）。已有个人设置继续使用自己的值，不会因为
+升级重新开启这两项。是否随 Windows 启动以实际登记和 Windows 的启动应用状态为准。
 
 一台电脑可以放多份管理器，但当前用户只有这一个自启登记：**最后显式开启或保存自启
 设置的那份程序生效**，会覆盖该项中的启动路径。普通双击或 `--autostart` 启动本身不会
@@ -91,7 +94,7 @@ Windows 的“启动应用”可以另外禁用此项，管理器尊重该禁用
 │  └─ …                            全部续卷，保持原文件名
 ├─ config/                         首次初始化用的配置种子，不是日常生效副本
 ├─ wwwroot/                        管理和监控网页的正式构建文件
-├─ docs/                           中文说明、英文说明、下载页及图片
+├─ docs/                           中文说明、英文说明、参数说明书、下载页及图片
 ├─ LICENSE                         项目许可
 └─ licenses/                       NVIDIA EULA、依赖许可及来源
 
@@ -100,8 +103,8 @@ Windows 的“启动应用”可以另外禁用此项，管理器尊重该禁用
 ├─ config/
 │  ├─ settings.json                语言、自启、默认配置、扫描目录、管理端口
 │  ├─ profiles/
-│  │  ├─ xxs-160k.json              XXS 的路径、API 名称和启动参数
-│  │  └─ s-128k.json                S 的路径、API 名称和启动参数
+│  │  ├─ gsq-vision-rk8v4-120k.json      IQ3_XXS 的路径、API 名称和启动参数（默认）
+│  │  └─ gsq-iq3s-vision-rk8v4-56k.json  IQ3_S 的路径、API 名称和启动参数
 │  ├─ chat_template.jinja           当前会话模板
 │  ├─ chat_template.LICENSE         模板许可
 │  ├─ device-profiles.json          当前 GPU 校准结果
@@ -140,32 +143,46 @@ Windows 的“启动应用”可以另外禁用此项，管理器尊重该禁用
 
 ## 3. 默认模型和参数
 
-模型是 `Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.ninfer` 和对应的
-`IQ3_S-mtp.ninfer`：从包含多种张量量化类型的 GGUF 转换为 text/MTP v3 容器，**没有可用的图片
-理解组件**。原始 GGUF 和 conversion report 不是运行依赖；换模型文件需重验容量和速度。
+模型是 `Qwen3.8-27B-GSQ-RCO-IQ3_XXS-vision-bf16-mtp.ninfer`（约 10.3 GiB）和
+`Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-bf16-mtp.ninfer`（约 11.9 GiB）：用 `qwen3_8_27b_gguf`
+配方逐字节保留 ISTA-DASLab GSQ-RCO 的 3.5-bit GGUF 块，再拼上同一发布版的 BF16
+视觉组件（`mmproj`）和精简词表预测头。两份成品**都带图像理解能力**，对外的模型名都是
+`qwen3.8-27b-gsq-rco`。原始 GGUF、`mmproj` 和 conversion report 不是运行依赖；
+换模型文件需重验容量和速度。
 
-| 项目 | XXS 默认 | S 默认 |
+| 项目 | `gsq-vision-rk8v4-120k`（默认） | `gsq-iq3s-vision-rk8v4-56k` |
 |---|---|---|
-| 配置 ID | `xxs-160k` | `s-128k` |
-| 上下文和固定 KV 容量 | 163840 / 160K | 131072 / 128K |
-| Prefill chunk | 1024 | 256 |
+| 模型 | IQ3_XXS，约 10.3 GiB | IQ3_S，约 11.9 GiB |
+| 上下文和固定 KV 容量 | 122880 / 120K | 57344 / 56K |
+| Prefill chunk | 1024 | 1024 |
 | 并发 | 1 | 1 |
-| KV / GDN state | rk8v4 / FP16 | 同左 |
+| KV 精度 / GDN state | `rk8v4` / FP16 | 同左 |
+| KV 精度尾巴 | `--kv-tail-tokens 1024 --kv-tail-type f16` | 同左 |
+| 视觉 | 开启，`overlay` 常驻、合并上限 4096 | 同左 |
 | 草稿 | MTP 最大草稿 4、开启 adaptive MTP、ngram 31、完整 MTP attention window | 同左 |
 | Graph allowance | 72 MiB | 同左 |
-| `--lm-head-draft` | 关闭 | 关闭 |
-| CPU 上下文缓存 | 6144 MiB，设备快照 1 个 | 同左 |
-| CUDA 显存策略 | `strict`，等于 `strict-64-128` | 同左 |
+| `--lm-head-draft` | 关闭（成品含预测头，可自行打开） | 同左 |
+| CPU 上下文缓存 | 2048 MiB，设备快照 1 个 | 同左 |
+| CUDA 显存策略 | 未显式设置，采用引擎默认 `default` | 同左 |
 | 默认输出上限 | `--default-max-tokens 0` | 同左 |
 | 采样 | temperature 1、top-p 0.95、top-k 20、min-p 0 | 同左 |
 | 惩罚、种子 | presence/frequency 0、seed 42；重复惩罚保持中性 1 | 同左 |
 | 思考 | 默认开启、xhigh、保留思考 | 同左 |
 
-上表记录 2026-09-30 当前运行包保存的日常参数；其中 adaptive MTP 会按运行情况调整草稿长度，
-4 是最大草稿数，不表示每轮固定使用 4 个。运行时以数据目录的 `config/profiles/` 为准。
-仓库的初始化配置位于 `apps/windows-manager/config/profiles/xxs-160k.json` 和
-`apps/windows-manager/config/profiles/s-128k.json`，它们用于首次初始化，不会覆盖已有的个人设置，
-也不一定与本机后来保存的参数相同。
+默认启动配置是 `gsq-vision-rk8v4-120k`。上表就是本包 `config/profiles/` 保存的日常参数；
+其中 adaptive MTP 会按运行情况调整草稿长度，4 是最大草稿数，不表示每轮固定使用 4 个。
+运行时以数据目录的 `config/profiles/` 为准。仓库的初始化配置位于
+`apps/windows-manager/config/profiles/gsq-vision-rk8v4-120k.json` 和
+`apps/windows-manager/config/profiles/gsq-iq3s-vision-rk8v4-56k.json`，它们用于首次初始化，
+不会覆盖已有的个人设置，也不一定与本机后来保存的参数相同。
+
+两个配置都没有写 `--cuda-memory-policy`，因此走引擎默认策略（`default`）。本版
+`mixed` / `strict` 只支持纯文本，与默认开启的 `--vision` 互斥，想改用严格显存策略
+需要新建一个关闭视觉的配置。**KV 精度尾巴**是本移植新增的选项：把每个序列最近 1024 个
+token 的 K/V 不量化保存在设备端精确环里，只在 `bf16` 和 INT8 族
+（`int8` / `rk8v4` / `rk4v4` / `rk4v4-e8` / `rk2v4-e8`）上合并生效；N=1024、并发 1 时
+约占 64 MiB 设备显存，decode 约 −6%。显存表、生效条件和质量收益见
+[可调参数说明书](参数说明书.md)第 4.3 与第 6 节。
 
 输出上限 0 不添加固定的默认 token 上限，客户端仍可指定自己的限制。它不会扩大上下文：
 输入、思考和最终回答共享窗口，要给生成留空间。xhigh 是思考级别，不是固定 token 预算。
@@ -194,8 +211,9 @@ prompt kernel；报告 `fast_prefill_kernel=false` 仅表示没有额外强制�
 例如 MTP 与复制草稿需要配套后端；跨请求复制归档还要给 RAM 预算。
 `--lookup-ngram` 的当前执行路径用于 MTP；不启用 MTP 时可以保留这个设置，但不会生效。
 
-视觉选项只对包含视觉组件的模型有效。本页 Swift XXS/S 转换产物只有 text/MTP，勾选视觉
-不会给模型增加看图能力。视觉启用时使用 `default` 显存策略，不能与本版 `mixed/strict`
+视觉选项只对包含视觉组件的模型有效。本页两个 GSQ-RCO 成品都带 BF16 视觉组件，默认以
+`overlay` 常驻并使用 4096 的合并上限；换成只有 text/MTP 的制品时，勾选视觉不会给模型
+增加看图能力。视觉启用时使用 `default` 显存策略，不能与本版 `mixed/strict`
 组合；CPU 视觉模式未指定媒体 token 上限时为 256。多 GPU 流水线选项仅供 Linux 引擎，
 Windows 页面会标明不可用；D3D12 与 DirectStorage 也需要具备对应构建支持的引擎。
 
@@ -275,6 +293,11 @@ Dedicated 增量，可能包括惰性分配，不是逐笔 Graph 账本。
 ## 6. 当前运行包性能实测：2026-09-30
 
 管理器为 1.4.1；引擎为 CUDA 13.4.2 / Native SM120a Release，D3D12 residency 关闭。
+
+本节是 2026-09-30 对**上一版 Swift text/MTP 成品**（`xxs-160k` / `s-128k`，Host cache
+6144 MiB，显存策略 `strict`）的实测记录。本分支改发带视觉的 GSQ-RCO 制品、种子改为
+120K / 56K 并新增 KV 精度尾巴后，档位、显存占用和可选项都会变化；旧数字只作同硬件、
+同引擎族的参考，不代表当前种子的容量或速度。
 
 **测试环境：**RTX 5070 Ti 16 GB（NVML 总量 16303 MiB）、Ryzen 7 9800X3D、约 32 GB 系统内存、Windows 11 build 26200、NVIDIA 驱动 617.14。开始本轮前已释放其他程序占用的显存，整卡采样 used 为 4 MiB、free 为 15992 MiB。
 
@@ -410,7 +433,7 @@ $jobs = 4
 Set-Location $ninferRepo
 foreach ($required in @(
   'apps/windows-manager/NInfer.Manager.csproj',
-  'apps/windows-manager/config/profiles/xxs-160k.json',
+  'apps/windows-manager/config/profiles/gsq-vision-rk8v4-120k.json',
   'src/product/cuda_memory_options.h',
   'tools/convert/__main__.py'
 )) {
@@ -504,14 +527,15 @@ if ($LASTEXITCODE -ne 0) { throw 'Engine link failed' }
 
 ### 7.4 转换 GSQ/RCO 模型
 
-按 [下载与 GSQ GGUF 转换教程](rtx-5070ti-windows-downloads.md) 准备 Swift 或 ISTA
-GGUF 和对应配置/分词器，使用同一份源码的 `tools.convert`。该教程包含 Python 环境、
-下载文件、`qwen3_8_27b_gguf`、`text,mtp`、CPU 转换和 `--proposal` 的完整命令。
+按 [下载与 GSQ GGUF 转换教程](rtx-5070ti-windows-downloads.md) 准备 ISTA-DASLab 的
+GSQ-RCO GGUF（`IQ3_XXS-mtp` / `IQ3_S-mtp`）、同一发布版的 BF16 `mmproj` 视觉文件
+以及基座模型的配置/分词器，使用同一份源码的 `tools.convert`。该教程包含 Python 环境、
+下载文件、`qwen3_8_27b_gguf`、`text,vision,mtp`、CPU 转换和 `--proposal` 的完整命令。
 
-若要得到本页两个默认配置，分别转换 Swift `IQ3_XXS` 和 `IQ3_S`，输出保持教程中的
-文件名并放在仓库 `converted-models/`。原始 GGUF、元数据和转换报告是制作材料，
-不放入最终日常包；转换器也不随运行包发布。转换不会编译 CUDA 引擎，也不需要再次
-量化已经选定的 GGUF。
+若要得到本页两个默认配置，分别转换 `IQ3_XXS` 和 `IQ3_S` 两档，命名保持教程中的
+`...-vision-bf16-mtp` 并放在仓库 `converted-models/`。原始 GGUF、`mmproj`、元数据和
+转换报告是制作材料，不放入最终日常包；转换器也不随运行包发布。转换不会编译 CUDA
+引擎，也不需要再次量化已经选定的 GGUF。
 
 ### 7.5 构建网页和托盘管理器
 
@@ -588,10 +612,10 @@ Get-ChildItem -LiteralPath $seedRoot -File | Copy-Item -Destination (Join-Path $
 Get-ChildItem -LiteralPath (Join-Path $seedRoot 'profiles') -File -Filter '*.json' |
   Copy-Item -Destination (Join-Path $packageRoot 'config\profiles')
 
-foreach ($name in @('rtx-5070ti-windows.md', 'rtx-5070ti-windows.en.md', 'rtx-5070ti-windows-downloads.md')) {
+foreach ($name in @('rtx-5070ti-windows.md', 'rtx-5070ti-windows.en.md', 'rtx-5070ti-windows-downloads.md', '参数说明书.md')) {
   Copy-Item -LiteralPath (Join-Path $ninferRepo "docs\$name") -Destination (Join-Path $packageRoot 'docs')
 }
-foreach ($name in @('ninfer-tray-running.png', 'ninfer-tray-stopped.png', 'rtx5070ti-benchmark-20260929-all.csv', 'rtx5070ti-xxs-chunks-20260929.csv')) {
+foreach ($name in @('ninfer-tray-running.png', 'ninfer-tray-stopped.png', 'rtx5070ti-benchmark-20260930-reduced-all.csv', 'rtx5070ti-benchmark-20260930-reduced-best.csv', 'rtx5070ti-benchmark-20260930-reduced-ranges.csv')) {
   Copy-Item -LiteralPath (Join-Path $ninferRepo "docs\assets\$name") -Destination (Join-Path $packageRoot 'docs\assets')
 }
 Copy-Item -LiteralPath (Join-Path $ninferRepo 'LICENSE') -Destination $packageRoot
@@ -608,16 +632,16 @@ Get-ChildItem -LiteralPath $cudaRoot -File |
   Copy-Item -Destination (Join-Path $packageRoot 'licenses')
 ```
 
-接着放入已转换的模型。只需要 XXS 时可从 `$entryNames` 中去掉 S 那一行；
-如果改了文件名或使用 ISTA，后续在网页中选择实际模型文件，保存自己的 profile。
+接着放入已转换的模型。只需要 IQ3_XXS 时可从 `$entryNames` 中去掉 IQ3_S 那一行；
+如果改了文件名或换了别的权重，后续在网页中选择实际模型文件，保存自己的 profile。
 下面按各自 `.conversion.json` 报告中的 `files` 列表复制主文件和全部分卷，不猜测卷名，
 也不会覆盖已有模型文件。报告与转换输出先保留在原转换位置，复制完成后不必放入运行包。
 
 ```powershell
 $convertedModelRoot = Join-Path $ninferRepo 'converted-models'
 $entryNames = @(
-  'Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.ninfer',
-  'Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.ninfer'
+  'Qwen3.8-27B-GSQ-RCO-IQ3_XXS-vision-bf16-mtp.ninfer',
+  'Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-bf16-mtp.ninfer'
 )
 $modelDir = Join-Path $packageRoot 'model'
 $filesToCopy = @(foreach ($entryName in $entryNames) {
@@ -682,14 +706,21 @@ FFmpeg/curl 桥接；本次没有在空白 Windows 上重新安装完整 vcpkg/C
 
 ### 7.8 已完成的管理器验证
 
-管理器 1.3.1 的 Release 构建完成，0 warning、0 error；117 项后端检查、37 项平台
-检查通过，后者包含 19 项隔离自启检查。使用真实 Windows ACL 拒绝程序目录写入时，
-仍可正常使用 AppData 保存数据；该测试结束后已恢复 ACL。
+**继承自上游的 1.3.1 记录：**管理器 1.3.1 的 Release 构建完成，0 warning、0 error；
+117 项后端检查、37 项平台检查通过，后者包含 19 项隔离自启检查。使用真实 Windows ACL
+拒绝程序目录写入时，仍可正常使用 AppData 保存数据；该测试结束后已恢复 ACL。
 
-实际部署也已验证：18 个配置文件内容不变地导入 AppData，XXS 160K 成功启动，模板和
+当时实际部署也已验证：18 个配置文件内容不变地导入 AppData，XXS 160K 成功启动，模板和
 设备 profile 参数指向 AppData 的 `config/`，日志写入 AppData 的 `logs/`。API 短请求
 返回 `OK`（输入 16、输出 2 tokens），随后停止模型。**尚未真正重启并重新登录**，隔离
 自启检查不能替代这一验证；这项管理器启动验证与第 6 节性能测量分别记录。
+
+**本移植包（管理器 1.4.1）的验证：**274 项后端检查全部通过，覆盖新增的
+`--kv-tail-tokens` / `--kv-tail-type` 的保存、重载与启动装配，两个精度尾巴种子配置，
+以及非法尾巴组合的拒绝路径。组装后的运行目录也做过无开发环境检查：在只保留系统目录的
+PATH 下执行 `engine/ninfer-serve.exe --help` 退出码 0 并列出这两个新选项；管理器的
+`/api/state` 返回 `gsq-vision-rk8v4-120k` 和 `gsq-iq3s-vision-rk8v4-56k` 两个配置
+（尾巴 1024 / f16），网页构建里包含精度尾巴分组，`/api/exit` 能正常退出。
 
 管理器检查无需 GPU，从仓库根目录执行：
 

@@ -8,8 +8,9 @@ request**. It combines the CUDA 13.4.2 Native SM120a Release engine with
 Model management and monitoring run in your browser; no separate Python,
 CMD or PowerShell launcher is needed.
 
-The default profiles are **XXS 160K and S 128K**, both using the `strict`
-memory policy. K means 1024 tokens. This guide covers operation, file placement,
+The default profiles are **`gsq-vision-rk8v4-120k` (IQ3_XXS, 120K)** and
+**`gsq-iq3s-vision-rk8v4-56k` (IQ3_S, 56K)**, with Vision and the KV precision tail
+enabled under the default memory policy. K means 1024 tokens. This guide covers operation, file placement,
 settings and the evidence behind those defaults.
 
 ## 1. Start the manager
@@ -17,13 +18,13 @@ settings and the evidence behind those defaults.
 1. [Download the complete runtime directory from Quark Drive](https://pan.quark.cn/s/28b896c4b0c0)
    and save it to a permanent location, such as `qwen27b`. Extract it first if downloaded as an archive.
    Do not copy the EXE alone.
-2. The package includes converted Swift S / XXS `.ninfer` models, using a little over 20GB
-   of disk space together; the complete runtime directory currently totals approximately 23.5GB.
+2. The package includes converted GSQ-RCO IQ3_XXS / IQ3_S `.ninfer` models (about 10.3 GiB
+   and 11.9 GiB, roughly 22 GiB together); the complete runtime directory is about 23GB.
    Preserve the complete files in `model/`, including all continuation volumes when adding your own models.
 3. Double-click `NInferManager.exe`. It has no main window or terminal;
    look for its icon in the Windows notification area.
 4. Right-click the icon and open Manage Models to check the configuration.
-   Choose XXS or S from the Start Model submenu.
+   Choose IQ3_XXS or IQ3_S from the Start Model submenu.
 5. Once ready, open monitoring or copy the API base and model name from the tray.
 
 | Model ready | Stopped or not ready |
@@ -37,7 +38,7 @@ API base to `http://127.0.0.1:18081/v1`. Management requires no authentication: 
 Select `127.0.0.1` (local only) or `0.0.0.0` (LAN) in the model API host field. For LAN mode, the manager detects an available LAN IPv4 address and displays `http://LAN-IP:port/v1` in the website and tray. Health checks and monitoring still connect through loopback. Other devices use the displayed address, not `0.0.0.0`; Windows Firewall must allow the port.
 
 Both profiles expose
-**`swift-1.5-qwen3.8-27b`** to clients, with only one loaded at a time.
+**`qwen3.8-27b-gsq-rco`** to clients, with only one loaded at a time.
 Start is disabled while loading, running or stopping.
 
 Closing the browser does not stop inference. Stopping the model leaves management
@@ -56,10 +57,10 @@ at the sign-in screen will not load the model.
 | Independent setting | Effect when enabled |
 |---|---|
 | Start with Windows | Launch the tray manager after user sign-in |
-| Automatically start default model | Load the selected default profile when the manager starts; initially `xxs-160k` |
+| Automatically start default model | Load the selected default profile when the manager starts; initially `gsq-vision-rk8v4-120k` |
 
 **Start with Windows is off by default** and must be enabled in the site or tray.
-Automatic loading of the default XXS 160K profile remains enabled in the initial
+Automatic loading of the default `gsq-vision-rk8v4-120k` (IQ3_XXS 120K) profile remains enabled in the initial
 configuration. Existing personal settings keep their values; upgrading does not
 turn either setting back on. Effective login startup depends on both registration
 and Windows Startup Apps state.
@@ -114,7 +115,7 @@ Program directory / PackageRoot, such as qwen27b/ or an installation under Progr
 │  └─ …                            Every continuation volume, with original names
 ├─ config/                         First-use configuration seeds, not the active copy
 ├─ wwwroot/                        Production management and monitoring website
-├─ docs/                           Chinese/English guides, download page and images
+├─ docs/                           Chinese/English guides, parameter manual, download page and images
 ├─ LICENSE                         Project license
 └─ licenses/                       NVIDIA EULA, dependency licenses and sources
 
@@ -123,8 +124,8 @@ Personal data directory / DataRoot
 ├─ config/
 │  ├─ settings.json                Language, startup, default profile, scan paths, web port
 │  ├─ profiles/
-│  │  ├─ xxs-160k.json              XXS paths, API model name and launch arguments
-│  │  └─ s-128k.json                S paths, API model name and launch arguments
+│  │  ├─ gsq-vision-rk8v4-120k.json      IQ3_XXS paths, API name and launch arguments (default)
+│  │  └─ gsq-iq3s-vision-rk8v4-56k.json  IQ3_S paths, API name and launch arguments
 │  ├─ chat_template.jinja           Active conversation template
 │  ├─ chat_template.LICENSE         Template license
 │  ├─ device-profiles.json          Active GPU calibration
@@ -172,36 +173,49 @@ tray menu without changing model settings or discarding unsaved edits.
 
 ## 3. Models and default settings
 
-The models are `Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.ninfer` and its
-`IQ3_S-mtp.ninfer` counterpart. These are text/MTP v3 containers converted from GGUF files that use multiple tensor quantization types
-**without a usable image-understanding component**. Original GGUF files and
-conversion reports are not runtime requirements. Another artifact needs its own
-capacity and performance check.
+The models are `Qwen3.8-27B-GSQ-RCO-IQ3_XXS-vision-bf16-mtp.ninfer` (about 10.3 GiB) and
+`Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-bf16-mtp.ninfer` (about 11.9 GiB): the `qwen3_8_27b_gguf`
+recipe keeps ISTA-DASLab's 3.5-bit GSQ-RCO GGUF blocks byte for byte and adds the same
+release's BF16 Vision component (`mmproj`) plus a reduced-vocabulary proposal head.
+Both artifacts **do understand images**, and both expose the model name
+`qwen3.8-27b-gsq-rco`. Original GGUFs, the `mmproj` and conversion reports are not runtime
+requirements. Another artifact needs its own capacity and performance check.
 
-| Setting | XXS default | S default |
+| Setting | `gsq-vision-rk8v4-120k` (default) | `gsq-iq3s-vision-rk8v4-56k` |
 |---|---|---|
-| Profile ID | `xxs-160k` | `s-128k` |
-| Context and fixed KV capacity | 163840 / 160K | 131072 / 128K |
-| Prefill chunk | 1024 | 256 |
+| Model | IQ3_XXS, about 10.3 GiB | IQ3_S, about 11.9 GiB |
+| Context and fixed KV capacity | 122880 / 120K | 57344 / 56K |
+| Prefill chunk | 1024 | 1024 |
 | Concurrency | 1 | 1 |
-| KV / GDN state | rk8v4 / FP16 | Same |
+| KV precision / GDN state | `rk8v4` / FP16 | Same |
+| KV precision tail | `--kv-tail-tokens 1024 --kv-tail-type f16` | Same |
+| Vision | On, resident `overlay`, merge cap 4096 | Same |
 | Drafting | Maximum 4 MTP drafts, adaptive MTP enabled, ngram 31, full MTP attention window | Same |
 | Graph allowance | 72 MiB | Same |
-| `--lm-head-draft` | Off | Off |
-| CPU context cache | 6144 MiB, one device snapshot | Same |
-| CUDA memory policy | `strict`, equivalent to `strict-64-128` | Same |
+| `--lm-head-draft` | Off (the artifact carries a proposal head you can turn on) | Same |
+| CPU context cache | 2048 MiB, one device snapshot | Same |
+| CUDA memory policy | Unset, so the engine default `default` applies | Same |
 | Default output cap | `--default-max-tokens 0` | Same |
 | Sampling | temperature 1, top-p 0.95, top-k 20, min-p 0 | Same |
 | Penalties and seed | presence/frequency 0, seed 42; neutral repetition penalty 1 | Same |
 | Thinking | Enabled, xhigh, preserve thinking | Same |
 
-The table records the current package's saved everyday settings as of 2026-09-30.
-Adaptive MTP adjusts draft length at runtime: 4 is the maximum, not a fixed count
-for every round. Active profiles are read from `config/profiles/` in the data directory.
-The repository's initialization profiles are
-`apps/windows-manager/config/profiles/xxs-160k.json` and
-`apps/windows-manager/config/profiles/s-128k.json`. They seed the first launch,
+The default start profile is `gsq-vision-rk8v4-120k`. The table is what this package's
+`config/profiles/` stores as its everyday settings. Adaptive MTP adjusts draft length at runtime:
+4 is the maximum, not a fixed count for every round. Active profiles are read from
+`config/profiles/` in the data directory. The repository's initialization profiles are
+`apps/windows-manager/config/profiles/gsq-vision-rk8v4-120k.json` and
+`apps/windows-manager/config/profiles/gsq-iq3s-vision-rk8v4-56k.json`. They seed the first launch,
 do not overwrite existing personal settings, and may differ from settings saved later on this machine.
+
+Neither profile writes `--cuda-memory-policy`, so the engine's `default` policy applies. This
+version's `mixed` and `strict` policies support text only and conflict with the `--vision`
+that these seeds enable; use a separate profile with vision off if you want a strict policy.
+The **KV precision tail** is new in this port: it keeps the newest 1024 tokens' K/V unquantized
+in a device-side exact ring and merges it only for a `bf16` or INT8-family body
+(`int8` / `rk8v4` / `rk4v4` / `rk4v4-e8` / `rk2v4-e8`). At N=1024 and concurrency 1 it costs
+about 64 MiB of device memory and reduces decode by roughly 6%. See sections 4.3 and 6 of the
+[parameter manual](参数说明书.md) for the memory table, the conditions and the measured benefit.
 
 An output cap of 0 removes the fixed default cap; clients can still supply their
 own limit. It does not expand the context window. Input, reasoning and final output
@@ -238,8 +252,9 @@ For example, MTP and copy drafts need the matching backend, while cross-request 
 also need a RAM budget. The current `--lookup-ngram` execution path is used by MTP;
 the setting can be saved without MTP but does not take effect then.
 
-Vision requires a model containing visual components. The Swift XXS/S artifacts converted here
-contain only text/MTP; enabling a switch does not add image understanding. Vision uses the
+Vision requires a model containing visual components. Both GSQ-RCO artifacts here carry the BF16
+Vision component and keep it resident with `overlay` and a 4096 merge cap; with a text/MTP-only
+artifact, enabling a switch does not add image understanding. Vision uses the
 `default` memory policy and cannot be combined with this version's `mixed/strict` policies.
 CPU vision defaults to 256 merged media tokens when no explicit limit is set. Multi-GPU pipeline
 options are Linux-only and marked unavailable in the Windows editor. D3D12 and DirectStorage
@@ -340,6 +355,12 @@ Shared baseline/growth are displayed separately.
 ## 6. Current package performance: 2026-09-30
 
 The manager is version 1.4.1; the engine is CUDA 13.4.2 / Native SM120a Release, with D3D12 residency disabled.
+
+This section records the **previous package's Swift text/MTP artifacts** (`xxs-160k` / `s-128k`,
+6144 MiB Host cache, `strict` memory policy) as measured on 2026-09-30. This branch ships the
+Vision-carrying GSQ-RCO artifacts instead, seeds 120K / 56K, and adds the KV precision tail, so
+tiers, memory footprint and available options all change; the old numbers are a reference for the
+same hardware and engine family, not the current seeds' capacity or speed.
 
 **Test environment:** RTX 5070 Ti 16 GB (16303 MiB total reported by NVML), Ryzen 7 9800X3D, approximately 32 GB system RAM, Windows 11 build 26200, NVIDIA driver 617.14. Other applications' GPU allocations were released before this fresh run; NVML reported 4 MiB used and 15992 MiB free.
 
@@ -483,7 +504,7 @@ $jobs = 4
 Set-Location $ninferRepo
 foreach ($required in @(
   'apps/windows-manager/NInfer.Manager.csproj',
-  'apps/windows-manager/config/profiles/xxs-160k.json',
+  'apps/windows-manager/config/profiles/gsq-vision-rk8v4-120k.json',
   'src/product/cuda_memory_options.h',
   'tools/convert/__main__.py'
 )) {
@@ -584,13 +605,14 @@ checks do not numerically qualify every NVFP4/MoE route.
 ### 7.4 Convert GSQ/RCO models
 
 Follow the [download and GSQ GGUF conversion tutorial](rtx-5070ti-windows-downloads.md)
-for Swift or ISTA GGUFs and the matching metadata/tokenizer, using `tools.convert`
+for ISTA-DASLab's GSQ-RCO GGUFs (`IQ3_XXS-mtp` / `IQ3_S-mtp`), the same release's BF16
+`mmproj` Vision file and the base checkpoint's metadata/tokenizer, using `tools.convert`
 from the same source. That tutorial includes the Python environment, downloads,
-`qwen3_8_27b_gguf`, `text,mtp`, CPU conversion and `--proposal` commands.
+`qwen3_8_27b_gguf`, `text,vision,mtp`, CPU conversion and `--proposal` commands.
 
-For both defaults in this guide, convert Swift `IQ3_XXS` and `IQ3_S` separately.
-Keep the documented filenames under the source tree's `converted-models/`.
-The original GGUFs, metadata and conversion reports are build inputs, not runtime
+For both defaults in this guide, convert `IQ3_XXS` and `IQ3_S` separately, keeping the
+tutorial's `...-vision-bf16-mtp` names under the source tree's `converted-models/`.
+The original GGUFs, `mmproj`, metadata and conversion reports are build inputs, not runtime
 package contents. The converter is not shipped with the application. Conversion
 does not compile the CUDA engine or requantize the selected GGUF.
 
@@ -672,10 +694,10 @@ Get-ChildItem -LiteralPath $seedRoot -File | Copy-Item -Destination (Join-Path $
 Get-ChildItem -LiteralPath (Join-Path $seedRoot 'profiles') -File -Filter '*.json' |
   Copy-Item -Destination (Join-Path $packageRoot 'config\profiles')
 
-foreach ($name in @('rtx-5070ti-windows.md', 'rtx-5070ti-windows.en.md', 'rtx-5070ti-windows-downloads.md')) {
+foreach ($name in @('rtx-5070ti-windows.md', 'rtx-5070ti-windows.en.md', 'rtx-5070ti-windows-downloads.md', '参数说明书.md')) {
   Copy-Item -LiteralPath (Join-Path $ninferRepo "docs\$name") -Destination (Join-Path $packageRoot 'docs')
 }
-foreach ($name in @('ninfer-tray-running.png', 'ninfer-tray-stopped.png', 'rtx5070ti-benchmark-20260929-all.csv', 'rtx5070ti-xxs-chunks-20260929.csv')) {
+foreach ($name in @('ninfer-tray-running.png', 'ninfer-tray-stopped.png', 'rtx5070ti-benchmark-20260930-reduced-all.csv', 'rtx5070ti-benchmark-20260930-reduced-best.csv', 'rtx5070ti-benchmark-20260930-reduced-ranges.csv')) {
   Copy-Item -LiteralPath (Join-Path $ninferRepo "docs\assets\$name") -Destination (Join-Path $packageRoot 'docs\assets')
 }
 Copy-Item -LiteralPath (Join-Path $ninferRepo 'LICENSE') -Destination $packageRoot
@@ -692,8 +714,8 @@ Get-ChildItem -LiteralPath $cudaRoot -File |
   Copy-Item -Destination (Join-Path $packageRoot 'licenses')
 ```
 
-Now copy the converted models. Remove the S entry from `$entryNames` if you only
-need XXS. For different filenames or ISTA weights, select the actual model in the
+Now copy the converted models. Remove the IQ3_S entry from `$entryNames` if you only
+need IQ3_XXS. For different filenames or other weights, select the actual model in the
 website and save a separate profile.
 The commands use each `.conversion.json` report's `files` list for the entry and
 all volumes, without guessing volume names or overwriting existing model files.
@@ -703,8 +725,8 @@ reports do not need to be included in the runtime package.
 ```powershell
 $convertedModelRoot = Join-Path $ninferRepo 'converted-models'
 $entryNames = @(
-  'Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.ninfer',
-  'Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.ninfer'
+  'Qwen3.8-27B-GSQ-RCO-IQ3_XXS-vision-bf16-mtp.ninfer',
+  'Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-bf16-mtp.ninfer'
 )
 $modelDir = Join-Path $packageRoot 'model'
 $filesToCopy = @(foreach ($entryName in $entryNames) {
@@ -780,19 +802,28 @@ on the reader's own development machine.
 
 ### 7.8 Completed manager validation
 
-Manager 1.3.1 built in Release mode with zero warnings and zero errors.
+**Inherited 1.3.1 record:** Manager 1.3.1 built in Release mode with zero warnings and zero errors.
 All 117 backend checks and 37 platform checks passed; the latter include 19
 isolated startup checks. A real Windows ACL test denied writes to the program
 directory while AppData storage continued to work. The original ACL was restored
 after the test.
 
-The deployed application was also verified: 18 configuration files were imported
+The deployed application was also verified then: 18 configuration files were imported
 into AppData without content changes, and XXS 160K started successfully. Its
 template and device-profile arguments pointed to AppData's `config/`, while logs
 were written to AppData's `logs/`. A short API request returned `OK` (16 input and
 2 output tokens), after which the model was stopped. **A real reboot/sign-in has
 not been performed**; isolated startup checks do not replace that test. This is
 separate from the GPU benchmark in section 6.
+
+**This port's package (Manager 1.4.1):** all 274 backend checks pass, covering the new
+`--kv-tail-tokens` / `--kv-tail-type` save, reload and launch assembly, both precision-tail
+seed profiles, and the rejection paths for invalid tail combinations. The assembled runtime
+directory was checked without a development environment too: with only the system directories
+on `PATH`, `engine/ninfer-serve.exe --help` exits 0 and lists the two new options; the manager's
+`/api/state` returns the `gsq-vision-rk8v4-120k` and `gsq-iq3s-vision-rk8v4-56k` profiles
+(tail 1024 / f16), the website build contains the precision-tail group, and `/api/exit` shuts
+down cleanly.
 
 Manager checks require no GPU. Run from the repository root:
 

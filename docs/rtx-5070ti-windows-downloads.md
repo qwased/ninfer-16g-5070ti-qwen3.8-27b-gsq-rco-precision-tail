@@ -4,12 +4,13 @@
 
 ## 1. 软件包下载
 
-**[下载预编译引擎、管理器与 S / XXS 模型（夸克网盘）](https://pan.quark.cn/s/28b896c4b0c0)**
+**[下载预编译引擎、管理器与 IQ3_XXS / IQ3_S 模型（夸克网盘）](https://pan.quark.cn/s/28b896c4b0c0)**
 
-下载内容是完整的 `ninfer-manage` 运行目录，包含引擎、NInfer Manager 1.4.1、配置，
-以及已转换好的 **Swift S、Swift XXS** 两套 `.ninfer` 模型。两套模型约占 **20 多 GB 磁盘空间**：
-网盘当前显示 S 约 11.6GB、XXS 约 10.1GB，整个运行目录约 23.5GB，建议预留至少 30GB 磁盘空间。
-下载时保留完整目录结构，之后双击 `NInferManager.exe` 即可使用管理器，无需再转换这两套模型。
+下载内容是完整的运行目录，包含引擎、NInfer Manager 1.4.1、配置，
+以及已转换好的 **GSQ-RCO IQ3_XXS / IQ3_S** 两套 `.ninfer` 模型（都带 BF16 视觉组件）。
+两套模型约占 **22 GiB 磁盘空间**：约 10.3 GiB 与 11.9 GiB，整个运行目录约 23GB，
+建议预留至少 30GB 磁盘空间。下载时保留完整目录结构，之后双击 `NInferManager.exe`
+即可使用管理器，无需再转换这两套模型。
 
 **成品适用范围：本仓库的预编译引擎与配套 `.ninfer` 模型成品仅支持 RTX 50 系列。**
 实际测试设备为 RTX 5070 Ti 16GB。16GB 及以上独立显存的 RTX 30/40 系理论上也可尝试，
@@ -22,8 +23,8 @@
 | 管理器 | NInfer Manager 1.4.1，Release 发布版，Windows x64，自带 .NET 运行环境 |
 | 引擎 | CUDA 13.4.2 / nvcc 13.4.92，Native SM120a，Release 发布版，关闭 D3D12 residency |
 | 已验证设备 | RTX 5070 Ti 16 GB，Windows x64，NVIDIA 驱动 617.14 |
-| 默认配置 | Swift XXS：160K / chunk 1024；Swift S：128K / chunk 256；显存策略均为 `strict` |
-| 模型权重 | 已包含 Swift S 与 Swift XXS 的 `.ninfer` 成品，合计约 20 多 GB 磁盘占用 |
+| 默认配置 | `gsq-vision-rk8v4-120k`：IQ3_XXS、120K / chunk 1024；`gsq-iq3s-vision-rk8v4-56k`：IQ3_S、56K / chunk 1024；均开启视觉与 1024-token 精度尾巴 |
+| 模型权重 | 已包含 GSQ-RCO IQ3_XXS 与 IQ3_S 的 `.ninfer` 成品（各带 BF16 视觉组件），合计约 22 GiB |
 
 软件运行目录包含 `NInferManager.exe`、`engine/`、`config/`、`wwwroot/`、`docs/`、
 `LICENSE` 和 `licenses/`。`model/` 用来放转换后的模型。管理器已包含监控界面和 .NET
@@ -36,29 +37,31 @@
 
 ## 2. 模型下载地址
 
-上述成品已经包含 S / XXS 模型。需要自己转换、换用其他量化规格或准备其他显卡的模型时，
+上述成品已经包含两套 GSQ-RCO 模型。需要自己转换、换用其他量化规格或准备其他显卡的模型时，
 再从以下来源下载 GGUF，并参考后续转换步骤。
 
-| 模型 | GGUF 下载页面 | 配套配置与分词器来源 |
+| 项目 | 下载页面 | 用途 |
 |---|---|---|
-| Swift 1.5 Qwen3.8-27B GSQ-RCO | [ukisai/Swift-1.5-Qwen3.8-27B-GSQ-RCO-GGUF](https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-27B-GSQ-RCO-GGUF) | [ukisai/Swift-1.5-Qwen3.8-27b](https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-27b/tree/main) |
-| Qwen3.8-27B GSQ-RCO | [ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF) | [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B/tree/main) |
-
-Swift 是经过后训练的模型；ISTA 链接提供 Qwen3.8-27B 的 GSQ-RCO 量化。
-两者可用同一条转换路线，但权重不同。当前管理器自带的 XXS/S 配置对应 **Swift**。
+| Qwen3.8-27B GSQ-RCO GGUF | [ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF) | 文本权重与内置 MTP 预测头 |
+| Qwen3.8-27B 基座资源 | [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B/tree/main) | 配置、分词器，以及 BF16 `mmproj` 视觉文件 |
 
 要使用当前配置中的内置 MTP，请下载带 **`-mtp.gguf`** 后缀的文件。
 它已经包含 MTP 预测头，这条转换路线不需要再下载单独的 MTP 文件。
+成品还带视觉组件，因此还要同一基座版本的 BF16 `mmproj` 文件
+（本机使用 `mmproj-Qwen3.8-27B-BF16.gguf`）。只要纯文本成品时不需要它。
 
 | 选择 | 对应文件名 |
 |---|---|
-| Swift XXS | `Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf` |
-| Swift S | `Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf` |
-| ISTA XXS | `Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf` |
-| ISTA S | `Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf` |
+| IQ3_XXS | `Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf` |
+| IQ3_S | `Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf` |
+| 视觉（两档共用） | `mmproj-Qwen3.8-27B-BF16.gguf` |
 
-XXS 文件较小，留给上下文的显存更多；S 文件较大。这里的 160K/128K 是本机 Swift 的已测
-配置，不代表换成其他权重后也已经完成容量或性能验证。模型分发许可见各自模型页面。
+XXS 文件较小，留给上下文的显存更多；S 文件较大。种子里的 120K / 56K 是本机这两个
+成品的已测配置，不代表换成其他权重后也已经完成容量或性能验证。
+另有一条同配方的 **Swift 1.5** 后训练路线
+（`ukisai/Swift-1.5-Qwen3.8-27B-GSQ-RCO-GGUF` 配 `ukisai/Swift-1.5-Qwen3.8-27b`）：
+把 3.2 的变量换成 Swift 那一组、去掉 vision 相关行，就得到纯文本成品。
+模型分发许可见各自模型页面。
 
 ## 3. 将 GSQ GGUF 转换为 `.ninfer`
 
@@ -114,25 +117,23 @@ if ($LASTEXITCODE -ne 0) { throw 'CPU 版 PyTorch 安装失败。' }
 
 ### 3.2 选择并下载输入
 
-下面默认选择 **Swift XXS**。需要 Swift S 时，只改 `$tier` 为 `IQ3_S`。
+下面默认选择 **GSQ-RCO IQ3_XXS**。需要 IQ3_S 时，只把 `$tier` 改成 `IQ3_S`。
 
 ```powershell
 $tier = 'IQ3_XXS'
-$ggufRepo = 'ukisai/Swift-1.5-Qwen3.8-27B-GSQ-RCO-GGUF'
-$metadataRepo = 'ukisai/Swift-1.5-Qwen3.8-27b'
-$modelName = "Swift-1.5-Qwen3.8-27B-GSQ-RCO-$tier-mtp"
-```
-
-如果要用 **ISTA** 版本，用下面这组变量替换上面四行，然后执行共同的下载与转换步骤。
-
-```powershell
-$tier = 'IQ3_S'
 $ggufRepo = 'ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF'
 $metadataRepo = 'Qwen/Qwen3.8-27B'
 $modelName = "Qwen3.8-27B-GSQ-RCO-$tier-mtp"
+$visionFile = 'mmproj-Qwen3.8-27B-BF16.gguf'
+$outName = "$modelName-vision-bf16"
 ```
 
-下载所选 GGUF，以及对应模型的五个配置与分词器文件。
+`$outName` 是存进成品的实例名，也决定输出文件名
+（`Qwen3.8-27B-GSQ-RCO-IQ3_XXS-vision-bf16-mtp.ninfer`），与本机两套成品一致。
+只要纯文本成品时，删掉 3.3 中的 `--source "vision=..."`、把 `--components` 写成
+`text,mtp`，`$outName` 也可以只留 `$modelName`。
+
+下载所选 GGUF、对应基座的配置与分词器文件，以及视觉 `mmproj`。
 **不需要下载 BF16 `.safetensors` 权重。**
 
 | 文件 | 用途 |
@@ -142,6 +143,7 @@ $modelName = "Qwen3.8-27B-GSQ-RCO-$tier-mtp"
 | `tokenizer_config.json` | 分词器设置与特殊 token |
 | `chat_template.jinja` | 模型内置的对话模板 |
 | `generation_config.json` | 停止 token 等生成设置 |
+| `mmproj-Qwen3.8-27B-BF16.gguf` | BF16 视觉编码器；带视觉的成品必需 |
 
 ```powershell
 $inputDir = Join-Path $PWD "conversion-input\$modelName"
@@ -149,6 +151,8 @@ $metadataDir = Join-Path $inputDir 'metadata'
 
 & $hf download $ggufRepo "$modelName.gguf" --local-dir $inputDir
 if ($LASTEXITCODE -ne 0) { throw 'GGUF 下载失败，请先处理下载报错。' }
+& $hf download $metadataRepo $visionFile --local-dir $inputDir
+if ($LASTEXITCODE -ne 0) { throw '视觉 mmproj 下载失败；只要纯文本成品时可跳过这一步。' }
 & $hf download $metadataRepo `
   config.json tokenizer.json tokenizer_config.json chat_template.jinja generation_config.json `
   --local-dir $metadataDir
@@ -156,8 +160,8 @@ if ($LASTEXITCODE -ne 0) { throw '模型配置或分词器下载失败。' }
 ```
 
 这里的输入目录用于转换，和管理器的运行配置目录是两回事。
-Swift 的 GGUF 配 Swift 的配置与分词器；ISTA 的 GGUF 配 Qwen 的配置与分词器，
-按上面的变量组合使用即可。
+GSQ-RCO 的 GGUF 配 Qwen 基座的配置、分词器和 `mmproj`，命名与
+[权重转换说明](weight-conversion.md)里的 GSQ-RCO 示例是同一套 `qwen3_8_27b_gguf` 配方。
 
 ### 3.3 执行转换
 
@@ -167,7 +171,8 @@ Swift 的 GGUF 配 Swift 的配置与分词器；ISTA 的 GGUF 配 Qwen 的配�
 $outputDir = Join-Path $PWD 'converted-models'
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 $ggufPath = Join-Path $inputDir "$modelName.gguf"
-$outputPath = Join-Path $outputDir "$modelName.ninfer"
+$visionPath = Join-Path $inputDir $visionFile
+$outputPath = Join-Path $outputDir "$outName.ninfer"
 foreach ($file in @('config.json', 'tokenizer.json', 'tokenizer_config.json',
                     'chat_template.jinja', 'generation_config.json')) {
   if (!(Test-Path -LiteralPath (Join-Path $metadataDir $file) -PathType Leaf)) {
@@ -175,16 +180,18 @@ foreach ($file in @('config.json', 'tokenizer.json', 'tokenizer_config.json',
   }
 }
 if (!(Test-Path -LiteralPath $ggufPath -PathType Leaf)) { throw "缺少 GGUF：$ggufPath" }
+if (!(Test-Path -LiteralPath $visionPath -PathType Leaf)) { throw "缺少视觉文件：$visionPath" }
 
 & $python -u -m tools.convert `
   --model $metadataDir `
   --recipe qwen3_8_27b_gguf `
   --source "gguf=$ggufPath" `
-  --components text,mtp `
+  --source "vision=$visionPath" `
+  --components text,vision,mtp `
   --proposal `
   --device cpu `
   --rows-per-chunk 512 `
-  --name $modelName `
+  --name $outName `
   --out $outputPath
 if ($LASTEXITCODE -ne 0) { throw '转换失败，请根据上方报错处理；不要继续安装不完整模型。' }
 ```
@@ -194,8 +201,10 @@ if ($LASTEXITCODE -ne 0) { throw '转换失败，请根据上方报错处理；�
 | `--model` | 配置和分词器所在目录，不是 GGUF 文件 |
 | `--recipe qwen3_8_27b_gguf` | 使用保留原 GGUF 量化块的 Qwen3.8-27B 转换配方 |
 | `--source "gguf=..."` | 指向下载的 GSQ GGUF 文件 |
-| `--components text,mtp` | 导入文本权重与内置 MTP |
+| `--source "vision=..."` | 指向下载的 BF16 `mmproj`；不要视觉时删掉这一行 |
+| `--components text,vision,mtp` | 导入文本权重、视觉组件与内置 MTP；纯文本成品写 `text,mtp` |
 | `--proposal` | 与本机已有制品一致，额外保存供 `--lm-head-draft` 使用的精简词表预测头；不是 MTP 的必需条件 |
+| `--name` | 存进成品的实例名，会出现在输出文件名里 |
 | `--device cpu` | 使用 CPU 转换，不依赖 CUDA 版 PyTorch |
 | `--rows-per-chunk 512` | 转换时分批处理的行数，与推理时的 prefill chunk 无关 |
 | `--out` | 新的输出文件路径 |
@@ -205,18 +214,19 @@ if ($LASTEXITCODE -ne 0) { throw '转换失败，请根据上方报错处理；�
 运行模型不需要这份报告。
 使用 `--proposal` 时，转换器会读取仓库自带的
 `tools/freq_corpus/fixtures/ranking/ranking.train.counts.i64` 选择预测词表，不需要另跑校准。
-完成后终端会输出 `wrote ...`；本机 Swift XXS/S 已使用上述 CPU、512 行、`text,mtp`、
-`--proposal` 路线生成并运行成功。ISTA 配方与输入格式也已核对，但本机未重新转换和实测
-这两个 ISTA 文件。
+完成后终端会输出 `wrote ...`；本机两个 IQ3_XXS / IQ3_S 成品就是用这条 CPU、512 行、
+`text,vision,mtp`、`--proposal` 路线生成并运行成功的，成品自带的转换报告记录的来源与
+[权重转换说明](weight-conversion.md)的 GSQ-RCO 示例一致。
 
 如果始终关闭 `--lm-head-draft`，可以省略 `--proposal`，这不会关闭内置 MTP。
-如果下载的是不带 MTP 的普通 GGUF，应改为 `--components text`，并另存不使用推测解码的
-启动配置：移除 `--spec`、`--draft-tokens` 和 `--ngram-draft-tokens`，手动设置过的
-`--lm-head-draft`、`--adaptive-mtp`、`--mtp-attention-window` 也要移除。
+如果下载的是不带 MTP 的普通 GGUF，应改为 `--components text,vision`（纯文本时用 `text`），
+并另存不使用推测解码的启动配置：移除 `--spec`、`--draft-tokens` 和 `--ngram-draft-tokens`，
+手动设置过的 `--lm-head-draft`、`--adaptive-mtp`、`--mtp-attention-window` 也要移除。
 只清空 `--spec`，却保留正数的 MTP／复制草稿或其他依赖它的参数，会导致检查报错；
 `--lookup-ngram` 可保留在配置里，但当前执行路径仅在启用 MTP 时生效。
 
-本例没有导入 vision 组件，生成的模型不包含图像编码能力。
+删掉 `--source "vision=..."`、把 `--components` 写成 `text,mtp`，得到的是纯文本成品，
+不包含图像编码能力；这种制品上勾选视觉不会生效。
 
 ### 3.4 放入管理器
 
@@ -244,11 +254,12 @@ foreach ($file in $report.files) {
 然后在管理器中完成选择：
 
 1. 双击 `NInferManager.exe`，从托盘打开“管理模型”。管理器会自动扫描，也可点“重新扫描”。
-2. Swift XXS/S 的默认文件名与上面示例一致，分别选用对应的 XXS 或 S 启动配置。
-3. 使用其他名称或 ISTA 权重时，点“新建配置”，填写显示名称，选择实际模型文件并保存。
-   新建配置会带入现有参数，应逐项确认：XXS/S 的上下文和 chunk 是否合适、模型 ID 是否是
-   客户端要使用的名称、文件是否确实带 MTP。需要便于区分 ISTA 时，可使用
-   `qwen3.8-27b-gsq-rco` 作为模型 ID；首次加载应重新确认可用显存。
+2. 成品文件名与上面示例一致，分别选用 `gsq-vision-rk8v4-120k` 或
+   `gsq-iq3s-vision-rk8v4-56k` 启动配置。
+3. 使用其他名称或其他权重时，点“新建配置”，填写显示名称，选择实际模型文件并保存。
+   新建配置会带入现有参数，应逐项确认：上下文和 chunk 是否合适、模型 ID 是否是
+   客户端要使用的名称、文件是否确实带 MTP 和视觉。建议沿用 `qwen3.8-27b-gsq-rco`
+   作为模型 ID；首次加载应重新确认可用显存。
 4. 从托盘的“启动模型”二级菜单或网页启动。需要登录后加载这个配置时，在“偏好设置”中选它
    作为默认启动配置，并按需要开启“随 Windows 登录启动”和“自动加载默认模型”。
 
@@ -257,4 +268,5 @@ foreach ($file in $report.files) {
 及它的分卷。
 
 运行时使用的数据目录 `config/chat_template.jinja` 与转换时封装的原始模板是两个独立
-资源；默认管理器参数会选择前者。软件使用方法、显存策略、启动参数和性能实测见顶部指南。
+资源；默认管理器参数会选择前者。软件使用方法、显存策略、启动参数和性能实测见顶部指南，
+逐项参数见[可调参数说明书](参数说明书.md)。

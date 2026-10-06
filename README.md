@@ -227,7 +227,7 @@ ninfer-perplexity models/qwen3_8_27b.ninfer --kv-dtype rk4v4-e8 --kv-tail-tokens
 
 ## 10. 快速开始、下载与许可
 
-产品安装、Windows 部署、参数与模型转换请看 **[RTX 5070 Ti Windows 指南](docs/rtx-5070ti-windows.md)**；预编译引擎与配套 `.ninfer` 模型成品见**[下载说明](docs/rtx-5070ti-windows-downloads.md)**（**[夸克网盘](https://pan.quark.cn/s/28b896c4b0c0)**）。构建方式见 [AGENTS.md](AGENTS.md) 与[构建系统](docs/maintainer/build-system.md)。
+产品安装、Windows 部署、参数与模型转换请看 **[RTX 5070 Ti Windows 指南](docs/rtx-5070ti-windows.md)**；逐项可调参数（含精度尾巴的显存与收益）见**[可调参数说明书](docs/参数说明书.md)**；预编译引擎与配套 `.ninfer` 模型成品见**[下载说明](docs/rtx-5070ti-windows-downloads.md)**（**[夸克网盘](https://pan.quark.cn/s/28b896c4b0c0)**）。构建方式见 [AGENTS.md](AGENTS.md) 与[构建系统](docs/maintainer/build-system.md)。
 
 本仓库的 Windows / RTX 5070 Ti 构建、显存策略与管理器来自直接上游 [Ryan-gsq](https://github.com/Ryan-gsq/ninfer-16g-5070ti-5080-5090-qwen3.8-27b-gsq-rco)；上游汇总线来自 [iamwavecut/ninfer-all](https://github.com/iamwavecut/ninfer-all)，原始引擎来自 [Neroued/ninfer](https://github.com/Neroued/ninfer)，各项改动保留原作者署名（[维护者与改动对应表](docs/maintainer/consolidated-line.md)）。精度尾巴算法移植自 beellama.cpp 的 KVCPT（**只搬算法、不搬代码**），参考 [PORT-BEELLAMA-SPEC.md](PORT-BEELLAMA-SPEC.md)。
 
