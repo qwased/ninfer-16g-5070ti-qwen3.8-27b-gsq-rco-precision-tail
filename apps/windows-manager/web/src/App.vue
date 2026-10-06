@@ -61,6 +61,12 @@ function groupNotes(group:ParameterGroup):string[] {
     if(visionEnabled.value && memoryMode.value!=='default')notes.push(t('当前显存策略仅支持纯文本。启用视觉前，请手动把显存策略改为 default；此处不会替你改动。','The current memory policy is text-only. Select default memory policy yourself before enabling vision.'))
     if(!visionEnabled.value && ['overlay','cpu'].includes(parameters['--vision-residency'] || ''))notes.push(t('已保留视觉放置位置；overlay / cpu 需要开启视觉。若保持视觉关闭，请把放置位置改为 resident 或引擎默认。','The saved placement is preserved. overlay / cpu require vision. To leave vision off, select resident or the engine default.'))
   }
+  if(group.fields.some(field => field.key === '--kv-tail-tokens')) {
+    const tokens=Number(parameters['--kv-tail-tokens'] || 0), body=parameters['--kv-dtype']
+    if(tokens>0 && ['fp8','nvfp4','k8v4'].includes(body || ''))notes.push(t('当前 KV 缓存格式只在解码时惰性分配精确环，不与量化 body 合并；开与关的字节一致。要看到尾巴收益，请改用 bf16 或 INT8 族（int8 / rk8v4 / rk4v4 / rk4v4-e8 / rk2v4-e8）。','The current KV format allocates the exact ring inertly and never merges it; with or without the tail the bytes are identical. To benefit, switch to bf16 or the INT8 family (int8 / rk8v4 / rk4v4 / rk4v4-e8 / rk2v4-e8).'))
+    if('--kv-tail-type' in parameters && tokens===0)notes.push(t('已填写精确环元素类型，但尾巴长度是 0（关闭）。请填写大于 0 的长度，或清空元素类型；保存时也会被拒绝。','The exact-tail element type is set, but the tail length is zero (off). Enter a positive length or clear the element type; saving would be rejected.'))
+    else if(tokens>0)notes.push(t('精确尾巴把最近 N 个 token 的 K/V 不量化保存，代价是设备端约 round_up(N,64)×65,536×并发 字节（N=1024、并发 1 为 64 MiB）。它只在解码（query 宽度 ≤ 8）合并，prefill 只写；且只让 MTP 验证器更准。','The exact tail keeps the newest N tokens unquantized, costing about round_up(N,64)×65,536×concurrency device bytes (64 MiB at N=1024, concurrency 1). It merges only on decode (query width ≤ 8); prefill writes only, and it sharpens only the MTP verifier.'))
+  }
   if(contains('--use-alt-prefix-caching')) {
     if(memoryMode.value==='strict')notes.push(t('当前 strict 已自动选择混合前缀缓存。传统缓存与关闭前缀复用不适用于此模式；更换路线需要先调整显存策略。','Strict currently selects hybrid prefix caching automatically. Traditional caching and disabled prefix reuse do not apply; change the memory policy before choosing another route.'))
     if(has('--kv-headroom-mib') && memoryMode.value!=='default')notes.push(t('已填写自动 KV 规划预留，但此项仅适用于 default 显存策略。strict 的余量在常用选项的显存策略中设置。','Auto-KV headroom is set but requires default memory policy. Set the strict reserve in the common memory-policy controls instead.'))

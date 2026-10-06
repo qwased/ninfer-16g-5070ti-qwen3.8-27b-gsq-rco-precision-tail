@@ -305,6 +305,7 @@ public sealed class ConfigurationStore
         Integer(p, "--host-cache-mib", 0, int.MaxValue, 6144);
         ValidateSpeculativeOptions(p, concurrency);
         ValidateVisionOptions(p);
+        ValidateTailOptions(p);
         Integer(p, "--top-k", 0, int.MaxValue, 20);
         if (p.TryGetValue("--model-id", out var modelId) && (string.IsNullOrWhiteSpace(modelId) || modelId.Length > 256)) throw new ArgumentException("Model ID is required and limited to 256 characters.");
         if (p.TryGetValue("--default-reasoning-effort", out var effort) && effort is not "none" and not "minimal" and not "low" and not "medium" and not "high" and not "xhigh" and not "max") throw new ArgumentException("Unknown reasoning effort.");
@@ -367,6 +368,15 @@ public sealed class ConfigurationStore
         Mebibytes(p, "--media-cache-mib", 0, 1024);
         Mebibytes(p, "--media-live-mib", 1, 2048);
         Integer(p, "--media-preprocess-threads", 0, 64, 0);
+    }
+    private static void ValidateTailOptions(IReadOnlyDictionary<string, string?> p)
+    {
+        // The exact KV tail is disabled at 0, so the element type is only meaningful with a positive length.
+        var tokens = Integer(p, "--kv-tail-tokens", 0, int.MaxValue, 0);
+        if (p.TryGetValue("--kv-tail-type", out var type) && type is not ("bf16" or "f16"))
+            throw new ArgumentException("--kv-tail-type must be bf16 or f16.");
+        if (p.ContainsKey("--kv-tail-type") && tokens == 0)
+            throw new ArgumentException("--kv-tail-type requires --kv-tail-tokens above 0; the exact tail is otherwise disabled.");
     }
     private static bool Flag(IReadOnlyDictionary<string, string?> p, string option)
     {

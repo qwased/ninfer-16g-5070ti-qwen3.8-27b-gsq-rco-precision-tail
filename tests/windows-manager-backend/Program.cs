@@ -249,6 +249,22 @@ foreach(var pair in new (string,string?)[]{("--vision","true"),("--vision-cpu","
 foreach(var residency in new[]{"resident","overlay"})
  Reject(()=>store.SaveProfile(WithOptions(("--vision-cpu",null),("--vision-residency",residency))),"CPU Vision rejects order-dependent conflicting residency "+residency);
 Reject(()=>store.SaveProfile(WithOptions(("--vision",null),("--vision-residency","cpu"),("--vision-offload","on"))),"Vision alias cannot silently override the selected residency");
+foreach(var tail in new[]{("512","bf16"),("1024","f16"),("4096","f16")})
+{
+ var candidate=WithOptions(("--kv-tail-tokens",tail.Item1),("--kv-tail-type",tail.Item2));
+ store.SaveProfile(candidate);
+ var persisted=new ConfigurationStore(ManagerPaths.Select(scratch,""),defaults).Profiles.Single(p=>p.Id==profile.Id);
+ var launch=store.BuildLaunchSpec(profile.Id);
+ Check(ArgumentValue(launch,"--kv-tail-tokens")==tail.Item1&&ArgumentValue(launch,"--kv-tail-type")==tail.Item2&&persisted.Parameters["--kv-tail-tokens"]==tail.Item1,
+  "exact KV tail length and element type save, reload and launch: "+tail.Item1+"/"+tail.Item2);
+}
+store.SaveProfile(WithOptions(("--kv-tail-tokens","0")));
+Check(ArgumentValue(store.BuildLaunchSpec(profile.Id),"--kv-tail-tokens")=="0"&&!store.BuildLaunchSpec(profile.Id).Arguments.Contains("--kv-tail-type"),
+ "exact KV tail at zero launches without an element type");
+foreach(var pair in new (string,string?)[]{("--kv-tail-tokens","-1"),("--kv-tail-tokens",null),("--kv-tail-tokens","1.5"),
+ ("--kv-tail-type","fp16"),("--kv-tail-type","f32"),("--kv-tail-type",null),("--kv-tail-type","true")})
+ Reject(()=>store.SaveProfile(WithOptions(("--kv-tail-tokens","1024"),pair)),"invalid exact-tail option rejected: "+pair.Item1+"="+(pair.Item2??"null"));
+Reject(()=>store.SaveProfile(WithOptions(("--kv-tail-type","f16"))),"exact-tail element type requires an enabled tail");
 foreach(var pathOption in new[]{"--request-log-jsonl","--chat-template","--device-profile-path","--context-cost-presets","--disk-kv-path","--prefix-cache-file"})
  foreach(var invalidPath in new string?[]{null,""})Reject(()=>store.SaveProfile(WithOptions((pathOption,invalidPath))),"path parameter requires a nonempty value: "+pathOption);
 foreach(var options in new (string,string?)[][]{
@@ -269,15 +285,16 @@ Check(new ConfigurationStore(ManagerPaths.Select(scratch, ""),defaults).Profiles
 var embeddedRoot=Path.Combine(scratch,"embedded-package");
 var embedded=new ConfigurationStore(ManagerPaths.Select(embeddedRoot, ""));
 var packagedProfileCount = typeof(ConfigurationStore).Assembly.GetManifestResourceNames().Count(name => name.StartsWith("NInfer.Manager.Config/profiles/", StringComparison.Ordinal) && name.EndsWith(".json", StringComparison.Ordinal));
-Check(embedded.Profiles.Count==packagedProfileCount&&!embedded.Settings.StartWithWindows&&embedded.Profiles.Single(p=>p.Id=="xxs-160k").Parameters["--max-context"]=="163840"&&embedded.Profiles.Single(p=>p.Id=="s-128k").Parameters["--max-context"]=="131072","embedded resources initialize the complete package configuration without an external seed directory or implicit startup registration");
+Check(embedded.Profiles.Count==packagedProfileCount&&!embedded.Settings.StartWithWindows&&embedded.Profiles.Single(p=>p.Id=="gsq-vision-rk8v4-120k").Parameters["--max-context"]=="122880"&&embedded.Profiles.Single(p=>p.Id=="gsq-iq3s-vision-rk8v4-56k").Parameters["--max-context"]=="57344","embedded resources initialize the complete package configuration without an external seed directory or implicit startup registration");
+Check(embedded.Profiles.All(p=>p.Parameters.TryGetValue("--kv-tail-tokens",out var tail)&&tail=="1024"&&p.Parameters["--kv-tail-type"]=="f16"&&p.Parameters["--kv-dtype"]=="rk8v4"),"embedded precision-tail profiles enable an f16 exact tail on an INT8-family body");
 Check(embedded.Profiles.All(p=>p.EnginePath=="engine/ninfer-serve.exe"&&p.Parameters["--chat-template"]=="config/chat_template.jinja"&&p.Parameters["--device-profile-path"]=="config/device-profiles.json")&&File.Exists(Path.Combine(embeddedRoot,"config","chat_template.LICENSE")),"embedded launch profiles and template license use the package layout");
 embedded.SaveSettings(embedded.Settings with {Language="en",AutoStartModel=false});
-embedded.SaveProfile(embedded.Profiles.Single(p=>p.Id=="xxs-160k") with {Name="Saved profile"});
-embedded.DeleteProfile("s-128k");
+embedded.SaveProfile(embedded.Profiles.Single(p=>p.Id=="gsq-vision-rk8v4-120k") with {Name="Saved profile"});
+embedded.DeleteProfile("gsq-iq3s-vision-rk8v4-56k");
 File.WriteAllText(Path.Combine(embeddedRoot,"config","chat_template.jinja"),"saved-template");
 File.WriteAllText(Path.Combine(embeddedRoot,"config","device-profiles.json"),"{\"saved\":true}");
 var embeddedReloaded=new ConfigurationStore(ManagerPaths.Select(embeddedRoot, ""));
-Check(embeddedReloaded.Settings is {Language:"en",AutoStartModel:false}&&embeddedReloaded.Profiles.Count==packagedProfileCount-1&&embeddedReloaded.Profiles.All(p=>p.Id!="s-128k")&&embeddedReloaded.Profiles.Single(p=>p.Id=="xxs-160k").Name=="Saved profile"&&File.ReadAllText(Path.Combine(embeddedRoot,"config","chat_template.jinja"))=="saved-template"&&File.ReadAllText(Path.Combine(embeddedRoot,"config","device-profiles.json"))=="{\"saved\":true}","restarting preserves saved preferences, profile edits, deleted seed profiles and customized resources");
+Check(embeddedReloaded.Settings is {Language:"en",AutoStartModel:false}&&embeddedReloaded.Profiles.Count==packagedProfileCount-1&&embeddedReloaded.Profiles.All(p=>p.Id!="gsq-iq3s-vision-rk8v4-56k")&&embeddedReloaded.Profiles.Single(p=>p.Id=="gsq-vision-rk8v4-120k").Name=="Saved profile"&&File.ReadAllText(Path.Combine(embeddedRoot,"config","chat_template.jinja"))=="saved-template"&&File.ReadAllText(Path.Combine(embeddedRoot,"config","device-profiles.json"))=="{\"saved\":true}","restarting preserves saved preferences, profile edits, deleted seed profiles and customized resources");
 File.Delete(Path.Combine(embeddedRoot,"config","chat_template.LICENSE"));
 _=new ConfigurationStore(ManagerPaths.Select(embeddedRoot, ""));
 Check(File.ReadAllText(Path.Combine(embeddedRoot,"config","chat_template.LICENSE")).Contains("Apache License"),"missing template license can be restored from the executable");

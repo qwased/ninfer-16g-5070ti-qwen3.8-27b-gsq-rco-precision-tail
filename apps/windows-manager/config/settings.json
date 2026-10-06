@@ -4,7 +4,7 @@
   "modelDirectories": [
     "model"
   ],
-  "defaultProfileId": "xxs-160k",
+  "defaultProfileId": "gsq-vision-rk8v4-120k",
   "startWithWindows": false,
   "autoStartModel": true,
   "language": "zh"
