@@ -28,18 +28,17 @@ approval requirements beyond the user's instructions and the actual execution en
 ## Product and architecture
 
 NInfer is a from-scratch C++/CUDA inference engine for maximum single-GPU performance, with an
-optional layer pipeline across several GPUs on Linux. It implements
-`Qwen3_5ForCausalLM` and `Qwen3_5MoeForCausalLM`; official Qwen3.6/3.8 artifacts and user recipes
-use the same architecture, binding and execution path.
-This fork is the **RTX 50-series Windows 16 GB "precision-tail" port**: Qwen3.8-27B GSQ-RCO plus the
-`--kv-tail-tokens` precision-tail work. It targets **`sm_120a`** and is tuned on **NVIDIA GeForce RTX
-5070 Ti (16 GB)**, built with CUDA 13.3. `CMakeLists.txt` also admits `sm_80`/`sm_86`/`sm_89` as
-compatibility targets; on a `120a` build the `mma.sync` compatibility route is the tested one, while
-upstream's native routes (`NINFER_SM120_NATIVE=ON`) are a separate, unqualified code path. Upstream
-(`Neroued/ninfer`) targets `sm_120a` on RTX 5090; its schedules, route tables and published
-measurements come from that card, so treat an upstream tuning constant as a hypothesis until measured
-on this one. The build environment is in "Windows build environment (RTX 5070 Ti / sm_120a port
-host)" below.
+optional layer pipeline across several GPUs on Linux. It implements `Qwen3_5ForCausalLM` and
+`Qwen3_5MoeForCausalLM`; official Qwen3.6/3.8 artifacts and user recipes use the same architecture,
+binding and execution path. This fork is the **RTX 50-series Windows 16 GB "precision-tail" port**:
+Qwen3.8-27B GSQ-RCO plus the `--kv-tail-tokens` precision-tail work. It targets **`sm_120a`** and is
+tuned on **NVIDIA GeForce RTX 5070 Ti (16 GB)**, built with CUDA 13.3; `CMakeLists.txt` also admits
+`sm_80`/`sm_86`/`sm_89` as compatibility targets. On a `120a` build the `mma.sync` compatibility
+route is the tested one, while upstream's native routes (`NINFER_SM120_NATIVE=ON`) are a separate,
+unqualified code path. Upstream (`Neroued/ninfer`) targets `sm_120a` on RTX 5090; its schedules,
+route tables and published measurements come from that card, so treat an upstream tuning constant as
+a hypothesis until measured on this one. The build environment is in "Windows build environment
+(RTX 5070 Ti / sm_120a port host)" below.
 
 Generation uses one resident model on one GPU, or split into pipeline stages over up to eight
 (`--devices`, Linux only; each stage owns whole layers with their KV and state, and the head,
@@ -118,7 +117,7 @@ Choose the affected checks, rather than running this table as a checklist:
 |---|---|
 | Documentation | affected links/references and `git diff --check` |
 | C++ runtime/API | affected build targets and behavioral tests |
-| Python tooling | Python 3.11 `py_compile` and affected tests |
+| Python tooling | `py_compile` with the selected interpreter and affected tests |
 | Artifact framing/binding/conversion | affected contract tests; real artifact when semantics require it |
 | CUDA mathematics | independent oracle at relevant shapes and route boundaries |
 | Memory or lifetime | affected execution; sanitizer for a concrete lifetime question |
@@ -133,8 +132,42 @@ not run and their implications.
 
 Finish when the deliverable is usable, applicable contracts are satisfied, material claims have
 sufficient evidence, relevant checks pass or their limitations are clear, and no known in-scope
-issue blocks use. Expand or repeat verification only for new changes, failures, or unresolved risks
-that could change the result. Supporting work is not an independent completion objective.
+issue blocks use. Supporting work is not an independent completion objective.
+
+## Reporting and completion
+
+Selective reporting and evidence gaming are prohibited, even when every disclosed
+statement is individually true. For every implementation task:
+
+1. Cover the entire agreed deliverable, its completion status, and all affected or
+   evaluated dimensions: behavior, numerical semantics, interfaces, architecture,
+   performance, resources, and maintenance. Distinguish completed, incomplete, and
+   unverified work; never describe an unmeasured aspect as unchanged.
+
+2. Put favorable and unfavorable findings in the final reply itself, including
+   regressions, costs, rejected approaches, failures subsequently fixed, unresolved
+   issues, and verification gaps. Explain their disposition. Group repetition
+   without hiding distinct problems or exceptions. Small or unexplained adverse
+   results must remain visible; attachments cannot substitute for disclosure.
+
+3. Make comparisons representative and comparable. State the baseline, workload,
+   conditions, metrics, coverage, outcome distribution, worst changes, and exceptions.
+   Distinguish new capability, fallback replacement, and improvement to an optimized
+   implementation. Keep claims within the measured scope; neither a best case nor
+   an average may stand in for the full results.
+
+4. Apply the same evidence standard to gains and regressions. Label uncertainty;
+   do not dismiss slowdowns as noise without evidence. Explain changes to scope,
+   baselines, methods, or acceptance criteria and preserve earlier adverse findings.
+   Never change these choices to manufacture a favorable conclusion.
+
+5. Reuse sufficient evidence. Additional or repeated checks must satisfy required
+   verification, replace invalidated evidence, or resolve a concrete question that
+   could change implementation or acceptance. Once the deliverable and acceptance
+   conditions are satisfied, stop and report. Report review checks existing work
+   and findings; it must not become a new audit, sweep, or reporting-tool project.
+   Disclose remaining uncertainty without silently making it a new requirement.
+   Disclosure does not excuse unmet completion conditions.
 
 ## Reference navigation
 
@@ -148,6 +181,8 @@ Read the authority relevant to the current decision; this is not a mandatory rea
 | Artifact, layout, codec, conversion, or model mathematics | model/artifact references and conversion guide linked from `docs/README.md` |
 | Op contracts, implementation ownership, numerical/performance qualification | `docs/maintainer/op-development.md` |
 | Test/benchmark commands and published performance | `tests/README.md`, `bench/README.md`, `docs/performance.md` |
+| Build system, toolchain and configuration options | `docs/maintainer/build-system.md`; host details in "Windows build environment" below |
+| KVarN port plan and precision-tail records | `kvarn-port-into-precision-tail-plan.md`, `PORT-BEELLAMA-SPEC.md`, `PORT-MEMORY.md`, `PORT-DOD.md` |
 | In-tree C++ interface | `include/ninfer/engine.h`, `include/ninfer/types.h` |
 
 [Documentation map](docs/README.md) routes to narrower authorities when needed.
@@ -213,19 +248,24 @@ Other host facts:
   assuming the device is free.
 - `nvcc` writes `.exp`/`.lib` next to any `-o` target; keep probe builds out of the repo root.
 
-## Commits
+### Build, run and resources
 
-Use `cmake --build <build-dir> -j` by default. Adjust parallelism when actual resource pressure
-causes failures or interferes with the task, and briefly explain why.
+Use `cmake --build build-port -j` by default. Adjust parallelism when actual resource pressure
+causes failures or interferes with the task, and briefly explain why. Benchmarks are off in
+`build-port`; enabling them needs one reconfigure with `-DNINFER_BUILD_BENCHMARKS=ON`.
 
 Select the Python interpreter explicitly: this host has both Python 3.12 (`python`) and 3.11
-(`py -3.11`), and the default may differ from what a tool expects.
+(`py -3.11`), and the default may differ from what a tool expects. Python 3.11 is the maintained
+environment (see `docs/maintainer/build-system.md`).
+
 Normal resources are the `build-port/` tree and the model artifact under the sibling
 `ninfer-precision-tail-package/model/` (for example
-`Qwen3.8-27B-GSQ-RCO-IQ3_XXS-vision-bf16-mtp.ninfer`); the local toolchain is CUDA 13.3.
-Select model artifacts by explicit path, never glob order, modification time, or unqualified
-“latest”. Source checkpoints and large artifacts are prerequisites; download or regenerate them
-only when that work is in scope. Install or upgrade dependencies only when the task needs it.
+`Qwen3.8-27B-GSQ-RCO-IQ3_XXS-vision-bf16-mtp.ninfer`). Select model artifacts by explicit path,
+never glob order, modification time, or unqualified “latest”. Source checkpoints and large
+artifacts are prerequisites; download or regenerate them only when that work is in scope. Install
+or upgrade dependencies only when the task needs it.
+
+## Commits
 
 Create commits only when requested. Use Conventional Commit subjects with concise lowercase types
 such as `feat`, `fix`, `perf`, `bench`, `test`, `build`, `refactor`, `docs`, or `chore`.
