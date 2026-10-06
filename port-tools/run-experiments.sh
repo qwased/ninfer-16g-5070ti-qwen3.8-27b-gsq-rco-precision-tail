@@ -11,7 +11,7 @@
 #   port-tools/run-experiments.sh all                 # manifest + both (long, needs a free GPU)
 #
 # Every run writes a timestamped directory containing the exact command line and
-# its stdout/stderr. See PORT-MEMORY.md for the pinned baseline description.
+# its stdout/stderr. See docs/port-records/PORT-MEMORY.md for the pinned baseline description.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

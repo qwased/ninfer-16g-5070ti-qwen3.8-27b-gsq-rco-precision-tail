@@ -76,7 +76,7 @@ The engine identity tag gained a tail dimension (otherwise differently-tailed co
 
 ## 4. Verification results
 
-Full report: **[PORT-VERIFY-REPORT.en.md](PORT-VERIFY-REPORT.en.md)** ([中文](PORT-VERIFY-REPORT.zh.md)). The rule the campaign ran under: **a claim is only as good as a command that reproduces it**.
+Full report: **[PORT-VERIFY-REPORT.en.md](docs/port-records/PORT-VERIFY-REPORT.en.md)** ([中文](docs/port-records/PORT-VERIFY-REPORT.zh.md)). The rule the campaign ran under: **a claim is only as good as a command that reproduces it**.
 
 - Hardware: RTX 5070 Ti 16 GB, `sm_120a`, CUDA 13.3, idle baseline 48 MiB
 - Model: `Qwen3.8-27B-GSQ-RCO-IQ3_XXS-vision-bf16-mtp.ninfer` (10.33 GiB)
@@ -181,7 +181,7 @@ ninfer-perplexity models/qwen3_8_27b.ninfer --kv-dtype bf16     --kv-tail-tokens
 ninfer-perplexity models/qwen3_8_27b.ninfer --kv-dtype rk4v4-e8 --kv-tail-tokens 1024 --kld-base out/bf16-t0.topk --score-width 8
 ```
 
-The commands that reproduce the whole campaign are in [PORT-VERIFY-REPORT.en.md §8](PORT-VERIFY-REPORT.en.md).
+The commands that reproduce the whole campaign are in [PORT-VERIFY-REPORT.en.md §8](docs/port-records/PORT-VERIFY-REPORT.en.md).
 
 ## 8. Honest gaps
 
@@ -211,24 +211,24 @@ Core additions/changes:
 | capacity / memory | `src/core/paged_kv_cache.{cpp,h}`, `src/models/qwen3_5/program/planning/startup.{cpp,h}` |
 | tests | `tests/models/qwen3_5/test_exact_tail_capacity.cpp` (new), `tests/ops/softmax_attention/causal_cache.cpp`, `tests/test_perplexity_evaluation.cpp` |
 
-Documentation index:
+Documentation index (the completed port records live in [docs/port-records/](docs/port-records/); the current implementation plan is [kvarn-port-into-precision-tail-plan.md](kvarn-port-into-precision-tail-plan.md)):
 
 | Document | Contents |
 |---|---|
-| [PORT-VERIFY-REPORT.en.md](PORT-VERIFY-REPORT.en.md) / [.zh.md](PORT-VERIFY-REPORT.zh.md) | the **acceptance report** (the full §4 above plus reproduction commands) |
-| [PORT-DOD.md](PORT-DOD.md) | DoD / milestone / work-package audit table (with the V0–V7 acceptance rows) |
-| [PORT-JOURNAL.md](PORT-JOURNAL.md) | the run log in order, with commands and observed values |
-| [PORT-MEMORY.md](PORT-MEMORY.md) | durable lessons and traps (harness, kill semantics, readiness gate, …) |
-| [PORT-M5-PLAN.md](PORT-M5-PLAN.md) / [PORT-REVIEW-PLAN.md](PORT-REVIEW-PLAN.md) / [PORT-VERIFY-PLAN.md](PORT-VERIFY-PLAN.md) | the M5 benefit campaign, the independent code review, the acceptance plan |
-| [PORT-BEELLAMA-SPEC.md](PORT-BEELLAMA-SPEC.md) | the port's algorithm reference (port the algorithm, never the code) |
-| [precision-tail-port-plan.md](precision-tail-port-plan.md) | the implementation plan (design + WBS + milestones + verification matrix) |
-| [kvarn-kv-tail-feasibility-report.md](kvarn-kv-tail-feasibility-report.md) | the feasibility report |
+| [PORT-VERIFY-REPORT.en.md](docs/port-records/PORT-VERIFY-REPORT.en.md) / [.zh.md](docs/port-records/PORT-VERIFY-REPORT.zh.md) | the **acceptance report** (the full §4 above plus reproduction commands) |
+| [PORT-DOD.md](docs/port-records/PORT-DOD.md) | DoD / milestone / work-package audit table (with the V0–V7 acceptance rows) |
+| [PORT-JOURNAL.md](docs/port-records/PORT-JOURNAL.md) | the run log in order, with commands and observed values |
+| [PORT-MEMORY.md](docs/port-records/PORT-MEMORY.md) | durable lessons and traps (harness, kill semantics, readiness gate, …) |
+| [PORT-M5-PLAN.md](docs/port-records/PORT-M5-PLAN.md) / [PORT-REVIEW-PLAN.md](docs/port-records/PORT-REVIEW-PLAN.md) / [PORT-VERIFY-PLAN.md](docs/port-records/PORT-VERIFY-PLAN.md) | the M5 benefit campaign, the independent code review, the acceptance plan |
+| [PORT-BEELLAMA-SPEC.md](docs/port-records/PORT-BEELLAMA-SPEC.md) | the port's algorithm reference (port the algorithm, never the code) |
+| [precision-tail-port-plan.md](docs/port-records/precision-tail-port-plan.md) | the implementation plan (design + WBS + milestones + verification matrix) |
+| [kvarn-kv-tail-feasibility-report.md](docs/port-records/kvarn-kv-tail-feasibility-report.md) | the feasibility report |
 | [docs/performance.md](docs/performance.md) §"KV precision tail" | the published measurements (memory / ppl / F16-vs-BF16 / decode-width KLD) |
 
 ## 10. Quick start, downloads and licence
 
 Product installation, Windows deployment, flags and model conversion are in the **[RTX 5070 Ti Windows guide](docs/rtx-5070ti-windows.en.md)**; every adjustable flag (including the precision tail's memory cost and benefit) is in the **[parameter manual](docs/参数说明书.md)** (Chinese); the prebuilt engine and matching `.ninfer` model products are in the **[download instructions](docs/rtx-5070ti-windows-downloads.md)** (**[Quark Drive](https://pan.quark.cn/s/28b896c4b0c0)**). For building, see [AGENTS.md](AGENTS.md) and the [build system](docs/maintainer/build-system.md).
 
-This repository's Windows / RTX 5070 Ti build, memory policies and manager come from the direct upstream [Ryan-gsq](https://github.com/Ryan-gsq/ninfer-16g-5070ti-5080-5090-qwen3.8-27b-gsq-rco); the upstream consolidation is [iamwavecut/ninfer-all](https://github.com/iamwavecut/ninfer-all) and the original engine is [Neroued/ninfer](https://github.com/Neroued/ninfer), with every change keeping its author's credit ([maintainer map](docs/maintainer/consolidated-line.md)). The precision-tail algorithm was ported from beellama.cpp's KVCPT (**port the algorithm, never the code**); see [PORT-BEELLAMA-SPEC.md](PORT-BEELLAMA-SPEC.md).
+This repository's Windows / RTX 5070 Ti build, memory policies and manager come from the direct upstream [Ryan-gsq](https://github.com/Ryan-gsq/ninfer-16g-5070ti-5080-5090-qwen3.8-27b-gsq-rco); the upstream consolidation is [iamwavecut/ninfer-all](https://github.com/iamwavecut/ninfer-all) and the original engine is [Neroued/ninfer](https://github.com/Neroued/ninfer), with every change keeping its author's credit ([maintainer map](docs/maintainer/consolidated-line.md)). The precision-tail algorithm was ported from beellama.cpp's KVCPT (**port the algorithm, never the code**); see [PORT-BEELLAMA-SPEC.md](docs/port-records/PORT-BEELLAMA-SPEC.md).
 
 Licence: [LICENSE](LICENSE).

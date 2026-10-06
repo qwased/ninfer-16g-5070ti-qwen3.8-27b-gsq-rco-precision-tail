@@ -39,6 +39,16 @@ The executable `--help` output is the exact source for command-line option spell
 - [Tools](../tools/README.md)
 - [Capability evaluation](../eval/README.md)
 
+## Historical records
+
+Completed work is archived under `docs/`:
+
+- [Port records](port-records/) — the precision-tail port's plan (`precision-tail-port-plan.md`), DoD / journal / memory, verification plans and reports, the beellama algorithm spec, and the KVarN feasibility report.
+- [Release notes](release-notes/) — the per-release `RELEASE_NOTES_<version>.md` history.
+- [Research backlog](archive/TODO.md) — the engine's measured experiment backlog, parked items and their numbers.
+
+The active plan for the KVarN port is [`kvarn-port-into-precision-tail-plan.md`](../kvarn-port-into-precision-tail-plan.md) at the repository root.
+
 ## Maintainer references
 
 The active references under [`maintainer/`](maintainer/) record current architecture, model,

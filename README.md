@@ -76,7 +76,7 @@ out = acc / l
 
 ## 4. 验证结果
 
-验收报告全文：**[PORT-VERIFY-REPORT.zh.md](PORT-VERIFY-REPORT.zh.md)**（[English](PORT-VERIFY-REPORT.en.md)）。原则是"**任何结论都必须有一条能复现它的命令**"。
+验收报告全文：**[PORT-VERIFY-REPORT.zh.md](docs/port-records/PORT-VERIFY-REPORT.zh.md)**（[English](docs/port-records/PORT-VERIFY-REPORT.en.md)）。原则是"**任何结论都必须有一条能复现它的命令**"。
 
 - 硬件：RTX 5070 Ti 16 GB，`sm_120a`，CUDA 13.3，空闲基线 48 MiB
 - 模型：`Qwen3.8-27B-GSQ-RCO-IQ3_XXS-vision-bf16-mtp.ninfer`（10.33 GiB）
@@ -181,7 +181,7 @@ ninfer-perplexity models/qwen3_8_27b.ninfer --kv-dtype bf16     --kv-tail-tokens
 ninfer-perplexity models/qwen3_8_27b.ninfer --kv-dtype rk4v4-e8 --kv-tail-tokens 1024 --kld-base out/bf16-t0.topk --score-width 8
 ```
 
-复现整套验收的命令见 [PORT-VERIFY-REPORT.zh.md §8](PORT-VERIFY-REPORT.zh.md)。
+复现整套验收的命令见 [PORT-VERIFY-REPORT.zh.md §8](docs/port-records/PORT-VERIFY-REPORT.zh.md)。
 
 ## 8. 已知缺口（如实交代）
 
@@ -211,24 +211,24 @@ ninfer-perplexity models/qwen3_8_27b.ninfer --kv-dtype rk4v4-e8 --kv-tail-tokens
 | 容量/显存 | `src/core/paged_kv_cache.{cpp,h}`、`src/models/qwen3_5/program/planning/startup.{cpp,h}` |
 | 测试 | `tests/models/qwen3_5/test_exact_tail_capacity.cpp`（新增）、`tests/ops/softmax_attention/causal_cache.cpp`、`tests/test_perplexity_evaluation.cpp` |
 
-文档索引：
+文档索引（已完成的 port 记录归档在 [docs/port-records/](docs/port-records/)；当前实施计划为 [kvarn-port-into-precision-tail-plan.md](kvarn-port-into-precision-tail-plan.md)）：
 
 | 文档 | 内容 |
 |---|---|
-| [PORT-VERIFY-REPORT.zh.md](PORT-VERIFY-REPORT.zh.md) / [.en.md](PORT-VERIFY-REPORT.en.md) | **验收报告**（本文 §4 的全文与复现命令） |
-| [PORT-DOD.md](PORT-DOD.md) | DoD / 里程碑 / 工作包审计表（含 V0–V7 验收行） |
-| [PORT-JOURNAL.md](PORT-JOURNAL.md) | 按顺序的执行日志（含命令与实测值） |
-| [PORT-MEMORY.md](PORT-MEMORY.md) | 可复用经验与陷阱（harness、kill 语义、就绪判据等） |
-| [PORT-M5-PLAN.md](PORT-M5-PLAN.md) / [PORT-REVIEW-PLAN.md](PORT-REVIEW-PLAN.md) / [PORT-VERIFY-PLAN.md](PORT-VERIFY-PLAN.md) | M5 收益战役、独立代码评审、验收计划 |
-| [PORT-BEELLAMA-SPEC.md](PORT-BEELLAMA-SPEC.md) | 移植算法参考（只搬算法、不搬代码） |
-| [precision-tail-port-plan.md](precision-tail-port-plan.md) | 实施计划（设计 + WBS + 里程碑 + 验证矩阵） |
-| [kvarn-kv-tail-feasibility-report.md](kvarn-kv-tail-feasibility-report.md) | 可行性报告 |
+| [PORT-VERIFY-REPORT.zh.md](docs/port-records/PORT-VERIFY-REPORT.zh.md) / [.en.md](docs/port-records/PORT-VERIFY-REPORT.en.md) | **验收报告**（本文 §4 的全文与复现命令） |
+| [PORT-DOD.md](docs/port-records/PORT-DOD.md) | DoD / 里程碑 / 工作包审计表（含 V0–V7 验收行） |
+| [PORT-JOURNAL.md](docs/port-records/PORT-JOURNAL.md) | 按顺序的执行日志（含命令与实测值） |
+| [PORT-MEMORY.md](docs/port-records/PORT-MEMORY.md) | 可复用经验与陷阱（harness、kill 语义、就绪判据等） |
+| [PORT-M5-PLAN.md](docs/port-records/PORT-M5-PLAN.md) / [PORT-REVIEW-PLAN.md](docs/port-records/PORT-REVIEW-PLAN.md) / [PORT-VERIFY-PLAN.md](docs/port-records/PORT-VERIFY-PLAN.md) | M5 收益战役、独立代码评审、验收计划 |
+| [PORT-BEELLAMA-SPEC.md](docs/port-records/PORT-BEELLAMA-SPEC.md) | 移植算法参考（只搬算法、不搬代码） |
+| [precision-tail-port-plan.md](docs/port-records/precision-tail-port-plan.md) | 实施计划（设计 + WBS + 里程碑 + 验证矩阵） |
+| [kvarn-kv-tail-feasibility-report.md](docs/port-records/kvarn-kv-tail-feasibility-report.md) | 可行性报告 |
 | [docs/performance.md](docs/performance.md) §"KV precision tail" | 已发布的实测（显存 / ppl / F16-vs-BF16 / decode-width KLD） |
 
 ## 10. 快速开始、下载与许可
 
 产品安装、Windows 部署、参数与模型转换请看 **[RTX 5070 Ti Windows 指南](docs/rtx-5070ti-windows.md)**；逐项可调参数（含精度尾巴的显存与收益）见**[可调参数说明书](docs/参数说明书.md)**；预编译引擎与配套 `.ninfer` 模型成品见**[下载说明](docs/rtx-5070ti-windows-downloads.md)**（**[夸克网盘](https://pan.quark.cn/s/28b896c4b0c0)**）。构建方式见 [AGENTS.md](AGENTS.md) 与[构建系统](docs/maintainer/build-system.md)。
 
-本仓库的 Windows / RTX 5070 Ti 构建、显存策略与管理器来自直接上游 [Ryan-gsq](https://github.com/Ryan-gsq/ninfer-16g-5070ti-5080-5090-qwen3.8-27b-gsq-rco)；上游汇总线来自 [iamwavecut/ninfer-all](https://github.com/iamwavecut/ninfer-all)，原始引擎来自 [Neroued/ninfer](https://github.com/Neroued/ninfer)，各项改动保留原作者署名（[维护者与改动对应表](docs/maintainer/consolidated-line.md)）。精度尾巴算法移植自 beellama.cpp 的 KVCPT（**只搬算法、不搬代码**），参考 [PORT-BEELLAMA-SPEC.md](PORT-BEELLAMA-SPEC.md)。
+本仓库的 Windows / RTX 5070 Ti 构建、显存策略与管理器来自直接上游 [Ryan-gsq](https://github.com/Ryan-gsq/ninfer-16g-5070ti-5080-5090-qwen3.8-27b-gsq-rco)；上游汇总线来自 [iamwavecut/ninfer-all](https://github.com/iamwavecut/ninfer-all)，原始引擎来自 [Neroued/ninfer](https://github.com/Neroued/ninfer)，各项改动保留原作者署名（[维护者与改动对应表](docs/maintainer/consolidated-line.md)）。精度尾巴算法移植自 beellama.cpp 的 KVCPT（**只搬算法、不搬代码**），参考 [PORT-BEELLAMA-SPEC.md](docs/port-records/PORT-BEELLAMA-SPEC.md)。
 
 许可证见 [LICENSE](LICENSE)。

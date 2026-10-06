@@ -23,7 +23,7 @@
 | 8 | §5「唯一实现参考是 beellama」 | 上游 `config.py:21-26` **确有 4 个 preset（含 `kvarn_k4v4_g128/g64`）**；仅 K5V5/K6V6 无上游参考。且**只借 beellama 位流，不借其 128 列切片几何** | 见 H7 |
 | 9 | §6 方案 A「尾行旋进后一次合并」 | **按文义不可实现**（FORK partial 是 BF16、TAIL 是 FP32；>8198 split 策略分叉；`kvarn_hadamard` 拒 f16）→ 改为 **k8v4 形状** 或 **ROTATED_K_ORIGINAL_V**；工期 5–8 → **10–15 天** | 见 §6 |
 | 10 | §1 A1/A4/A5/A8 | A1 删 prefill 腿；A4 用 N=1024 **配对带**；A5 补 24.0 MiB 固定尾 + 本产物实测权重；A8 明确同字节对手 + 承认已知尾部代价 | 见 §1 |
-| 11 | 未引用同仓既有负面裁决 | **新增 WP0.5-B：准入实验前置**，正面引用并反驳 `PORT-DOD.md:23-32` | commit `8e34ad12` |
+| 11 | 未引用同仓既有负面裁决 | **新增 WP0.5-B：准入实验前置**，正面引用并反驳 `docs/port-records/PORT-DOD.md:23-32` | commit `8e34ad12` |
 | 12 | §9「无公布吞吐/质量」 | 不成立：FORK `docs/performance.md:145,153-154,159` 已公布 KVarN K4V2-G128 的 tok/s 与「约 0.8% decode 代价」 | 原文核实 |
 | 13 | 附录 A「`config-calculator.html:490` 是 KV 表」 | :490 是**权重 profile 散文**；每格式 KV 表在 **:529**；:550 为 `mtp3 kvRatio`；:563 为 35B 表 | 详见附录 A |
 | 14 | 附录 A「1 页 sink + 3 个 BF16 尾槽」 | 实际**共 3 槽 = 1 sink + 2 动态尾**；24.0 MiB 数值按 3 槽算是对的 | `FORK paged-kv-cache.md:100-101` |
@@ -48,7 +48,7 @@
 **与 v1 的三处根本差异（重写主线，保留）：**
 
 1. **路线反转**：v1 推荐 R1（fork 为新基线）并列为「优点：kvarn 与尾部都在」。**该优点为假**（fork 无 `small_t_tail*`、全库 0 处 `kv-tail-tokens`）；更硬的一条是 **fork 根本没有 GGUF 权重路径**（`src/artifact/formats.cpp:10-20` 只注册 9 种格式到 `fp8_e4m3fn_row_bf16`，代码内 `gguf` 0 命中），**加载不了本目标模型**（其清单 1189 张量中 398 个为 `gguf_blocks_v1`）。⇒ R1 出局。
-2. **验收指标换仪器**：A4 不能用 `apps/perplexity` 的 ppl —— 它评 prefill，**结构上看不见尾部**（`PORT-MEMORY.md:385-393`）。改用 TAIL **已有**的 **decode-width KLD**（`apps/perplexity --score-width ≤8 --kld-base`，真实解析在 `apps/perplexity/main.cpp:175-177`）。
+2. **验收指标换仪器**：A4 不能用 `apps/perplexity` 的 ppl —— 它评 prefill，**结构上看不见尾部**（`docs/port-records/PORT-MEMORY.md:385-393`）。改用 TAIL **已有**的 **decode-width KLD**（`apps/perplexity --score-width ≤8 --kld-base`，真实解析在 `apps/perplexity/main.cpp:175-177`）。
 3. **数字更正**：KVarN 自带 sink/tail 显存是 **24.0 MiB/序列（K+V）**，不是 12 MiB；生产乘数是 **16 个 full-attention 层 × 4 KV 头**（不是 «16 层» 或 «H16»）；表须补 MTP 第 17 个池（+6.25%）。见附录 A。
 
 ---
@@ -66,14 +66,14 @@
 
 | # | 标准 | 证据形式 | 阈值（修正后） |
 |---|---|---|---|
-| A1 | KVarN 关闭时**零回归** | `ctest` 全绿 + **decode-only** tok/s 基线对照（同 `.ninfer`、同 prompt、重复 ≥3 次）+ 输出逐字节相同 | **decode tok/s `\|Δ\|≤0.88%`**（`PORT-MEMORY.md:766-769`）+ 逐字节相同 + `MemorySummary` 逐字相同。**删除 prefill 腿**（同二进制单请求 prefill 实测 `−29%…+8%`，噪声底过大不可用，`PORT-MEMORY.md §5.17(2)`） |
+| A1 | KVarN 关闭时**零回归** | `ctest` 全绿 + **decode-only** tok/s 基线对照（同 `.ninfer`、同 prompt、重复 ≥3 次）+ 输出逐字节相同 | **decode tok/s `\|Δ\|≤0.88%`**（`docs/port-records/PORT-MEMORY.md:766-769`）+ 逐字节相同 + `MemorySummary` 逐字相同。**删除 prefill 腿**（同二进制单请求 prefill 实测 `−29%…+8%`，噪声底过大不可用，`docs/port-records/PORT-MEMORY.md §5.17(2)`） |
 | A2 | 每档编解码与**独立 oracle** 一致 | FP64 Sinkhorn/RTN oracle + Hadamard oracle + 记录解码检查 + **位序往返**（pack→unpack 逐码比对） | 容差**按位宽**定义：`qmax=(1<<bits)-1` 推导的理论量化步长；**注明现有 `3.0e-4` 只在 4-bit 有效** |
 | A3 | 主文本与 MTP 的 greedy 与 MTP-off 一致 | `ninfer_qwen3_5_mtp_greedy_parity_real_test`（**需先移植，见 WP0.5-A**） | MTP 深度 0..3、跨 ≥1 个 group 边界、上下文 ≥8K |
 | A4 | 精度尾部在 KVarN body 上有**可测质量增益** | **decode-width KLD**（`--score-width 8`，协议 `--disjoint --score-topk 100`、32,767 评分 token） | 最小效应量 = **同档 rk4v4 在 N=1024 的 pairing 带（2.26–2.47×）的 50% ⇒ ≥1.13×**；**附 `same_top` 与 max-KLD 双指标**；tail on/off、重复 ≥3 |
 | A5 | 每档显存与**修正后**的 §3/附录 A 表一致 | `MemorySummary` 实测比对 + 本产物实测权重 | ±5%，基准表须含：① KVarN **不可关**的 24.0 MiB/序列 sink+tail；② StateImage slot × 并发项（**WP7 待核实机制，见 §7-WP7**）；③ **本产物** `weightsBytes = 11,092,477,952`（**不是** `config-calculator.html:522` 的 17,093,490,688，那是 groupwise-int 产物，且原文免责「不适用于不同量化的权重产物」） |
 | A6 | 尾行旋进坐标域后**逐位可控** | FP32 oracle 覆盖「KVarN body × 旋进 BF16/F16 尾」合并路径；tail=0 时输出逐位不变 | 精确 |
 | A7 | 长解码跨 group(128)/ring(64) 边界无重复计数/丢键 | needle 检索 + 边界单测 | 精确命中 |
-| A8 | **无负面体验**：pp/tg/MTP 接受率 | 三者与**同字节对手**对照 | **同字节对手：`k4v4↔{rk4v4, nvfp4}`、`k6v6↔k8v4`（逐字节相同，402 B/token/头）；`k5v5`（21,632）无同字节档 ⇒ 需另定判据**。pp/tg/MTP 接受率不得劣于同档噪声底；**并须承认外部尾部已知代价 decode −5.8% / 接受率 −2.1 pt**（`PORT-MEMORY.md:663-670`）——含尾部的档位按此基线放宽判据 |
+| A8 | **无负面体验**：pp/tg/MTP 接受率 | 三者与**同字节对手**对照 | **同字节对手：`k4v4↔{rk4v4, nvfp4}`、`k6v6↔k8v4`（逐字节相同，402 B/token/头）；`k5v5`（21,632）无同字节档 ⇒ 需另定判据**。pp/tg/MTP 接受率不得劣于同档噪声底；**并须承认外部尾部已知代价 decode −5.8% / 接受率 −2.1 pt**（`docs/port-records/PORT-MEMORY.md:663-670`）——含尾部的档位按此基线放宽判据 |
 
 ---
 
@@ -255,7 +255,7 @@ RecordBytes(Kb,Vb) = 4096·(Kb+Vb) + 2304          // 4096 = D·G/8 = 256·128/8
 **优先 (b)，回退 (a)：**
 
 - **(a) 照 TAIL `small_t_k8v4.cuh` 的形状做**（仓内已有模板）：K 与 V 都旋（`:208,229`）、核内旋 Q（`:263`）、归并 **FP32** partial（`:639-643`）、**归并后只做一次**反旋（`:653`）。即方案 A 想要的东西，改为沿用 TAIL 的 FP32 partial 契约。
-- **(b) `ROTATED_K_ORIGINAL_V`**：若 V 不旋，KVarN 在结构上等价于 TAIL 已有的 fp8 body ⇒ 尾部接线退化为一个 launcher 分支，**可能零内核改动**。取证/落地前须确认上游契约提供该域（`ggml.h` 同时定义 `ORIGINAL` 与 `ROTATED_K_ORIGINAL_V`，见 `kvarn-kv-tail-feasibility-report.md:44`）。
+- **(b) `ROTATED_K_ORIGINAL_V`**：若 V 不旋，KVarN 在结构上等价于 TAIL 已有的 fp8 body ⇒ 尾部接线退化为一个 launcher 分支，**可能零内核改动**。取证/落地前须确认上游契约提供该域（`ggml.h` 同时定义 `ORIGINAL` 与 `ROTATED_K_ORIGINAL_V`，见 `docs/port-records/kvarn-kv-tail-feasibility-report.md:44`）。
 - **(c) 最低形态**：直接暴露 KVarN 内建精确后缀（`kKvarnSinkPages=1` + `kKvarnTailSlots=3`，≈384 token 已近精确）作为「尾部」，把 `--kv-tail-tokens ≤384` 映射上去，属配置工作。
 - **明确写时旋转**；**新增 f16 旋转入口为独立交付物**。
 - **逐位一致这一要求本身可满足**：FORK `hadamard.cuh:9-31` 与 TAIL `hadamard_d256.cuh:46-65` 是**同一 Sylvester 顺序、同一符号约定、同一次 2⁻⁴ 归一**，两侧都未开 `use_fast_math`（TAIL `CMakeLists.txt` 只有 `/Zc:` 系列）。但注意 `hadamard_warp`（`hadamard.cuh:33`）是**死代码**，且 fork 是 256 线程/行、TAIL 是 1 warp/行，寄存器映射 `d = lane + 32r` 需重建。
@@ -286,7 +286,7 @@ RecordBytes(Kb,Vb) = 4096·(Kb+Vb) + 2304          // 4096 = D·G/8 = 256·128/8
 
 ### WP0.5-B — 准入实验前置（≤1 天，ROI 最高）〔新增前置门〕
 - **同模型同口径 decode-width KLD 三方对照**：`rk4v4` / `rk4v4+tail` / `k4v4+tail`。
-- **正面引用并反驳 `PORT-DOD.md:23-32`（commit `8e34ad12`, 2026-10-05）的负面裁决**：该 M0 门禁用 wikitext-00 / ctx 4096 / 4 chunks，得 `f16 5.3580 / q8_0 5.3577 / kvarn4 5.3559 / kvarn4+tail1024 5.3622`，噪声 ±0.136，结论「没有质量驱动的理由引入 KVarN」。要么指出前测方法缺陷（4 chunks、ppl、±0.136 噪声——**正是本计划论证的仪器问题**），要么把 WP8 从「收口实验」前置为「准入实验」。
+- **正面引用并反驳 `docs/port-records/PORT-DOD.md:23-32`（commit `8e34ad12`, 2026-10-05）的负面裁决**：该 M0 门禁用 wikitext-00 / ctx 4096 / 4 chunks，得 `f16 5.3580 / q8_0 5.3577 / kvarn4 5.3559 / kvarn4+tail1024 5.3622`，噪声 ±0.136，结论「没有质量驱动的理由引入 KVarN」。要么指出前测方法缺陷（4 chunks、ppl、±0.136 噪声——**正是本计划论证的仪器问题**），要么把 WP8 从「收口实验」前置为「准入实验」。
 - 同时引用 `docs/performance.md:754-764` 的 kvarn4 KLD 行与 `.deps/wpc/kld-kvarn4-*.out`。
 - **验收**：给出三方 KLD 与裁决，明确是否继续。
 
@@ -376,7 +376,7 @@ RecordBytes(Kb,Vb) = 4096·(Kb+Vb) + 2304          // 4096 = D·G/8 = 256·128/8
 | 尾行旋进与 body 的 Hadamard 顺序/符号不一致 | 质量异常难归因 | 逐位对齐 fork `hadamard.cuh`；FP32 oracle 覆盖合并路径 |
 | `un-rotation` 被施加多次 | 输出错误 | WP6 明确「一次」；oracle 校验 |
 | KVarN 自带 sink/tail（24 MiB/序列）与外部 ring（64 MiB/序列）叠加 | 显存超预算 | WP7 两者分列；A5 用修正后基准 |
-| **同仓已有负面裁决**（`PORT-DOD.md:23-32`） | ROI 单点风险 | **WP0.5-B 前置准入实验**，先证再投 |
+| **同仓已有负面裁决**（`docs/port-records/PORT-DOD.md:23-32`） | ROI 单点风险 | **WP0.5-B 前置准入实验**，先证再投 |
 | **构型未鉴定**（SM120_NATIVE / sm_86 文档矛盾） | 噪声底与常量前提不成立 | WP0.5-C 决断 |
 | 无公布吞吐/质量 | 计划不确定 | **部分不成立**：FORK `docs/performance.md:145,153-154,159` 已公布 K4V2-G128 tok/s（407.6→412.4、238.1→240.1）与「约 0.8% decode 代价」；仍**不引用 beellama ladder 作结论**（其 30.1/36.3/42.6% 含 sink+tail+slice，与纯 codec 26.8/33.0/39.3% 不可直接互比） |
 | 发布集不含 k4v2 ⇒ 失去 20.5% 档 | 收益缩水 | 已知取舍（§10-D4） |
@@ -421,7 +421,7 @@ RecordBytes(Kb,Vb) = 4096·(Kb+Vb) + 2304          // 4096 = D·G/8 = 256·128/8
 | 类别 | 大小/序列 | 出处 |
 |---|---|---|
 | KVarN 自带 sink+尾槽（**共 3 槽 = 1 sink + 2 动态尾**，K+V，16 层） | **24.0 MiB**（+MTP 池 1.5 MiB = 25.5 MiB） | `decoder_state.cpp:118-161`（256·128·2·(4·3)·16·2） |
-| 外部精度尾部 ring（N=1024） | **64 MiB + 4 MiB reserve**，×并发 | `PORT-MEMORY.md:394` |
+| 外部精度尾部 ring（N=1024） | **64 MiB + 4 MiB reserve**，×并发 | `docs/port-records/PORT-MEMORY.md:394` |
 
 ## 附录 B：关键命令（本机）
 
@@ -464,10 +464,10 @@ ctest --test-dir build-port -R 'ninfer_(kvarn|softmax_attention|kv_cache|kv_cach
 | body 挂载点真路径 | `src/ops/softmax_attention/dense/causal_cache/{causal_softmax_attention.cpp:347,392, small_t.cu:460-505}` |
 | FORK 接入面 | `grep -rl KvarnK4V2Group128` = **20 文件** |
 | 尾部默认 f16 | `types.h:467-469` |
-| ppl 看不见尾部 / KLD 仪器 | `PORT-MEMORY.md:385-393`；`apps/perplexity/main.cpp:175-177` |
-| 同仓既有裁决 | `PORT-DOD.md:23-32`（commit `8e34ad12`）；`docs/performance.md:754-764`；`.deps/wpc/kld-kvarn4-*.out` |
-| 尾部已知代价 | `PORT-MEMORY.md:663-670`（−5.8%/−2.1pt）；`§5.17(2)`（prefill −29%…+8%、decode ≤0.88%） |
-| rk4v4 tail 增益带 | `PORT-VERIFY-REPORT.en.md:189-194`、`README.md:21`、`.deps/verify-b-summary.txt`（2.26–3.14×，tail0→tailN） |
+| ppl 看不见尾部 / KLD 仪器 | `docs/port-records/PORT-MEMORY.md:385-393`；`apps/perplexity/main.cpp:175-177` |
+| 同仓既有裁决 | `docs/port-records/PORT-DOD.md:23-32`（commit `8e34ad12`）；`docs/performance.md:754-764`；`.deps/wpc/kld-kvarn4-*.out` |
+| 尾部已知代价 | `docs/port-records/PORT-MEMORY.md:663-670`（−5.8%/−2.1pt）；`docs/port-records/PORT-MEMORY.md §5.17(2)`（prefill −29%…+8%、decode ≤0.88%） |
+| rk4v4 tail 增益带 | `docs/port-records/PORT-VERIFY-REPORT.en.md:189-194`、`README.md:21`、`.deps/verify-b-summary.txt`（2.26–3.14×，tail0→tailN） |
 | 27B 几何 16 full-attn 层 / 4 KV 头 / D256 | `FORK docs/maintainer/qwen3_5-model.md:60-64`；`geometry.cuh:15-16` |
 | 构建树与本机 | `build-port/CMakeCache.txt`（Ninja/Release/120a/CUDA 13.3/14.44.35207/**BENCHMARKS=OFF/SM120_NATIVE=ON**）；`nvidia-smi` 5070 Ti / cap 12.0 / 617.14；模型 11,092,477,952 B |
 

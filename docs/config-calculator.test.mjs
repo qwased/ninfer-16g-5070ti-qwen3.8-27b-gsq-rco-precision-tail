@@ -225,7 +225,7 @@ check("golden: 262144-token int8, no speculation, 27B matches the engine's own r
 });
 
 // --- and the same cross-check for a *speculative* configuration ---------------------------------
-// This is the half TODO.md section 2b flagged as untested, and it was untested because the page's
+// This is the half docs/archive/TODO.md section 2b flagged as untested, and it was untested because the page's
 // speculative model was known to be wrong. With per-mode terms measured by
 // scripts/sweeps/speculative-memory-terms.ps1, the engine can be asked the same question:
 //

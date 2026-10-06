@@ -182,7 +182,7 @@ Read the authority relevant to the current decision; this is not a mandatory rea
 | Op contracts, implementation ownership, numerical/performance qualification | `docs/maintainer/op-development.md` |
 | Test/benchmark commands and published performance | `tests/README.md`, `bench/README.md`, `docs/performance.md` |
 | Build system, toolchain and configuration options | `docs/maintainer/build-system.md`; host details in "Windows build environment" below |
-| KVarN port plan and precision-tail records | `kvarn-port-into-precision-tail-plan.md`, `PORT-BEELLAMA-SPEC.md`, `PORT-MEMORY.md`, `PORT-DOD.md` |
+| KVarN port plan and precision-tail records | `kvarn-port-into-precision-tail-plan.md` (active); archived records in `docs/port-records/` (`PORT-BEELLAMA-SPEC.md`, `PORT-MEMORY.md`, `PORT-DOD.md`) |
 | In-tree C++ interface | `include/ninfer/engine.h`, `include/ninfer/types.h` |
 
 [Documentation map](docs/README.md) routes to narrower authorities when needed.

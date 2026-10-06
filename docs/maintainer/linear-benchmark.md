@@ -35,7 +35,7 @@ function pointer 反查回 candidate 名字输出为 `routed_to`。它有意包�
 
 2026-09-17 用它在 sm_86 上重扫了 catch-up 带进来的 Q4/Q5/Q8 全部十八个 shape table，
 十八个全部与 RTX 5090 的取值不一致，最大处相差 3.84x；逐 band 的测量值记在各 shape
-文件里，汇总见 `TODO.md` 顶部。
+文件里，汇总见 `docs/archive/TODO.md` 顶部。
 
 Q4/Q5/Q6/Q8 和 BF16 使用现有 A16 route。以下 NVFP4 exact problem 同时支持 A16
 与 A4 policy，并作为永久开发 surface 使用，不加入 model suite：

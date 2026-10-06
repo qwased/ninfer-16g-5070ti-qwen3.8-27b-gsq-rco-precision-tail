@@ -1,6 +1,6 @@
 # Where does a decode step's time actually go?
 #
-# TODO.md section 2c says decode reaches only part of the card's memory bandwidth and that the
+# docs/archive/TODO.md section 2c says decode reaches only part of the card's memory bandwidth and that the
 # next step is "a profile of one decode step to find where the stall is -- occupancy, L2
 # behaviour, or a launch gap between the per-layer kernels". This is that profile.
 #

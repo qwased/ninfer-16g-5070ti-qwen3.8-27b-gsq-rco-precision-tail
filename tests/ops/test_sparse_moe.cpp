@@ -45,7 +45,7 @@ constexpr std::int32_t kSharedGateRows = 2 * kIntermediate;
 // over the measured maximum across the whole case matrix (1.118e-2 against 1.2e-2); #20's floor
 // argument deliberately does not touch it.
 //
-// The gross bound needed a relative term, and finding out why answered the question TODO.md §4
+// The gross bound needed a relative term, and finding out why answered the question docs/archive/TODO.md §4
 // asked. Measured with NINFER_OP_REPORT_STATS=1 over the full matrix, the gross error is not
 // uniformly large -- it steps at a route boundary:
 //

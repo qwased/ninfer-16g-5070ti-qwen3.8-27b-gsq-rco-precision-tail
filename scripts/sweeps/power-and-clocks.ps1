@@ -1,4 +1,4 @@
-# Does the 315 W cap bound the numbers in TODO.md?
+# Does the 315 W cap bound the numbers in docs/archive/TODO.md?
 #
 # TODO section 3 asked what the power cap costs. This samples nvidia-smi through one decode and one
 # prefill and reports what actually throttles. The answer as of 2026-09-09 on this box: the cap

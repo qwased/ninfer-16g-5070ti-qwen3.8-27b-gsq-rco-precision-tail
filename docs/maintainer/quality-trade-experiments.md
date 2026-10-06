@@ -110,7 +110,7 @@ speculation) decode tok/s moved base 44.65→45.16 (2 interleaved reps) vs `q4he
 consistently faster by +1.4%/+2.9%, close to the naive bandwidth-share prediction. **MTP3 decode
 told a dramatically different story that turned out to be a measurement artifact**: base 71.05 tok/s
 at 31.1% acceptance vs `q4head` **100.19 tok/s at 53.8% acceptance** (+41%). This is the exact
-pitfall TODO.md already documents for this fixture (98.4% repeated bigrams, DFlash reports 100%
+pitfall docs/archive/TODO.md already documents for this fixture (98.4% repeated bigrams, DFlash reports 100%
 acceptance on it at every draft count) — quantizing the verification head apparently makes it agree
 with the draft head *more* often on this repetitive text, which is a statement about the fixture,
 not the model. **Do not quote the 41% figure for anything.** `fp16state` on the same fixture: 72.40
@@ -132,7 +132,7 @@ since it doesn't share the synthetic corpus's repetition:**
 | 8 | `both` | 451.57, 447.69 | 449.63 | **+6.4%** | 61.8% |
 
 C1's rep0→rep1 drop (all four arms slower by 3-5% in rep1) is the same between-process spread
-TODO.md already names; none of the C1 deltas clear that noise floor. C8's gains do — acceptance
+docs/archive/TODO.md already names; none of the C1 deltas clear that noise floor. C8's gains do — acceptance
 stays in a tight 60.6-61.8% band across all four arms there, confirming the MTP3-bench-corpus jump
 above was fixture-specific, not a real acceptance effect from either trade.
 
@@ -319,7 +319,7 @@ Quick corpus, RTX 3090, Qwen3.8-27B groupwise-int, `--kv-dtype int8`:
 
 | arm | overall perplexity | against A16 |
 |---|---:|---:|
-| `--no-prefill-a8` (every projection A16) | 4.342982 | � |
+| `--no-prefill-a8` (every projection A16) | 4.342982 | � |
 | every registered integer route (default) | 4.343155 | **+0.004%** |
 
 That is inside run-to-run noise, and inside the +0.05% this fork requires before a lossy route is

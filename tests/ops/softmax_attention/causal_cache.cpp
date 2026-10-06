@@ -4255,7 +4255,7 @@ int run_cached_quality_gain(const Geometry& geometry, const CachePlan& plan,
 //
 // A decode step is replayed from the CUDA Graph family its attention route FAMILY selects:
 // ops::causal_softmax_attention_route_family returns 0/1/2, and the model's graph_profiles.cpp
-// derives each profile's topology_class from that family alone (PORT-MEMORY.md 5.8). The tail is a
+// derives each profile's topology_class from that family alone (docs/port-records/PORT-MEMORY.md 5.8). The tail is a
 // second partial INSIDE the small-T family, so enabling it must not move either of the two inputs a
 // graph profile is built from:
 //

@@ -1,6 +1,6 @@
 # Does any DFlash2 draft count make it positive on *text*?
 #
-# TODO.md section 2c records DFlash2 costing ~20% against no speculation on the 27B, always measured
+# docs/archive/TODO.md section 2c records DFlash2 costing ~20% against no speculation on the 27B, always measured
 # with --draft-tokens 7, and asks whether a lower count crosses over. The obvious way to answer that
 # -- sweep draft counts through ninfer_bench -- does not work, and finding out why is the point of
 # this script existing separately.
@@ -28,7 +28,7 @@
 # "byte-identical to each other" claim. So this asserts nothing about identity; it hashes each run's
 # generated text (content_sha256 below) and leaves the comparison to whoever reads the CSV.
 #
-# It also reports acceptance. TODO.md section 3 wants DFlash2's acceptance and tokens-per-round on
+# It also reports acceptance. docs/archive/TODO.md section 3 wants DFlash2's acceptance and tokens-per-round on
 # realistic text and records that the committed corpus cannot supply them -- it is 65,536 tokens
 # over 682 distinct ids and reports exactly 100% acceptance at every draft count, which is a
 # statement about the fixture. This sweep already generates real prose through the serving path, and
@@ -93,7 +93,7 @@ foreach ($c in $configs) {
     # Hash the generated text so a reader can tell whether two configurations produced identical
     # output.
     #
-    # TODO.md recorded this column as coming out empty with "26 error blocks" and blamed a missing
+    # docs/archive/TODO.md recorded this column as coming out empty with "26 error blocks" and blamed a missing
     # Get-FileHash. That diagnosis is wrong: Windows PowerShell 5.1.26100 on this box has the
     # cmdlet and hashes fine. What actually happens is that Get-FileHash on a path that does not
     # exist raises a **non-terminating** error from a Resolve-Path inside its own implementation

@@ -10,7 +10,7 @@ only; `output throughput` (generated tokens / wall clock) is reported alongside 
 prefill and the tail where early finishers leave the batch.
 
 Arms are interleaved -- in order on even passes, reversed on odd -- because between-process spread
-on one RTX 3090 is 3-5% (TODO.md, "This card is power-capped"), which is larger than most effects
+on one RTX 3090 is 3-5% (docs/archive/TODO.md, "This card is power-capped"), which is larger than most effects
 worth measuring. Always A/B inside one sitting.
 
 usage:

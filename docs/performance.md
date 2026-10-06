@@ -228,7 +228,7 @@ What is left is not a knob but a mainloop: register-level double buffering, `ldm
 swizzled shared layout, which is what CUTLASS-class kernels -- and the Marlin kernel the vLLM
 stacks use -- are built out of.
 
-**What did not pay, so nobody re-walks it.** `TODO.md`'s long-standing explanation for these
+**What did not pay, so nobody re-walks it.** `docs/archive/TODO.md`'s long-standing explanation for these
 kernels running at ~30% of the INT8 ceiling — 124 registers holding the SM to 16 of 48 warps — is
 not what costs the time. `tools/w4a8_rowsplit_probe.cu` measures the alternatives at the gate_up
 shape, T=512:
