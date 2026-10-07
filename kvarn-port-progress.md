@@ -13,27 +13,38 @@
 
 ## 0. 当前状态快照
 
-> 每次推进后更新本节。最后更新：**2026-10-08**（记录 08-01：**全量 ctest（带 artifact）复核** ——
-> 261 注册项 **245 通过 / 7 跳过 / 9 失败**；9 项失败**逐项非 kvarn 引入**（`ninfer_kvarn_test` 现**已通过**）；
-> 其中 `ninfer_qwen3_5_vision_workspace_test` 为**从未取过基线**的新观测，判定**先前存在**（改动面外 + 隔离复跑逐位复现）。
-> **A1「全绿」口径须补入该 artifact 门控的先存失败**）。前一条 2026-10-07（记录 07-23：**KVarN 本质三方核对** —— 描述逐条符合；
-> 关键溯源：本项目是**华为 KVarN vLLM 原版 dense 预设 `kvarn_k4v2_g128`(D256)` 的移植**（`config.cuh:3-4`），
-> 非照抄 beellama；差异仅在外壳（位宽档/head_dim/切片/门控）。**下一步计划见 §4**。前一条 07-22：**WP4 收尾
-> —— 正式 WP0.5-B 三档全过、不回退**（`k4v4` 274 B **0.002120** = 对 `rk4v4`/`nvfp4` **2.09×/2.07×**；
-> `k5v5` 338 B **0.001432**；`k6v6` 402 B **0.001233** = 对同字节 `k8v4` **2.18×**、门槛 <0.002688 达成）
-> + 测试补 5/6 位宽注意力覆盖 + `--help`/`docs` 补 KVarN；计划书回写 **v10**/附录 D-11。前一条 07-21：测试全绿 + parser 发档）。
+> 每次推进后更新本节。最后更新：**2026-10-08（记录 08-05：P2b 完成）** ——
+> **P2b：MTP parity 测试改造为诊断仪器**（去逐位门禁；**加自确定性门禁** + 首分叉报告；`kKProfiles` 并入
+> `rk4v4`/`kvarn:k4v4|k5v5|k6v6` 并贯通 `options.kvarn_bits`；加 `--quick` 且 `tests.cmake` 注册 `TEST_ARGS --quick`）。
+> 实测（sample 0、512 token）：**自确定性全档成立**；`bf16@k1` 分叉 413/512、`rk4v4@k3` 408/512、
+> **`kvarn:k4v4`@k1/k3 与 greedy 逐字节相同**、@k15 418/512（bf16 同宽 412/512，同首分叉 token 91）
+> ⇒ **kvarn 自确定性成立且分叉不劣于基线**。`ctest --quick` **Passed 130.68 s**。
+> 前一条 2026-10-08（记录 08-04：GPU 收尾四件 + P2 前置） ——
+> **①P3a 9 臂收尾**（`kvarn:k4v4|k5v5|k6v6`×3 全 `exit=0`；**质量指标逐位重复**（极差 0）、吞吐 1.3% 内散布 ⇒ D-11 单次口径被 3× 重复**逐位证实**）；
+> **②P1 e2e 验收 PASS**（kvarn r2 `cached_tokens=851 (99.4%)` 且 message 逐字节同 r1；bf16 对照 851；TTFT 721→37.9 ms 旁证）；
+> **③WP5 判据余量实测**（`flips` 最大 **1/65**、`over_step=0`、`wide_flips=0` ⇒ 65× 余量，**判据收口**）；
+> **④续列尾 device 段** 首跑 FAIL(2)→定位为**测试自身 3B/12B pattern bug**→修正后 `OK`；
+> **P2 前置：kvarn MTP provisional 路径首次激励通过**（`mtp accepted 84/113`、加速比 1.50× ≈ bf16 1.52×）。
+> 前一条 2026-10-08（记录 08-03：**纯 CPU 三件** —— (B) **WP5 容差形式化**
+> （`test_kvarn.cpp` 删拟合阈值 `oracle_relative_l2_limit=1.0e-3`，改**量化步长判据**：逐元素 ≤ 1 步 +
+> 边界翻码计数上限 `1.0e-3` + `|Δcode|>1` 零容忍，并补 4/5/6 位**穷举逐码往返**）；
+> (A) **P1 续列尾专项单测**：新增 `test_kvarn_continuation_image.cpp`（ctest **261→262**）；
+> (C) **P1 移植只读审计 = 无 HIGH/MED**（3 项 LOW 全为 FORK 继承））。
+> 再前 08-02：**WP3② 续列尾实现落地** + P3a `run6.sh` 开跑；08-01：**全量 ctest 复核**；
+> 07-23：**KVarN 本质三方核对**；07-22：**WP4 收尾 —— 正式 WP0.5-B 三档全过、不回退**。
 
 | 项 | 状态 |
 |---|---|
 | WP0 基线与环境 | **部分完成**：环境/构建已核实；整树全量构建**不通过**（先存缺陷，与本工作无关）；模型冒烟 + KLD 基线**未做** |
-| WP0.5-A MTP 一致性仪器 | **定案**：仪器已交付（移植+构建+实跑）；实跑在纯 `bf16` k=1 分叉（k=0/k=3 全等）。经上游调研（07-11）+ 审阅复核（07-12）**定案**：非本移植引入、非上游缺陷，而是 **Fork B 私有合同** ⇒ **A3 判据按 O1 替换**、该测试**改造为诊断仪器**（见 §3-2026-10-07-11/-12、计划附录 D-6） |
+| WP0.5-A MTP 一致性仪器 | **定案 + 仪器改造完成（08-05）**：实跑在纯 `bf16` k=1 分叉（k=0/k=3 全等）。经上游调研（07-11）+ 审阅复核（07-12）**定案**：非本移植引入、非上游缺陷，而是 **Fork B 私有合同** ⇒ **A3 判据按 O1 替换**。**仪器改造已于 08-05 落地**（去逐位门禁 + 自确定性门禁 + 首分叉报告 + 并入 kvarn/rk4v4 档 + `--quick`；见 §3-08-05、附录 D-13） |
 | WP0.5-B 准入实验（KLD 对照） | **完成（07-18）**：229k 同字节矩阵齐备（`run4.sh` 四臂全部 exit=0）。**代理门禁为正**：同字节 `kvarn:k4v2`(210 B) mean KLD **0.010513** vs `rk2v4-e8`(216 B) **0.043619** ⇒ **4.15×**（规模上与 1.4k 单窗口的 5.7× 同向同量级）。**裁决 WP4 go**。边界：绝对 KLD 上 `rk4v4`/`nvfp4`(280/288 B, 0.0044) 仍优；`k6v6` 门槛已量化为 < `k8v4`(402 B) 的 **0.002688**；正式 WP0.5-B 仍需 k4v4/k5v5/k6v6（WP4） |
 | WP0.5-C 构型口径声明 | **完成**（见计划书附录 D-1，取 native 口径） |
-| WP1 kvarn ops 移植 | **大部分完成**：ops 零告警编译 ✓；测试已移植并注册 ✓；**30 项中 1 项容差未过**（归 WP5）；kvarn bench **未做**（需重配，待决） |
+| WP1 kvarn ops 移植 | **完成**：ops 零告警编译 ✓；测试已移植并注册 ✓；**容差项已由 WP5 收口（08-04 余量实测 65×）**；kvarn bench **未做**（需重配，待决） |
 | WP2 页几何 + 存储枚举 | **完成**：`KvarnGroup128` 枚举 + `KvarnBits` profile + 三个 CLI parser + 6 处名字 switch + 指纹 `;kvbn=` + `kv_page_tokens/kv_page_shift` + 校验放宽到 64\|128。**回归：合成 242/245 通过、3 项失败全部经基线（stash 重建）证实为先前存在**；真实模型 10/16 通过，6 项失败全部为产物缺组件/无 golden 或已知 A3（见 §3-2026-10-07-13） |
-| WP3 模型接入 | **进行中（08-02）**：状态层、CLI 档 `kvarn:k4v4|k5v5|k6v6`、规划页几何、`text.cpp` 5 处派发 + MTP provisional + `decode.cpp` group 钳制**已落地**；**① 地址空间页几何已完成**（⇒ ctx8192/229k token 全量跑通）；**② 续列尾已实现（08-02，构建绿；e2e 验收待 GPU）**——`state_image` kvarn 镜像 + `program_impl` 的 `restore/capture/activate_sequence_kvarn_tail` + `storage/context.cpp` 实现 + `prefill.cpp`/`transactions/{capture,commit}.cpp` 调用点 + `startup.cpp` spec。**未做**：② 的 e2e 验收（前缀复用/检查点往返）、③ `--mtp-attention-window` 规划期拒绝（**已完成 07-21**）、④ MTP 路径激励与 A3 相对判据。 |
-| WP4 位宽参数化（K=V∈{4,5,6}） | **完成（07-22）**：4.1 测绘；4.2 核按 `(KBits,VBits)` 模板化（发布档只实例化 `(4,4)/(5,5)/(6,6)`；`KBits==4` 保留 int4/nibble 快路径，V 侧统一走 `kvarn_unpack_code`；`qmax=(1<<bits)-1`）+ `bits` 经 `EngineOptions.kvarn_bits → SequencePlan → DecoderStateSpec → PagedKVCache → 视图` 贯穿；4.3 测试扩 4/5/6 **实跑全绿**（+pack/unpack 往返；**补 5/6 位宽注意力单测**；容差按位宽重定为 1.0e-3，**根因定量为单元素边界翻码**）；4.4 parser 发档 + 删 `Bits2`/`k4v2`，新增 kvarn×tail / kvarn×mtp-window 规划期拒绝；**4.5 正式 WP0.5-B 三档全过、不回退**（`k4v4` 274 B **0.002120** = 对 `rk4v4`/`nvfp4` **2.09×/2.07×**；`k5v5` 338 B **0.001432**；`k6v6` 402 B **0.001233** = 对同字节 `k8v4` **2.18×**、门槛 <0.002688 达成）；`--help`/`docs` 补档。五目标构建绿。**残余**：各臂单次测量（无 ≥3 重复）、三档报告目录同名 `kvarn/`（未决项 7）、末定 MTP/kvarn+tail 激励 | 
-| WP5–WP9 | 未开始 |
+| WP3 模型接入 | **完成（08-05）**：状态层、CLI 档 `kvarn:k4v4|k5v5|k6v6`、规划页几何、`text.cpp` 5 处派发 + MTP provisional + `decode.cpp` group 钳制**已落地**；**① 地址空间页几何已完成**（⇒ ctx8192/229k token 全量跑通）；**② 续列尾已完成并验收**（08-02 实现；08-03 专项单测；**08-04 host+device 段全绿**、**08-04 Engine 级 e2e 前缀复用 PASS**：`cached_tokens=851` 且 message 逐字节同）；**③ `--mtp-attention-window` 规划期拒绝（07-21）**；**④ MTP 激励（08-04，`mtp accepted 84/113`、加速比 1.50× ≈ bf16 1.52×）+ 仪器改造（08-05：parity 测试→诊断仪器、并入 kvarn 档；token 级实测 kvarn 自确定性成立、分叉不劣于基线）**。**08-03 独立审计**：无 HIGH/MED（3 项 LOW 为 FORK 继承）。 |
+| WP4 位宽参数化（K=V∈{4,5,6}） | **完成（07-22）**：4.1 测绘；4.2 核按 `(KBits,VBits)` 模板化（发布档只实例化 `(4,4)/(5,5)/(6,6)`；`KBits==4` 保留 int4/nibble 快路径，V 侧统一走 `kvarn_unpack_code`；`qmax=(1<<bits)-1`）+ `bits` 经 `EngineOptions.kvarn_bits → SequencePlan → DecoderStateSpec → PagedKVCache → 视图` 贯穿；4.3 测试扩 4/5/6 **实跑全绿**（+pack/unpack 往返；**补 5/6 位宽注意力单测**；容差按位宽重定为 1.0e-3，**根因定量为单元素边界翻码**）；4.4 parser 发档 + 删 `Bits2`/`k4v2`，新增 kvarn×tail / kvarn×mtp-window 规划期拒绝；**4.5 正式 WP0.5-B 三档全过、不回退**（`k4v4` 274 B **0.002120** = 对 `rk4v4`/`nvfp4` **2.09×/2.07×**；`k5v5` 338 B **0.001432**；`k6v6` 402 B **0.001233** = 对同字节 `k8v4` **2.18×**、门槛 <0.002688 达成）；`--help`/`docs` 补档。五目标构建绿。**残余**：**各臂单次测量已由 08-04 的 P3a 3× 重复收口**（质量逐位重复、极差 0）、三档报告目录同名 `kvarn/`（未决项 7）、**MTP 激励已于 08-04 完成**（kvarn 可用）、kvarn+tail 激励（已 fail-fast） |
+| WP5 容差形式化 | **完成（08-04）**：量化步长判据（逐元素 ≤ 1 理论步长 + 边界翻码计数上限 `1.0e-3` + `\|Δcode\|>1` 零容忍）+ 4/5/6 位穷举逐码往返。**08-04 实测余量**：`flips` 最大 **1/65**（65× 余量）、`over_step=0`、`wide_flips=0` ⇒ 判据成立、`exit=0`、无需放宽。口径已回写 `docs/maintainer/op-development.md §6.3` |
+| WP6–WP9 | 未开始 |
 
 **工作树改动清单（截至本快照）**
 
@@ -106,6 +117,19 @@
   新增编译期断言（旧偏移全等 + `(4,4)/(5,5)/(6,6)`=35072/43264/51456 + 行字节数）。
   **注意：核尚未迁移**（`config.cuh` 仍 `KBits=4/VBits=2`，5 个解包例程仍在）。
 
+修改（**WP5 / P1 单测**，2026-10-08，4 文件）：
+
+- `tests/ops/test_kvarn.cpp`（WP5）：`codec_oracle` 返回 `CodecOracle{decoded,step,code}`；**删**
+  `oracle_relative_l2_limit`；**增** `check_step_criterion`（点值 `≤ q*(1+5e-2)` + `flips ≤ 1.0e-3*total`
+  + `|Δcode|>1` 零容忍，`q=max(1<<bits)-1` 步长）；`run_codec_case` 收集设备码并改用新判据；
+  **增** `run_codec_bit_order_case`（4/5/6 位穷举逐码 pack→unpack + 行外哨兵）并在 `main` 注册。
+- `tests/models/qwen3_5/test_kvarn_continuation_image.cpp`（**新增**，P1 续列尾专项单测）：
+  host 段（几何 vs 分页尾、transfer work、capture→activate 逐字节/逐 token 往返、非法 spec 拒绝）
+  + device 段（真实 `StateImageDevicePool` 的 kvarn 尾视图 / `copy_slot` / `zero_slot` / D2D 往返 /
+  MTP 不别名 / 越界拒绝）。
+- `tests/models/qwen3_5/tests.cmake`：注册 `ninfer_qwen3_5_kvarn_continuation_image_test`（**ctest 261→262**）。
+- `docs/maintainer/op-development.md` §6.3：写入「量化 codec 的步长判据」条款（点值 + 总量上限）。
+
 **未决项汇总**
 
 1. ~~`ninfer_kvarn_test` 的 4-bit K codec oracle 容差~~ → **已收口（07-21，WP4.3）**：`ninfer_kvarn_test`
@@ -113,8 +137,9 @@
    ⇒ 4-bit K 零回归）；bits=6 的 K **rel_l2=0**。**根因已定量**：`max_abs` 恰为一个量化步长，且
    `sqrt(0.216²/Σdecoded²)≈8.4e-4 ≈ 实测 6.09e-4` ⇒ 偏差来自**单个元素落在量化边界、设备与 oracle
    各自舍入到相邻码**，不是 codec 缺陷（自洽性由 stored-bit 2.0e-7 + pack/unpack 往返钉死）。
-   容差按位宽重定为 `oracle_relative_l2_limit(bits)=1.0e-3`。**WP5 仍应把它形式化为量化步长判据**
-   （逐元素 ≤ 一步 + 边界翻码计数上限）。
+   **07-21 的 `oracle_relative_l2_limit(bits)=1.0e-3` 已于 08-03 删除并形式化**为量化步长判据
+   （逐元素 ≤ 1 步 + 边界翻码计数上限；见 §3-2026-10-08-3）。**残留**：该判据的**数值余量未实测**
+   （GPU 被 P3a 独占）⇒ 首跑须确认 `kMaxFlipFraction=1.0e-3`（65/65536）与 `kStepSlack=5e-2` 成立。
 2. WP0.5-C 的 compat 口径噪声底：未测（需重配 `NINFER_SM120_NATIVE=OFF`，与 AGENTS.md「不要重配」冲突）。
 3. kvarn bench 是否纳入：需 `-DNINFER_BUILD_BENCHMARKS=ON` 重配，与「不重配」冲突，**待显式决定**。
 4. 先存构建缺陷 `ninfer-multi-gpu-probe.exe` 是否修复：未修（见 §3-2026-10-07-2）。
@@ -1359,6 +1384,177 @@ OK kvarn correctness
 **未做 / 待做（如实记录）**：① **e2e 验收未做**（前缀复用 / 检查点往返）——需 GPU 加载 27B，而 P3a 正独占 GPU（~11.6 GiB）⇒ 待 P3a 完成（预计 02:36）；② `ninfer-perplexity` 未重链（其 exe 被 P3a 持有；P3a 用的是**改动前**的二进制，但其测量路径属 fresh 单请求、不经本改动的 capture/activate ⇒ 结论不受影响）；③ 「续列往返逐 token 对拍」单测**未写**；④ **未提交**。
 **产物**：`.deps/kvarn-adm/run6.sh`、`run6.log`、`<spec>-t0-r<rep>.log`（进行中）。
 
+### 2026-10-08-3 — WP5 容差形式化（构建绿；GPU 侧未跑）+ P1 续列尾专项单测（host 段实跑绿 / device 段待 GPU）+ P1 移植独立审计（无 HIGH/MED）
+
+**触发**：用户裁定本轮做**纯 CPU**工作（GPU 被 P3a 独占）：(A) P1 续列尾专项单测、(B) WP5 容差形式化、(C) P1 移植只读审计。
+
+**(B) WP5 容差形式化 —— `tests/ops/test_kvarn.cpp`**
+
+- `codec_oracle` 返回值由 `std::vector<double>` 改为 `CodecOracle{decoded, step, code}`：`step` 是**逐元素理论量化步长**
+  `q = (max-min)/qmax * row_scale * column_scale`（`qmax=(1<<bits)-1`，即相邻码的值距），`code` 是 oracle 在均衡域选定的整数码。
+- **删除**拟合阈值 `oracle_relative_l2_limit(bits)=1.0e-3`，改为 `check_step_criterion(...)`：①**点值判据** `|actual-expected| <= q*(1+kStepSlack)`，`kStepSlack=5e-2`（吸收设备与 oracle 各自 Sinkhorn 的 scale 差异）；②**总量判据** `flips <= kMaxFlipFraction*total`，`kMaxFlipFraction=1.0e-3`（65536 元素 ⇒ 上限 65）；③`wide_flips`（`|Δcode|>1`）**零容忍**。口径与 `docs/maintainer/op-development.md §6.3`「pointwise bound + finite gross pointwise-error cap」一致，**已回写该文档**。
+- 新增 `run_codec_bit_order_case()`：4/5/6 位**穷举逐码** pack→unpack 往返（每个可表示码 × 每个行内字段偏移，约 4.3 万组合），并置**行外哨兵 `0xff`** 证明码读写不越出所属行；另校验 pack 不污染未触碰字节。
+- **实测**：`ninfer_tests` 目标构建 **exit 0 / 0 error / 0 warning**。**未跑**（`ninfer_kvarn_test` 是 CUDA 测试，GPU 被 P3a 独占）⇒ **判据的数值余量未实测**：`kMaxFlipFraction` 与 `kStepSlack` 由**分析**给出（预估设备/oracle 的 Sinkhorn 相对差 ~2e-6 ⇒ bits=4 约 1 次翻码、bits=5 约 2、bits=6 约 0–4；与 07-21 实测 bits=4 K `rel_l2=6.09e-4`（单元素翻码）、bits=6 `rel_l2=0` 自洽）。**必须在 GPU 空出后首跑确认**；若超限即为**真实发现**（记录并定量定标），**不得事后放宽**。
+
+**(A) P1 续列尾专项单测 —— 新文件 `tests/models/qwen3_5/test_kvarn_continuation_image.cpp`**
+
+- 注册 `ninfer_qwen3_5_kvarn_continuation_image_test`（`tests/models/qwen3_5/tests.cmake`）⇒ **ctest 261 → 262**。
+- **host 段（无设备，本轮实跑）**：kvarn 续列镜像几何 vs **分页 KV 尾几何**对拍（`tail_layer_bytes == BF16[D,G,Hkv*3]` 字节数；`marker_layer_bytes == I32[3]`；`Hkv*3*D*2*G` 覆盖一整层尾；**16 层 K+V == 24.0 MiB**，与附录 A 口径一致）；六个组件 256B 对齐、互不重叠、落在镜像内；MTP=0 变体无 MTP 偏移；`state_image_transfer_work` 载荷含镜像且**镜像恰为 1 次拷贝操作**；无 kvarn 的 spec 真报 `!kvarn`；非法 spec（head_dim≠256 / text_layers=0 / kv_heads=0）被拒；**capture→activate 往返逐字节 + 逐 token 对拍**（源按分页尾几何、目的偏移取镜像布局 ⇒ **非自证**）。
+- **device 段（需 GPU，待跑）**：真实 `StateImageDevicePool` + kvarn —— `zero_all/zero_slot`（K/V 清 0、markers 复位 `0xff`）、`copy_slot` D2D 携带整层尾、D2D 拷回分页形缓冲后**逐字节对拍**、MTP 池与 text 池**不互为别名**、越界层/槽抛 `out_of_range`、尾视图几何 == 分页尾几何。
+- **实测**：`ninfer_tests` 构建 exit 0；**host 段实跑**（`CUDA_VISIBLE_DEVICES=99` 强制无设备 ⇒ 只走 host 段、**零显存占用**）**exit 0**。
+  首跑曾**暴露我方一处错误假设**：误以为 host 镜像偏移 == device 区域偏移；实为**两套独立 `LayoutBuilder`**（ctor 以「由 device 组件重建 host 布局并比对」`state_image.cpp:459` 兜底）⇒ 断言已按实测修正为「host 镜像 == **单槽**字节数」。**device 段未跑**。
+- **未做（如实记录）**：**未**做「复用路径 vs 一次性 prefill 的 **Engine 级 27B** 逐 token 对拍」（需 artifact + 显存，即 `.deps/kvarn-adm/p1_prefix_reuse.sh` 的缓存命中/PPL 口径，仍待 GPU）。
+
+**(C) P1 移植独立审计（只读子代理，vs 上游 FORK）**：结论 **无 HIGH/MED 缺陷**。全部 4 个调用点齐备（trim `context.cpp:1714` / prefill `prefill.cpp:661` / capture `transactions/capture.cpp:726` / commit `transactions/commit.cpp:660`，相对位置与 FORK 相同）；`plan_kvarn_continuation_image`（`state_image.cpp:92-119`）与 `kvarn_tail_view`（`:501-522`）与 FORK 逐点相同；与 TAIL `decoder_state` 的 kvarn 板（`{256,128,rows*Hkv*3,layers}` / `{3,rows,layers}`）一致；**分片架构由规划期守卫兜底**——KVarN 要求所有 attention 层同 rank（`decoder_state.cpp:53-61`）⇒ 绑 rank 0 安全；`zero_slot/zero_all/copy_slot/copy_to_host(_segments)/copy_from_host(_segments)` 的 Rest 分支**无重复计数/漏项**；非 kvarn 逐位不变（三处早退 + `startup.cpp:241` 门控）。
+
+**三项 LOW（均为 FORK 继承，非本次引入）**：① `reset_kvarn_tail_row`：TAIL **零调用者**（`decoder_state.cpp:360`），FORK 有 **2 处且都在同一测试** `tests/models/qwen3_5/test_prefill_precision_real.cpp:236,284` —— **该测试未被移植到 TAIL**（TAIL `tests/models/qwen3_5/` 无此文件）⇒ 既存在**陈旧 marker** 隐患（行重用若不由 store op 重写 markers），又说明**移植漏掉了一个激励它的 FORK 测试**。**⚠ 本条由 codebase-memory 图谱（`trace_path` inbound）首发现、再以 `grep` 复核修正**：原审计写的「两树均无调用者」**不准确**（FORK 有测试调用者）。② `capture/activate_sequence_kvarn_tail` 在 `!has_kvarn()` 时抛 `logic_error`，而其调用者位于 `catch(...) { return false; }` 内（`capture.cpp:726` / `commit.cpp:660`）⇒ 规划不一致会**降级为静默 capture/commit 失败**；③ 文档面：`state_image.h:158-170,198-200` 的 `StateImagePart`/`StateImageDevicePool` 注释未提 KVarN。**处置**：①②属既有风险（**未修**，记录在案）；③属文档（本轮未改）。
+
+**本轮全为纯 CPU**：仅**按目标构建** `ninfer_tests`（未重配 build-port、未全树构建）；host 段测试以 `CUDA_VISIBLE_DEVICES=99` 运行（零显存占用）；P3a 未受影响（01:47 仍 11,640 MiB；**run6.sh 每 rep 一个新进程**，故 PID 会变：01:32 为 18880 / 01:47 为 19104）。
+**P3a 当时的进度（01:47）**：**6/9** —— k4v4 r1–r3 与 k5v5 r1–r3 均 `exit=0`（k4v4 mean KLD **0.002120**、k5v5 **0.001432**，与 D-11 逐位相同；tok/s 287.5–292.8），`k5v5-t0-r3` 进行中（01:42:54 起）；剩 k6v6 r1–r3 ⇒ 预计 **~02:35** 结束。
+**收尾未做（待 GPU 空出，本轮被 P3a 阻塞）**：① 解析 run6.log 9 臂（均值±极差）；② `p1_prefix_reuse.sh` 的 **Engine 级 P1 e2e 验收**（kvarn r2 `cached_tokens>0` 且 message 逐字节相同 + bf16 对照）；③ `ninfer_kvarn_test`（**WP5 判据的数值余量首跑确认**）；④ 新 `ninfer_qwen3_5_kvarn_continuation_image_test` 的 **device 段**。已挂后台等待进程，P3a 退出即续做。
+**产物**：`tests/models/qwen3_5/test_kvarn_continuation_image.cpp`（新）、`tests/ops/test_kvarn.cpp`（改）、`tests/models/qwen3_5/tests.cmake`、`docs/maintainer/op-development.md`、`/tmp/tests_wp5.log`、`/tmp/tests_p1c.log`。**未提交**。
+
+### 2026-10-08-4 — GPU 收尾四件（①P3a 9 臂 / ②P1 e2e **通过** / ③WP5 余量**实测** / ④续列尾 device 段**首跑 FAIL→定位为测试自身 bug→修正 PASS**）+ P2 前置：kvarn MTP provisional 路径**首次激励**
+
+**触发**：用户指示 GPU 收尾 + P1/P2 推进。P3a（run6.sh）已 `### P3a repeats DONE Thu Oct 8 02:36:04 2026`，显存回落 0 MiB。
+
+**① P3a 收尾：9 臂（`kvarn:k4v4|k5v5|k6v6` × r1–r3）全部 `exit=0`；质量指标逐位重复，仅吞吐有散布**
+
+协议与 D-10/D-11 逐字相同（复用 `bf16-t0.topk`，229,348 评分 token / 28 窗口）。
+
+| 档 | mean KLD（r1/r2/r3） | median | P99 | max | same_top | dlogp | PPL | tok/s（r1/r2/r3） |
+|---|---|---|---|---|---|---|---|---|
+| `k4v4` | 0.002120 / 0.002120 / 0.002120 | 0.000747 | 0.017190 | 7.175765 | 0.9817 | −0.000252 | 4.69436 ×3 | 289.1 / 291.9 / 292.8 |
+| `k5v5` | 0.001432 / 0.001432 / 0.001432 | 0.000531 | 0.010355 | 7.599654 | 0.9846 | −0.000187 | 4.69405 ×3 | 290.6 / 287.5 / 289.5 |
+| `k6v6` | 0.001233 / 0.001233 / 0.001233 | 0.000454 | 0.007896 | 8.354687 | 0.9858 | −0.000073 | 4.69352 ×3 | 289.3 / 289.9 / 289.5 |
+
+**判定（收口 D-11 的单次测量口径）**
+1. **质量指标（mean/median/P99/P99.9/max/same_top/dlogp/PPL）在三重复间逐位相同** ⇒ KLD 测量是**完全确定性**的，重复测量的**极差为 0**（远强于"±散布"的预期）。三档数值与 D-11 单次测量**逐位相同**（0.002120 / 0.001432 / 0.001233）⇒ **D-11 的单次测量被 3 次重复完全证实**，无需修正。
+2. **唯一有散布的是吞吐**（唯一非确定性来自 wall-clock/调度）：`k4v4` 291.27±3.7、`k5v5` 289.20±3.1、`k6v6` 289.57±0.6 tok/s（极差 1.3–1.3%）。三档均值落在 bf16 296.1 的 −1.6%…−2.3% 内，与 D-11/D-12 的"位宽升高有单调真实代价"一致但不构成新结论。
+3. ⇒ **D-11 的"A8 三档全过、不回退"结论在 3× 重复下稳固**；计划书 §1-A2/A8 与附录 D-11 无需改判，只补一句"重复测量极差为 0（质量）/ ≤1.3%（吞吐）"。
+
+**② P1 e2e 验收（WP3② 的验收标准）—— `RESULT: PASS`**
+
+命令：`bash .deps/kvarn-adm/p1_prefix_reuse.sh`（`ninfer-serve`，`--kv-dtype kvarn:k4v4` vs bf16 对照，`--max-context 4096`、`--greedy`，同 prompt ×2）。
+**先修掉 harness 自身一个 bug**：`run_case` 的 `local tag=$1 port=$2 kv=$3 url=… log="…$tag…"` 在同一条 `local` 语句里引用**尚未赋值**的 `$tag` ⇒ 在 `set -u` 下报 `tag: unbound variable`（该脚本此前从未跑过，故首次暴露）。
+
+| 判据 | 实测 |
+|---|---|
+| kvarn r2 `usage.prompt_tokens_details.cached_tokens > 0` | **851**（99.4%，`turn closure`）✓ |
+| kvarn r2 `choices[0].message` 与 r1 **逐字节相同** | **YES** ✓ |
+| bf16 对照证明 harness 确触发复用 | r2 cached **851** 且 r1==r2 ✓ |
+| 旁证（独立于计数器） | kvarn req#1 TTFT 721 ms → req#2 **37.9 ms**（19×）；serve log 记 `capacity \| KV 4,096 tokens, **kvarn**, explicit` ⇒ kvarn 存储确在生效 |
+
+⇒ **P1（续列尾前缀复用）Engine 级验收达成**。连同 08-03 的专用单测（host 段 + 本轮 device 段，见④），WP3② 的**实现 + 验收闭环**完成。日志：`.deps/kvarn-adm/p1-{kvarn,bf16}-serve.log`、`{kvarn,bf16}-r{1,2}.json`。
+
+**③ WP5 判据数值余量实测（首跑）—— 余量充足，判据成立**
+
+`./build-port/tests/ninfer_tests.exe ninfer_kvarn_test`（GPU，非 `CUDA_VISIBLE_DEVICES=99`）：
+
+```
+KVarN K official oracle: step_ratio_max=1        flips=1/65 over_step=0 wide_flips=0 of 65536   (bits=4)
+KVarN V official oracle: step_ratio_max=0.0049119 flips=0/65 over_step=0 wide_flips=0 of 65536   (bits=4)
+KVarN K official oracle: step_ratio_max=1        flips=1/65 over_step=0 wide_flips=0 of 65536   (bits=5)
+KVarN V official oracle: step_ratio_max=0.0101499 flips=0/65 over_step=0 wide_flips=0 of 65536   (bits=5)
+KVarN K official oracle: step_ratio_max=0        flips=0/65 over_step=0 wide_flips=0 of 65536   (bits=6)
+KVarN V official oracle: step_ratio_max=0.0206313 flips=0/65 over_step=0 wide_flips=0 of 65536   (bits=6)
+OK kvarn correctness
+```
+
+- **无一项超限**：`flips` 最大 **1**（上限 65 ⇒ **65× 余量**）、`over_step=0`、`wide_flips=0`（零容忍项通过）。判据 exit=0。
+- **与 08-03 的分析值吻合**：预测"bits=4 约 1 次翻码、bits=5 约 2、bits=6 约 0–4"；实测 K 侧 bits=4/5 各 **1**、bits=6 **0**；V 侧三档全 **0**。`step_ratio_max=1`（K，bits 4/5）即**恰好一个量化步长**，正是"单元素落在量化边界、设备与 oracle 舍入到相邻码"的形态，与 07-21 的 `rel_l2=6.09e-4`（bits4 K）根因一致。
+- ⇒ **§1-A2 / §7-WP5 的判据（逐元素 ≤ 1 步 + 边界翻码上限 1e-3 + `|Δcode|>1` 零容忍）经实测成立**，无需放宽；`kMaxFlipFraction=1.0e-3`、`kStepSlack=5e-2` 保留。WP5 **收口**。
+
+**④ 续列尾 device 段 —— 首跑 FAIL(2) → 根因 = **测试自身 bug** → 修正后 PASS**
+
+`./build-port/tests/ninfer_tests.exe ninfer_qwen3_5_kvarn_continuation_image_test` 首跑：
+```
+FAIL: the captured KVarN tail survives the slot copy
+FAIL: the activated KVarN markers match the captured ones
+FAIL kvarn continuation image   (exit=1)
+```
+**定位（决定性）**：两处失败**都只涉及 `marker_pattern`**；同一断言里的 K/V（`restored_k/restored_v`，尺寸 `tail`）**通过**。根因是我在 08-03 写该测试时把 `marker_pattern` 写成 **3 字节** `{0x11,0x22,0x33}`，而 `logical_pages` 是 `I32{ops::kKvarnTailSlots=3}` = **12 字节** ⇒ ① `copy_to_tensor` 从 3 字节 vector 读 12 字节（**越界读 / UB**）；② `read_tensor(...) == marker_pattern` 是"12 字节 vs 3 字节"的 vector 比较，**恒 false**。测试**自身**在第 341 行就断言 `logical_pages.bytes() == marker`(=12) 且该断言通过 ⇒ 12 是正确尺寸，**3 字节才是 bug**。
+**修法**：`marker_pattern` 改为按 `marker` 尺寸程序化生成（与 `k_pattern`/`v_pattern` 同构）。**判据不变**（仍是"逐字节存活 + activate 后逐字节相同"）。重跑 **`OK kvarn continuation image`（exit=0）**。
+⇒ **实现无缺陷**（K/V/markers 全部逐字节通过 slot copy 与 activate）；这是**测试侧**的尺寸 bug，非移植缺陷。**已如实记录**（未放宽任何阈值）。
+
+**P2 前置（WP3④）：kvarn MTP provisional 路径首次激励 —— 通过**
+
+新建 `.deps/kvarn-adm/p2_mtp_gen.sh`：对 `kv{:kvarn:k4v4|bf16|rk4v4}` × `spec{off, mtp k=1}` 各跑同一 greedy 请求 **2 次**（repeat），比较 message 文本（`.deps/kvarn-adm/p2-*.{json,txt,log}`）。
+
+| 档 | MTP-off decode | MTP-on decode | mtp accepted | self-det(off) | self-det(on) | **MTP-on vs off** |
+|---|---|---|---|---|---|---|
+| `kvarn:k4v4` | 67.8 tok/s | **101.5 / 101.6** | **84/113 (74.3%)** | none | none | **none** |
+| `bf16` | 68.3 | 104.1 / 104.3 | 87/111 (78.4%) | none | none | **none** |
+| `rk4v4` | 68.5 | 97.6 | 79/119 (66.4%) | none | none | **none** |
+
+（"none" = 两次/两配置的 message **逐字节相同**；三档 req#2 均 `cached 851`。所有 `exit=0`、`http=200`。）
+
+- **首要目标达成**：`kvarn:k4v4 --spec mtp` **端到端跑通**且日志报 `mtp accepted 84/113` ⇒ **kvarn 的 MTP provisional 路径（WP3 落地但从未激励）首次被真正执行**，无规划/几何缺陷。
+- **A3 相对判据（O1）有利**：kvarn 在 MTP-on 下**自确定性成立**（r1==r2 逐字节）；且本样本中 MTP-on vs off **逐字节相同**（无分叉）。
+- **同量级**：MTP 加速比 kvarn **1.50×**（101.5/67.8）vs bf16 **1.52×**（104.1/68.3）、rk4v4 **1.42×**；接受率 kvarn 74.3% 介于 bf16 78.4% 与 rk4v4 66.4% 之间。
+
+**边界（如实记录，勿过度解读）**：本轮 P2 前置是 **message 文本级、单 prompt、200 token** 的 e2e 观测；它**不能**替代 **token 级首分叉下标/分叉率** —— 后者需要把 `test_engine_mtp_greedy_parity_real.cpp` 改造为诊断仪器（**P2b，未完成**）。已知 **bf16 在同一 token 级仪器下于 token 91 分叉**（A3，D-4/D-7 逐字相同），而本 e2e 样本 200 token 未复现分叉 ⇒ **分叉是按 prompt/步数触发的 near-tie 翻转，非必然**。
+
+**构建**：`ninfer_tests ninfer ninfer-serve ninfer-perplexity` **exit 0**（10 步；P3a 释放后 `ninfer-perplexity` 重链成功）。
+**产物**：`.deps/kvarn-adm/{p1_prefix_reuse.sh(修),p2_mtp_gen.sh(新),p1-*.log/json,p2-*.log/json/txt,run6.log}`（gitignored）。
+**未做（如实记录）**：① P2b（仪器改造 + kvarn 档并入 `kKvProfiles` + `kvarn_bits` 贯通到 `EngineOptions`）**未做**；② 未跑 `k5v5/k6v6` 的 MTP；③ 未做 kvarn MTP 的 `k>1`（k=3/15）；④ **未提交**。
+
+### 2026-10-08-5 — P2b 完成：MTP parity 测试改造为**诊断仪器**（去逐位门禁、加自确定性门禁 + 首分叉报告，并入 kvarn/rk4v4 档）；**kvarn 在 token 级仪器下自确定性成立、分叉不劣于基线**
+
+**触发**：承接 08-04 的 P2 前置（激励已通过），本轮做 P2b = WP3④ 的仪器改造（用户裁定 ctest 范围取「**收窄默认档**」）。
+
+**改造内容（`tests/models/qwen3_5/test_engine_mtp_greedy_parity_real.cpp`，557 行）**
+
+1. **去逐位门禁**：`verify_result`（跨配置 token 逐位相等，不符即 `throw`）**删除**；换成 `require_output_limit`
+   （只保留"达到固定输出长度/`FinishReason::OutputLimit`"这一**结构契约**）+ `divergence(left,right)`
+   → `{first, count}`（首分叉下标 + 分叉计数）。
+2. **加自确定性门禁（A3/O1 的①，真正的 gate）**：每个宽度 `repeat 0` 记下本配置输出，`repeat 1` 必须**逐字节复现**
+   （长度相同且 `divergence.count==0`），否则 `throw "... is not self-deterministic: first_diff=… diverged=…"`。
+   （原实现把 `expected` 只在 `depth==0||dflash2` 时写并与 greedy 比 ⇒ 既不是自确定性、又是跨配置门禁。）
+3. **跨配置降级为报告**：打印 `self_det=n/a|ok vs_greedy=identical|first_diff=N diverged=C/total`。
+   tool-loop 的 adaptive-vs-off 断言同样降级为首分叉报告。
+4. **并入档位**：`kKProfiles` **新增 `rk4v4`、`kvarn:k4v4`、`kvarn:k5v5`、`kvarn:k6v6`**（`KvProfile` 增
+   `KvarnBits` 字段），`engine_options` 增 `kvarn_bits` 形参并写 `options.kvarn_bits`
+   （**此前测试从不设 ⇒ kvarn 会静默用默认 Bits4**）；`--kv-dtype` 允许表与 usage 同步。
+5. **`--quick`（用户裁定的 ctest 收窄）**：= 代表性档 `{bf16, rk4v4, kvarn:k4v4}` × `sample 0` × 宽度 `{0,3}`；
+   `tests/models/qwen3_5/tests.cmake` 的注册加 `TEST_ARGS --quick`（该宏本就有 `TEST_ARGS` 约定）。
+   **全扫**（8 档 × 3 样本 × 7 宽度 × 2 重复 ≈ 336 次生成 ≈ 1.5 h）仍可**无 `--quick`** 手动跑。
+
+**实测（GPU，本机 27B 产物，`sample 0`、`prompt 68`、512 输出 token、C=1、`--greedy`）**
+
+| 档 | k=1 `vs_greedy` | k=3 `vs_greedy` | k=15 `vs_greedy` | `self_det` |
+|---|---|---|---|---|
+| `bf16` | **first_diff=91, 413/512** | identical | **first_diff=91, 412/512** | ok（全） |
+| `rk4v4` | identical | **first_diff=97, 408/512** | 未跑 | ok |
+| **`kvarn:k4v4`** | **identical** | **identical** | **first_diff=91, 418/512** | ok（全） |
+| `kvarn:k5v5` | **identical** | 未跑 | 未跑 | ok |
+| `kvarn:k6v6` | **identical** | 未跑 | 未跑 | ok |
+
+**全部 `exit=0`**（门禁已去除，仅自确定性/结构契约可致失败）。`ctest -R ninfer_qwen3_5_mtp_greedy_parity_real_test`
+（`--quick`）**Passed 130.68 s**。
+
+**判定（A3 相对判据 / WP3④）**
+
+1. **自确定性成立（①）**：`self_det=ok` 在**所有**已测（档,宽度）组合上成立（含 kvarn 三档 + rk4v4/bf16，宽度 0/1/3/15）
+   ⇒ 这正是 A3-O1 的**唯一绝对判据**，kvarn 满足。
+2. **分叉是（档,宽度）特异的 near-tie 翻转，非 kvarn 独有**：`bf16@k1`、`bf16@k15`、`rk4v4@k3`
+   各自分叉（首分叉 91/91/97）；**kvarn:k4v4 在 k=1/k=3 与 greedy 逐字节相同**（0 分叉）。
+3. **kvarn 不劣于基线（④）**：k=15 处 kvarn `418/512` vs bf16 `412/512`（**首分叉同为 token 91**，差 6 token =
+   1.2% 相对）；k=1/k=3 处 kvarn 更好（identical）。⇒ **同量级、不劣化**（**不主张 kvarn 严格更优**；k=15 略高于 bf16）。
+4. **与 A3 既有定性一致**：分叉随宽度出现/消失、且只落在部分档位 ⇒ 与 `small_t.cu` 宽度特化 + `docs/performance.md:45`
+   「per-configuration determinism, not cross-configuration equality」一致。**未做**决定性实验（把 `case 2` 改 `<2,2>`），
+   故仍属**代码结构上最合理的解释**，非已证事实（同 D-6 边界）。
+5. **首个 kvarn token 级 MTP 数据**：kvarn 的 MTP provisional 路径在 token 级仪器下**无结构/规划缺陷**（无异常、
+   长度契约满足、自确定性成立）。
+
+**边界（如实记录，勿过度解读）**：① 仅 `sample 0`（prompt 68）、单次运行；② 宽度只覆盖 0/1/3/15（`k5v5/k6v6` 只测 k=1）；
+③ "identical" 是**该样本**下的结论，**不等于** kvarn 永不与 greedy 分叉（k=15 即分叉）；④ 测试名仍含 `parity`
+（语义已变为"自一致性 + 诊断"，**未改名**，避免波及 ctest 名/既有记录引用——记为未决项）。
+
+**变更面（本轮新增/修改）**：`tests/models/qwen3_5/test_engine_mtp_greedy_parity_real.cpp`（改造）、
+`tests/models/qwen3_5/tests.cmake`（`TEST_ARGS --quick`）。
+**构建**：`ninfer_tests` **exit 0**（0 error 0 warning）。
+
 ---
 
 ## 4. 下一步（按计划书 WP 顺序）
@@ -1386,13 +1582,15 @@ OK kvarn correctness
 - 风险：**尾槽/页几何在续列镜像里的偏移一致性**（易静默错位）⇒ 必须加"**续列往返逐 token 对拍**"单测。
 - 估时：3–5 天。
 
-**P2 — WP3④ MTP 路径激励 + A3 相对判据**〔判据补全〕
+**P2 — WP3④ MTP 路径激励 + A3 相对判据**〔判据补全〕**✅ 完成（08-04 激励 / 08-05 仪器）**
 - 目标：证明 kvarn 在 MTP 投机构型下一致性**不劣于**同配置基线（A3 按 O1）。
-- 内容：用 `ninfer`/`ninfer-serve` 跑 MTP 生成（`kvarn:k4v4` vs `bf16` vs `rk4v4`）；把
-  `test_engine_mtp_greedy_parity_real.cpp` 的逐位断言改为"**自确定性 + 首分叉下标/分叉率/KLD 差**"诊断仪器。
-- 验收：三构型 MTP 生成并排，kvarn 与其他 KV 档**同量级**；仪器在 kvarn 配置下自确定性成立。
-- 风险：kvarn 的 MTP provisional 路径已在 WP3 落地但**从未激励**（未决项 10 残余）⇒ 首跑可能暴露规划/几何缺陷。
-- 估时：2–3 天。
+- 内容：~~用 `ninfer`/`ninfer-serve` 跑 MTP 生成~~（08-04 `.deps/kvarn-adm/p2_mtp_gen.sh`：kvarn 接受 84/113、
+  加速比 1.50× ≈ bf16 1.52×）；~~把逐位断言改为诊断仪器~~（08-05 完成：去逐位门禁 + 自确定性门禁 + 首分叉报告 +
+  并入 `rk4v4`/`kvarn:k4v4|k5v5|k6v6`）。
+- 验收（达成）：三构型 MTP **同量级**（加速比/接受率）；仪器下 **kvarn 自确定性成立**（全档 `self_det=ok`）、
+  **分叉不劣于基线**（`kvarn:k4v4`@k1/k3 identical；@k15 418/512 vs bf16 412/512，首分叉同为 token 91）。
+- 风险（未触发）：kvarn MTP provisional 路径首次激励**未见规划/几何缺陷**。
+- 残留：仅 `sample 0`、宽度 {0,1,3,15}、`k5v5/k6v6` 只测 k=1；测试名仍含 `parity`（未改名，记为未决项）。
 
 **P3 — WP4 补强（可与 P1/P2 并行）**〔加固既有结论〕
 - **P3a**：229k 三档 **≥3 次重复**测量，给出 mean KLD / tok/s 的**均值±散布**（当前单次，D-10 同口径）。
@@ -1409,7 +1607,7 @@ OK kvarn correctness
 **P5 — WP6 评估**〔最高风险，门禁后启动〕：10–15 天，计划书 §7-WP6。
 
 ### 4.2 已完成项（存档）
-WP0.5-A 定案 / WP0.5-B（代理 + 正式）/ WP0.5-C / WP1 / WP2 / WP3①·②·③·⑥ / WP4 全部。
+WP0.5-A 定案 / WP0.5-B（代理 + 正式）/ WP0.5-C / WP1 / WP2 / **WP3 全部（①·②·③·④·⑥）** / WP4 / WP5 全部。
 
 ### 4.3 不要做
 不动 `.worktrees/{m5a,wp1,wp2,wp3}`；不重配 `build-port`（一律按目标构建）；**不提交**（用户约束）。
@@ -1453,59 +1651,83 @@ WP0.5-A 定案 / WP0.5-B（代理 + 正式）/ WP0.5-C / WP1 / WP2 / WP3①·②
 
 ## 5. 下一窗口起手提示（handoff，供直接粘贴）
 
-> 本条为**新窗口冷启动**用。它自包含：权威文档路径、已定案事实（不要重新论证）、本次任务、
-> 环境纪律、建议的第一条命令。
+> 本条为**新窗口冷启动**用。它自包含：权威文档路径、已定案事实（不要重新论证）、当前状态、待办队列、
+> 环境纪律、建议的第一条命令。**最后更新 2026-10-08（本轮 08-03）。**
 
-**任务**：在 `D:\ninfer\ninfer-precision-tail` 继续 KVarN 移植。**WP4 已于 07-22 收尾**（07-23 完成本质核对）；
-本条为新窗口起手。**下一步完整工作计划见 §4.1**（推荐顺序 **P1 WP3② 续列尾 → P2 WP3④ MTP 激励 → P3 WP4 补强
-（可并行）→ P4 WP5 口径 → P5 WP6**；WP6 门禁 = P1/P2 完成）。**不要**跳过 P1 直接投 WP6。
+**任务**：在 `D:\ninfer\ninfer-precision-tail` 继续 KVarN 移植 —— **收尾（计划书回写 + WP4 补强 P3b/P3c）**。
+本轮（08-04/08-05）已完成 **GPU 收尾四件**（①P3a 3× 重复、②P1 e2e PASS、③WP5 余量实测、④续列尾 device 段）
++ **P2 全部**（08-04 kvarn MTP 首次激励；08-05 parity 测试改造为**诊断仪器**并并入 kvarn/rk4v4 档，token 级实测
+**kvarn 自确定性成立、分叉不劣于基线**）。**计划内的 kvarn 功能项已全部落地并验收**；剩余为收尾（计划书回写、
+P3b 报告名并入 `KvarnBits`、P3c kvarn parser 单测）与 3 个待裁决项。
 
-**先读（顺序）**：本文件 `kvarn-port-progress.md`（§0 快照 / §3-2026-10-07-20·21·22 / §4 主线横幅 / 本条）
-→ `kvarn-port-into-precision-tail-plan.md`（**版本头 v10**、**§5「WP4 落地与设计定案」**、§7-WP4、
-附录 **D-11** 正式 WP0.5-B 记录）。二者是唯一权威；**冲突时以本文件的实测为准并回写计划书**（计划书 §0.5 规则）。
+**先读（顺序）**：本文件 `kvarn-port-progress.md`（**§0 快照 / §3-2026-10-08-5（最新）/ §3-08-04 / §4.1 / 本条**）
+→ `kvarn-port-into-precision-tail-plan.md`（**版本头 v13**、§1 A2/A8、§7-WP3·WP5、附录 D-12）。二者是唯一权威；
+**冲突时以本文件的实测为准并回写计划书**（计划书 §0.5 规则）。
 
-**已定案事实（不要重新论证）**
-- WP1/WP2/WP3①②/WP4 已完成；`kvarn:k4v4|k5v5|k6v6` 三档已发布且**源码端到端可运行**。
-- **正式 WP0.5-B 三档全过（07-22，229,348 评分 token / 28 窗口）**：`k4v4` 274 B **0.002120**（= 对
-  `rk4v4`/`nvfp4` 280/288 B **2.09×/2.07×**，字节更少）；`k5v5` 338 B **0.001432**；`k6v6` 402 B **0.001233**
-  （= 对同字节 `k8v4` 402 B **0.002688** 的 **2.18×**，**门槛 <0.002688 达成**）。PPL +0.025%/+0.019%/+0.007%；
-  速度 −0.5%/−1.5%/**−2.8%**（k6v6 代价真实，归因记录更大 ⇒ 单元素边界翻码非缺陷）。
-- **两条结论修正**（实测优先）：① D-10「KVarn 优势是每字节而非绝对质量」**被发布档取代**（k4v4 绝对 KLD 也更好）；
-  ② D-10「无 KVarn 特有速度代价」**收窄**（位宽升高有单调真实代价，k6v6 −2.8%）。
-- **WP4 设计定案**（计划书 §5）：`(4,4)` 的 K 侧偏移/打包算术与旧 k4v2 **逐字节相同** ⇒ k4v4 只改 V 侧；
-  位序沿用「小端 / LSB 优先 / K 偶数 token=低半字节 / V `d&3==0`=最低字段」；**不得**引入 128 列切片几何
-  （否则 §5 字节表作废）。
-- **kvarn 组合限制**：`--kv-tail-tokens != 0` 与 `--mtp-attention-window != 0` 对 kvarn **规划期 fail-fast**
-  （`validate_target_options`）。裸 `kvarn` ≡ `k4v4`。`KvarnBits::Bits2` 与 `kvarn:k4v2` **已删除**。
+**当前状态（务必先核验，勿臆断）**
+1. **GPU 空闲**（显存 0 MiB）；`ninfer_tests/ninfer/ninfer-serve/ninfer-perplexity` 均**最新构建绿**。
+2. 工作树 **未提交**（用户约束：不要提交）。清单见 §0「工作树改动清单」——本轮新增/改：
+   `tests/models/qwen3_5/test_engine_mtp_greedy_parity_real.cpp`（诊断仪器改造）、
+   `tests/models/qwen3_5/tests.cmake`（`TEST_ARGS --quick`）、`test_kvarn_continuation_image.cpp`（marker 尺寸 bug 修复）。
+3. `ninfer_qwen3_5_kvarn_continuation_image_test` **host + device 段全绿**；`ninfer_kvarn_test` **全绿**（余量 65×）；
+   `ninfer_qwen3_5_mtp_greedy_parity_real_test`（`--quick`）**Passed 130.68 s**、全扫可无 `--quick` 手动跑。
 
-**下一步任务（择一，按依赖序）**
-- **A（推荐先做，收口 WP3）**：② **续列尾**（`state_image` kvarn 镜像 + `program_impl` 的
-  `restore/capture/activate_sequence_kvarn_tail` + `prefill.cpp`/`transactions/{capture,commit}.cpp` 调用点；
-  验收 = 前缀复用/检查点往返后 PPL 不劣化）；④ **MTP 路径激励与 A3 相对判据**（用 MTP 生成跑 kvarn vs `bf16`/`rk4v4`
-  基线并排，检查不劣于基线；顺带把 `test_engine_mtp_greedy_parity_real.cpp` 改造为诊断仪器）。
-- **B**：进入 **WP6 评估**（10–15 天、最高风险；k4v4 实测已足为其背书）。
+**待办队列（按依赖序）**
+1. **计划书回写（本轮已欠）**：§7-WP3 的 ②/④ 标"完成"、⑤ 措辞订正（「`small_t.cu` 挂载」→「模型执行层
+   `text.cpp` 分派」）；§7-WP5 标"完成（余量实测）"；§1-A2 补"3× 重复极差 0"；附录补 D-12 重复测量/仪器一句。
+2. **P3b/P3c（纯 CPU）**：P3b 把 `KvarnBits` 并入 `MemorySummary`/报告/日志名（未决项 7）；
+   P3c 补 kvarn parser 单测（`ninfer_cli_options_test`/`ninfer_serve_options_test`）。
+3. **夹具/覆盖残留**：仪器中 `k5v5/k6v6` 只测了 k=1；`sample 0` 之外未测；测试名仍含 `parity`（未改名）。
+4. **问用户的裁决项（仍未获答复）**：
+   (a) 审计 3 项 LOW 是否修 —— `reset_kvarn_tail_row` 缺口（**图谱已确认 TAIL `callers_total=0`**）、
+       capture/activate 抛错被 `catch(...)` 静默化、注释未提 KVarN；
+   (b) **是否补回 FORK 漏移植的测试**（`test_prefill_precision_real.cpp`，它是 `reset_kvarn_tail_row` 的激励者）；
+   (c) WP5 剩余 bench 归属：需 `-DNINFER_BUILD_BENCHMARKS=ON` 重配，与「不要重配」冲突 ⇒ **需显式决定**（未决项 3）。
+4. **问用户的三件事（仍未获答复）**：
+   (a) 审计 3 项 LOW 是否修 —— `reset_kvarn_tail_row` 缺口（**图谱已确认 TAIL `callers_total=0`**）、
+       capture/activate 抛错被 `catch(...)` 静默化、注释未提 KVarN；
+   (b) **是否补回 FORK 漏移植的测试**（`test_prefill_precision_real.cpp`，它才是 `reset_kvarn_tail_row` 的激励者）；
+   (c) WP5 剩余 bench 归属：需 `-DNINFER_BUILD_BENCHMARKS=ON` 重配，与「不要重配」冲突 ⇒ **需显式决定**（未决项 3）。
 
-**关键路径与产物索引**
-- 内核：`src/ops/kvarn/{store.cuh,decode_kernel.cuh,decode.cu,codec.cu,materialized_prefill.cuh,attention.cu}`；
-  几何/位编解码：`include/ninfer/ops/kvarn.h`。
-- `bits` 贯穿：`include/ninfer/types.h`(`KvarnBits`) → `startup.{h,cpp}`(`SequencePlanningInputs/SequencePlanImpl`) →
-  `decoder_state.{h,cpp}`(`DecoderStateSpec/PagedKVCacheLayout/PagedKVCache.kvarn_bits_`) → 视图 `.bits`。
-- 测试：`tests/ops/test_kvarn.cpp`（bits 4/5/6 三档 + 5/6 位宽注意力单测；`oracle_relative_l2_limit(bits)=1.0e-3`）。
-- 实验产物：`.deps/kvarn-adm/`（`run5.sh` + 三档 229k 日志 + `smoke-*.log` + `bf16-t0.topk`）。
+**08-03 的两个非显然发现（勿丢）**
+- **`reset_kvarn_tail_row` 移植缺口**：TAIL **零调用者**；FORK 有 **2 处**，都在
+  `D:\ninfer\ninfer-rtx5090-mobile\tests\models\qwen3_5\test_prefill_precision_real.cpp:236,284`，
+  **该测试未随移植进入 TAIL**。⇒ 既属"陈旧 marker"隐患（行重用若不由 store op 重写 markers），
+  也是**移植遗漏的测试覆盖**。**⚠ 原审计写"两树均无调用者"不准确**——由 codebase-memory 图谱 + grep 复核修正（§3-08-03）。
+- **host 镜像偏移 ≠ device 区域偏移**：`state_image` 的 host 布局与 device 布局由**两套独立 `LayoutBuilder`** 产生，
+  仅**单槽**字节量相同（host 镜像装单槽）；ctor 以「由 device 组件重建 host 布局并比对」兜底
+  （`state_image.cpp:459`）。改续列镜像时**勿假设偏移相同**。
 
 **环境与纪律**
-- 构建**复用既有 `build-port`，不要重配**（整树构建会因先存缺陷失败，一律**按目标**构建）：
-  `cmd //c "call D:\ninfer\ninfer-precision-tail\.deps\env-port.bat && cmake --build D:\ninfer\ninfer-precision-tail\build-port --target ninfer_ops ninfer_tests ninfer ninfer-serve ninfer-perplexity -j 8"`
-  （错误过滤：`grep -a "error C[0-9]\|error LNK\|FAILED:" log`，诊断是 GBK）。
-- 跑模型用**前斜杠路径 + `MSYS_NO_PATHCONV=1`**（否则报 `CreateFileW Win32 error 3`）。
+- **不要重配 `build-port`**；**按目标构建**（`ninfer_ops ninfer_tests ninfer ninfer-serve ninfer-perplexity`）。
+  **禁止全树构建**：源码改动后 `ninfer-perplexity.exe` 已陈旧，全树构建会去重链接**被 P3a 锁定的**该 exe 而失败。
+  ```bash
+  cmd //c "call D:\ninfer\ninfer-precision-tail\.deps\env-port.bat && cmake --build D:\ninfer\ninfer-precision-tail\build-port --target ninfer_tests -j 8" > /tmp/build.log 2>&1
+  grep -a "error C[0-9]\|error LNK\|FAILED:" /tmp/build.log   # 诊断是 GBK
+  ```
+- **不要从 Git Bash 内联 vcvars**；`cmd //c` **不要**与 `MSYS_NO_PATHCONV=1` 同用（后者会让 `//c` 不被 cmd 识别，
+  变成交互式 cmd 而静默什么也不做）；给 Windows 原生 exe 传路径时才加 `MSYS_NO_PATHCONV=1`。
+- 只跑 host 段/无设备测试时用 `CUDA_VISIBLE_DEVICES=99`（强制 0 设备 ⇒ 不掉显存）。
 - 模型（唯一，勿 glob）：`D:/ninfer/ninfer-precision-tail-package/model/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-vision-bf16-mtp.ninfer`。
-- **16 GB 显存**：perplexity 走 default `--cuda-memory-policy`（按空闲显存自适应），实测峰值 11.7 GiB；
-  跑前 `nvidia-smi` 确认独显空闲（本机只有 1 个计算进程才安全）。
-- 每次推进**追加**本文件 §3、WP 边界更新 §0 快照、并把影响验收/未决项/风险的结论**回写计划书**。
-- **不要提交**（用户约束：保留工作树）。
-- 旁枝 `.worktrees/{m5a,wp1,wp2,wp3}` 与 kvarn 无关，**不要动**。
+- **16 GB 显存**：跑前 `nvidia-smi` 确认只有 1 个计算进程；perplexity 走 default `--cuda-memory-policy`，实测峰值 11.7 GiB。
+- **不要提交**（用户约束：保留工作树）。不要动 `.worktrees/{m5a,wp1,wp2,wp3}`（与 kvarn 无关）与 `.deps/`（gitignore）。
+- 每次推进**追加**本文件 §3、WP 边界更新 §0 快照、把影响验收/未决项/风险的结论**回写计划书**。
+- 本轮新增了 `codebase-memory-port-auditor` 子代理（Tier 3，移植完整性/否定性结论审计）并改写了 `codebase-memory` skill；
+  若新窗口看不到该 agent 类型，重开会话即可。结构性问题（"是否漏了调用点""是否未被使用"）**必须**用它，
+  **不要**交给通用 Explore 类子代理（无 MCP，做不到结构完备性）。
 
-**建议第一条命令**：`cd /d/ninfer/ninfer-precision-tail && git status --short` 与
-`./build-port/tests/ninfer_tests.exe ninfer_kvarn_test`，确认工作树、本文档与基线一致
-（**预期：`ninfer_kvarn_test` 全绿** —— 4/5/6 三档 oracle + 5/6 位宽注意力；WP1 旧的 K 容差失败已在 07-21
-按位宽重定容差（1.0e-3）后收口）。
+**建议第一条命令**
+```bash
+cd /d/ninfer/ninfer-precision-tail && git status --short && git log --oneline -1 && nvidia-smi --query-gpu=memory.used --format=csv,noheader && tail -3 .deps/kvarn-adm/run6.log
+```
+P3a 已 `### P3a repeats DONE`、显存 0 MiB ⇒ **GPU 空闲，可直接从待办 1（P2b）开工**。
+
+**codebase-memory 图谱（2026-10-08 起可用，勿再被 SessionStart hook 误导）**：本仓已被索引
+（`D-ninfer-ninfer-precision-tail`，45,868 节点 / 216,412 边；**已含 08-02/08-03 最新代码**，
+因 08-04 重跑过 `index_repository`）。注意：**SessionStart hook 仍报 "no indexed graph project
+matched this working directory"（陈旧的误报）**——直接 `list_projects` 即可看到本仓。使用纪律：
+依赖某文件前先 `check_index_coverage`（本轮 `index_status` 报 `parse_partial 253` / `not_indexed 79`，
+CUDA `.cu/.cuh` 可能在 partial 列表内 ⇒ **miss 的行直接读源码**）；否定性/完备性问题（"谁调用 X"
+"X 是否未被使用"）**必须**走图谱（`trace_path` inbound），**不要**交给无 MCP 的 Explore 子代理。
+本轮实测：图谱确认 `reset_kvarn_tail_row` 在 TAIL `callers_total=0`，并给出
+`capture/activate_sequence_kvarn_tail` 的完整调用面（含传递边）。
