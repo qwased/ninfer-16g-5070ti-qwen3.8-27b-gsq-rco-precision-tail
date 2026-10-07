@@ -276,6 +276,26 @@ Other host facts:
   assuming the device is free.
 - `nvcc` writes `.exp`/`.lib` next to any `-o` target; keep probe builds out of the repo root.
 
+### Codebase memory (indexed graph)
+
+This repository is indexed as graph project `D-ninfer-ninfer-precision-tail`; the sibling repos under
+`D:\ninfer` are indexed separately. Use the `codebase-memory` skill for structural work.
+
+- **`list_projects` is authoritative, not the SessionStart hook.** When the workspace root is
+  `D:\ninfer` (the parent of this repo) the hook reports "no indexed graph project matched this
+  working directory", because it matches only when an indexed project root is an *ancestor* of the
+  working directory. Call `list_projects` and continue; the graph is available.
+- Before relying on a file, `check_index_coverage` it. `metadata_changed` is normal on a dirty
+  worktree and is not a verdict; `parse_partial` / `not_indexed` ranges mean read those lines
+  directly and qualify the conclusion.
+- **Structural, negative and exhaustive claims must come from the graph**, not grep alone: "who
+  calls X", "X is unused", "no other caller", "nothing else reads this field", "the only place".
+  Use `trace_path` inbound (plus coverage); a grep-only result is labelled as grep-only.
+- **Changing a shared type is a graph task.** Before editing a struct or enum in
+  `include/ninfer/types.h` or another shared header, enumerate its consumers — the graph finds
+  readers that grep misses through visitors, serialisers and macros.
+- Literal lookups (one flag, one string, one config value) stay with `grep`.
+
 ### Build, run and resources
 
 Use `cmake --build build-port -j` by default. Adjust parallelism when actual resource pressure
