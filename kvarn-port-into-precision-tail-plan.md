@@ -1,12 +1,56 @@
 # 在 ninfer-precision-tail 内移植 KVarN（K4V4 / K5V5 / K6V6）+ 精度尾部：实施计划
 
-- 版本：**v16**（2026-10-08）。本版依据 **P3d：审计 3 项 LOW 修复落地**（进度 08-10、附录 D-16）：
+- 版本：**v20**（2026-10-08）。本版依据 **WP6 路线裁决 = (a) + WP6 分步计划 + 两项前置测量入队**（用户确认；进度 08-13、附录 D-19 ⑧·⑨）：
+  ① **路线 = (a)**（照 `small_t_k8v4.cuh` 形状把 KVarN 接进**外部共享精确尾环**）—— 量化依据：显存非决定因素（(a) 88 MiB/序列 vs (c′) 76.5 @C=1，差 **12 MiB**；C=8 差 104 MiB）、
+  (a) 的增量性能代价可忽略（精确双写 64 KiB/token ≈ `6×10⁻⁶` 于权重流；最新 N 键多读 +46 MiB/步但 KV 仅占 decode 总流量 ~1.4% ⇒ 端到端 ≈ **+0.4%**；workspace +0.4 MB）、
+  且消除双实现语义与 **BF16-acc 偏离**、判据与其它档位同构。**(c′)（body 自建滚动槽）否决**（省 ~3–5 天，换永久语义债）。
+  ② **§7-WP6 改写为分步计划 WP6.0–WP6.7**（每步给产出/验收/回退），**不变量 = A6 的「`tail=0` 逐位不变」是 WP6.2 的接受条件**。
+  ③ **两项前置测量入队（用户 08-12 指定）**：**WP6.0a 本机 prefill 噪声底**（重复 ≥5，补 WP0 产出 ② 的欠账）、**WP6.0b 现有外部尾的纯 kernel 代价**（关 MTP、`--kv-tail-tokens {0,1024}`、重复 ≥3，把 A8 的 `−5.8%/−2.1pt` 分解为「纯 kernel」+「接受率」）。
+  ④ **尚未执行**：两项测量与 WP6.0–WP6.7 全部**未开工**（本版只落计划；WP6 工期仍为 10–15 天区间）。**A1–A8 判据不变**（新增：A1 邻域的**视觉功能门**与 prefill/A8 的测量项）。
+- 版本：**v19**（2026-10-08）。本版依据 **§6.3 的 (a)/(b)/(c) 低成本探针已执行**（用户授权；进度 08-12、附录 D-19）——
+  探针为读码 + **跨工程图谱 Tier-3**（`D-ninfer-KVarN` / `D-ninfer-beellama.cpp` / FORK），**未用 GPU**：
+  **① (b) 首选路线不成立**。`ROTATED_K_ORIGINAL_V` 确存于上游（`beellama.cpp/ggml/include/ggml.h:461-466`：`AUTO/ROTATED/ORIGINAL/ROTATED_K_ORIGINAL_V`），
+  但 (i) 该域只在 **`n_query_tokens > 16`** 时自动生效（`src/llama-kvarn.cpp:140-146`），**decode 与 16-token 投机块恒为 `ROTATED`**
+  ⇒ 尾部合并真正发生的那些步**全部在旋转域**；(ii) V 的**量化与存储始终是旋转域**，"V original" 只是读出时对**反量化后的 V** 补一次 WHT
+  （`ggml/src/ggml-cuda/kvarn.cu:3064-3080`、FORK `kvarn_attn.py:1757-1758`）⇒ **KVarN body 不能当 fp8 body 复用尾部接线**。
+  更硬的一条：**坐标系本身就是障碍**（不是 §6.1 原文说的"实现欠账而非坐标障碍"）—— 本仓 `tests/ops/softmax_attention/causal_cache.cpp:1613-1623` 自述
+  「旋转域档位（fp8-e4m3/nvfp4-g16/k8v4）的 reduce 核消费**旋转系 partial**，而原始 BF16 尾行不表达于该系」。
+  **② (a) 是忠实路线**：照 TAIL 已有的 `small_t_k8v4.cuh` 形状（K/V 都旋、核内旋 Q、归并 **FP32** partial、**归并后只做一次反旋**），仓内模板现成。
+  **③ (c) 弱且语义不符**：KVarN 内建 3 槽 = sink 组 + **滚动**首/末组（`attention.cu:84-89,100-114`），`claim_tail_slot` **可返回 −1 丢行**、
+  `retire` 只清"整组覆盖"的页（`:291-315`）⇒ 不能承诺「最新 N 精确」；且它**本来就在跑**，接出来不产生新质量。
+  **④ 另提出有界第四选项 (c′)**〔本版新增，**未实测**〕：把 KVarN 内建尾环由 3 固定槽泛化为 `⌈N/128⌉+1` 滚动槽，
+  让 **body 自己在核内**保留最新 N 个精确组（复用 body 自身的合并 ⇒ **绕开 partial 契约 / 坐标系 / split 三项冲突**）。
+  **⑤ 另记**：§6.2 条 4「旋转时点未定」对 KVarN body **已有答案 = 写时旋转**（`attention.cu:157-194` 的 `rotate_stage_kernel` 存的是 WHT 后 BF16；
+  `rotate_on_stage = width <= kFusedStageMaxWidth(=16)`，`:25,590`）。
+  **WP6 工期重估仍为 10–15 天**，但路线从「(b) 可能零内核改动」改为 **(a) 或 (c′)**。**A1–A8 判据不变。**
+- 版本：**v18**（2026-10-08）。本版依据 **WP6 门禁评估**（进度 08-11(6)(7)、附录 D-18）：
+  用户询问「是否已有足够证据可开始 WP6」⇒ **判定：不足**。功能门（P1/P2 完成）与安全回退（`kvarn + --kv-tail-tokens` fail-fast）**已满足**，
+  但 **§6.3 的 (a)/(b)/(c) 低成本探针从未执行** —— 它被定为 **WP4 的前置**（§6.3 末句 / §7-WP4），却在 WP4 验收（只看三档准入）时被**静默跳过**，
+  进度记录与归档**均无执行痕迹**。故 WP6 路线仍属假设：首选的 (b) `ROTATED_K_ORIGINAL_V` **只出现在**
+  `docs/port-records/kvarn-kv-tail-feasibility-report.md:44` 的上游 ggml 散文里，**本仓代码 0 命中**；且
+  ① `kvarn_hadamard`（`src/ops/kvarn/codec.cu:185-189`）只收 BF16 ⇒ 「f16 旋转入口」**仅在坚持 f16 尾时才需要**（**订正**：`--kv-tail-type bf16` 今天已完整支持、且 BF16 尾环是**逐位精确档**，见 D-18 订正）；
+  ② **无任何测试把 kvarn 与 `--kv-tail-tokens` 组合**（A6/A7 的 oracle 与 group/ring 边界脚手架均不存在）。
+  ⇒ **建议先授权 §6.3 探针**（有界、~0.5–1 天、读码 + 跨工程图谱、**不需 GPU**）判定路线并重估工期，**再决定是否启动 WP6**（10–15 天、最高风险）。
+  另记：**子代理图谱已修复并经验证**（4 份代理定义 MCP 名连字符→下划线，**重启后探针通过**；`list_projects` 可见 6 个图谱工程含 FORK 与上游）⇒ 后续结构性/否定性结论可正式交 `codebase-memory*` 子代理；**此前几轮的此类结论一律按 grep-only 处理**。**A1–A8 判据不变。**
+- v17（2026-10-08）。本版依据 **P3d ① 的端到端对照已跑 + 待裁决 3 项裁决 +「子代理无图谱」根因修复**（进度 08-11、附录 D-17）：
+  ① 的 KLD 对照实测 `kvarn:k4v4` mean KLD **0.002120**（mean/median/P99/max/same_top/dlogp/PPL **全部与 D-11/P3a 逐位相同**）
+  ⇒ 该协议上该修复为**无害 no-op**、**D-11/P3a 数值无需重测**；**但「必要性」仍无证据** —— 本协议窗口恒为 `context` 长
+  （`plan_disjoint_windows`、`begin += context`）、页号每窗口从 0 重启 ⇒ 陈旧尾标记与当前页号**重合**；`Engine::score_tokens` 的
+  **变长窗口**冲突（首选/备用尾槽皆被占 ⇒ 跳过 staging）**未实测**。⇒ §9 该行与 §7-WP2 邻域改判为「**已验证无害、未证必要**」。
+  **待裁决 3 项用户已裁决**：**(a) 不移植** FORK 的 `test_prefill_precision_real.cpp`；**(b) 不补** `capture_identity_tag` 的 `kvarn_bits`
+  （保留注释，避免作废既有磁盘缓存）；**(c) kvarn bench 暂不纳入**（维持 `NINFER_BUILD_BENCHMARKS=OFF`、不重配）。
+  **P3d 后 GPU 回归 3 项全绿**（`ninfer_kvarn_test` 余量与 08-04 逐位同 / 续列尾 device 段 / `score_real`——后者用 `Fp8E4M3Row256`，
+  **非** KVarN，不覆盖本路由）。另记**仓外工具发现**：`~/.qoder/agents/` 的 4 份 `codebase-memory*` 定义把 MCP 工具名写作**连字符**
+  而运行时归一为**下划线** ⇒ 子代理**一直拿不到图谱**（上一会话两个子代理图谱调用为 0）；已修并备份，但**须重启 Qoder 生效**
+  （重启是否充分未排除）。**A1–A8 判据不变**。图谱刷新至 45,944 节点 / 216,668 边。
+- v16（2026-10-08）。本版依据 **P3d：审计 3 项 LOW 修复落地**（进度 08-10、附录 D-16）：
   ① **CausalScore 路由**补 `decoder->text_kv.reset_kvarn_tail_row(0, …)` —— 该路由硬编码 Main row 0、跨多次打分复用
   且**不经** `start_sequence`（故无 KVarN 尾镜像恢复），而尾槽标记在运行期**只被追加** ⇒ 上一占用者的标记会被读入；
   ② `commit.cpp` 的 `publish_active_continuation`（`noexcept`）在 `catch(...)` 前加 `catch (const std::logic_error&)`
   + stderr 诊断，**发布失败不再静默**；③ `state_image.h` 的 `StateImagePart`/`StateImageDevicePool` 注释补 KVarN 占用者。
   新增 `ninfer_qwen3_5_kvarn_tail_row_reset_test`（**实跑 PASS，ctest 262→263**）。
-  **⚠ ① 是生产行为变更，其端到端对照（`kvarn:k4v4` KLD 臂 vs P3a 的 `0.002120`）未跑**（用户指示不跑 GPU）⇒ 见 §9 该行。
+  ~~**⚠ ① 是生产行为变更，其端到端对照（`kvarn:k4v4` KLD 臂 vs P3a 的 `0.002120`）未跑**（用户指示不跑 GPU）⇒ 见 §9 该行。~~
+  **→ 已于 v17 关闭**（08-11：逐位复现 `0.002120`，**无害但必要性未证**；附录 D-17）。
 - v15（2026-10-08）。本版依据 **P3c：kvarn parser 单测**（进度 08-07、附录 D-15）：
   `ninfer_cli_options_test` / `ninfer_serve_options_test` 增 kvarn 用例（裸 `kvarn` 与 `kvarn:k4v4|k5v5|k6v6` 的
   存储 + `KvarnBits`、默认 `Bits4`、拒绝未发布拼写、help 三档；serve 侧加 `make_engine_options()` 贯通），两项 **exit 0**；
@@ -132,6 +176,13 @@
 > 另：`ninfer_kvarn_test`（WP1 曾容差失败）**现已通过**（07-21 按位宽重定容差）。
 > 故 A1 的「`ctest` 全绿」读作「**除上述先存 / 产物结构性 / 已知 A3 / 并发环境项外全绿**」。
 > **未修 #89**：先存、与 kvarn 交付面无关，归文档/测试校准范畴（非本计划交付面）。
+>
+> **A1 的视觉口径（2026-10-08 用户裁定：视觉**只作功能判据**，不设视觉性能判据）**：依据 = 视觉塔走**独立算子**
+> `ops::packed_softmax_attention`（`src/models/qwen3_5/execution/vision.cpp:385`），且**完全不使用分页 KV**
+> （`vision.cpp` 对 `text_kv`/`batch_text_kv_` **0 命中**）⇒ kvarn / 精度尾**结构上无法改变视觉算子**；风险只剩
+> ①**显存预算**（归 A5）与 ②**共享代码面**（归 A1 的 `ctest` 口径）。**待补的功能门**：`--vision` × `kvarn:k4v4`（以及 WP6 落地后的 × tail）
+> **端到端可用 + 自确定性** —— **当前无任何测试把 vision 与 kvarn 组合**（`tests/models/qwen3_5/test_vision_workspace.cpp:46` 只测 `Fp8E4M3Row256`；
+> `test_vision_cpu_real.cpp` 无 kv-dtype 参数化）。**A1–A8 编号与判据不变。**
 
 ---
 
@@ -369,24 +420,56 @@ exit 0；`ninfer_kvarn_test` 三档全绿（实测数字见附录 **D-11**）。
 - **KVarN 就在旋转域**（K/V 都做 Hadamard，输出再旋回）。
 - ⇒ `kvarn + --kv-tail-tokens` **不会自动生效**，若不处理就是**静默惰性**。**WP6 是独立门禁。**
 - **fp8 无尾的真正原因是实现欠账，不是坐标障碍**：`append/kernel.cuh:35` 只旋 K（V 不旋），`small_t_fp8.cu:86` 用**未改动的共享 reducer** ⇒ fp8 只有一个被旋转的 KV 轴。
+  **⚠ 订正（v19，D-19 ①）**：本仓源码自述与上句**相反** —— `tests/ops/softmax_attention/causal_cache.cpp:1613-1623`（`tail_merge_wired`）写明
+  旋转域档位不接尾的原因是「其 reduce 核消费**旋转系 partial**，而原始 BF16 尾行**不表达于该系**」⇒ **坐标系就是障碍**，
+  "实现欠账"只是**未做旋转步骤**的表象。原文保留以存史。**该订正强化了 (b) 的否证**（见 §6.3）。
 
 ### 6.2 方案 A 按文义不可实现（三条一手反证）
 
 1. **partial 累加器元素类型不同**：FORK kvarn 走 `decode_kernel.cuh:368 __nv_bfloat16* partial_acc`、`:926` reducer 收 `const __nv_bfloat16*`；TAIL tail 核走 `small_t_tail.cuh:56 float* partial_acc`、共享 reducer `small_t.cuh:262 const float*` ⇒ **不能共用一块 buffer**，「由 kvarn 自己的 reducer 一次合并」不成立。
+   **⚠ 补充（v19，D-19 ⑦）：上游根本没有 BF16 部分累加器** —— beellama 的 KVarN 与 tail 共享的统计量是 **FP32 `float2`(row max, denom) + FP32 累加器**，
+   且 `GGML_ASSERT(dst->type == GGML_TYPE_F32)`（`beellama.cpp/ggml/src/ggml-cuda/fattn-tail.cuh:339-346,379-387`、`fattn-common.cuh:1551`、
+   `fattn-kvarn-portable.cuh:466-469,784-786,816,834`、`fattn-mma-kvarn-decode-combine.cuh:67-68`）；BF16 只出现在 **tail 环元素类型**。
+   ⇒ **本仓的 BF16 `partial_acc` 是对上游的偏离**，不是"上游的另一种变体"；修法即**对齐上游改为 FP32**（不是发明新契约）。
 2. **split 策略在目标工况分叉**：`decode_kernel.cuh:44-53 kvarn_decode_active_splits` 对 `QHeads==24`（正是本 27B）且 `window>8198` 覆盖 `cap = window<=122880 ? 41 : 82`（`config.cuh:16-18`）；TAIL 走 `small_t.cuh:145-180`。**长上下文下 body 与 tail 各自给出合法但不同的 split 集合**，而这恰是 A4/WP8 要测的区间。
+   **⚠ 订正（v19，D-19 ⑦）：该条**不是阻塞**。** 上游的 tail partial **没有 split 轴** —— 每 (query, head) 行只有**一对** `(row max, denom)` 与一个 FP32 累加器
+   （`fattn-tail.cuh:339-346,844-847`）；KVarN body 侧在导出前**先把自己的 splits 归约成每行一对**（`fattn-kvarn-portable.cuh:784-786`、combine 核；
+   split 数定义 `fattn-kvarn-dispatch.cu:615-618`）⇒ **两侧不要求 split 一致**（子代理结论 (iv)：否）。
+   ⇒ §6.3(a) 只需**两段式归并**：body 自身 splits 归约 → 每行一对 → 与 tail 行对在线 softmax 合并。**原文保留以存史。**
 3. **默认尾部 dtype 被旋转入口拒绝**：TAIL 默认 `kv_tail_type=Float16`（`types.h:469`），FORK `codec.cu:161-165 kvarn_hadamard` 对 `source.dtype != BF16` **抛 `invalid_argument`** ⇒ 必须**新写 f16 旋转入口**（独立交付物）。
+   **⚠ 订正（v18，D-18）**：该结论**只在坚持 f16 尾时成立** —— `--kv-tail-type bf16` 今天已完整支持，且 **BF16 尾环是逐位精确档**（源行比特原样拷贝）⇒ 采 bf16 尾即可复用现成的 BF16 旋转入口，**免去该交付物**。原文保留以存史。
 4. **旋转时点未定**：读时旋转（每步对 tail 行做 Hadamard）≈ 尾部注意力 FLOPs 翻倍；**写时旋转**（append 期一次性，≈32768 元素/token）代价可忽略。两者差一个数量级。
+   **⚠ 订正/补充（v19，D-19 ⑤）**：① KVarN **内建**尾环早已是**写时旋转**（`attention.cu:157-194` `rotate_stage_kernel` 写入 WHT 后的 BF16；
+   `rotate_on_stage = width <= kFusedStageMaxWidth(=16)`，`:25,590`）。② 对外部精确尾环，(a) 路线**不必**逐行旋 tail 行 ——
+   尾部 partial 可在**原始域**算完后**只对 acc 做一次 D 维旋转**再并入共享归并（`W` 线性 ⇒ 数学与"先并入再反旋"等价），
+   代价是每 (q_head, token) 一次 D=256 变换，远低于旋 384 行 × D。**代价与可行性须在 WP6 落地时实测确认。**
 
 ### 6.3 修正后的方案（替代 v2 方案 A）
 
-**优先 (b)，回退 (a)：**
+**探针前的假设顺序：优先 (b)，回退 (a)。** **⛔ 探针后（v19，D-19）：(b) 已被否证**（见 D-19 ①）⇒ 实际候选为 **(a) 或 (c′)**；
+**✅ 已裁决（2026-10-08，用户确认；v20 / D-19 ⑨）：路线 = (a)**（照 TAIL 已有的 `small_t_k8v4.cuh` 形状接进外部共享精确尾环）—— 分步计划见 **§7-WP6（WP6.0–WP6.7）**；**(c′) 否决**（量化依据见 D-19 ⑧）。
 
 - **(a) 照 TAIL `small_t_k8v4.cuh` 的形状做**（仓内已有模板）：K 与 V 都旋（`:208,229`）、核内旋 Q（`:263`）、归并 **FP32** partial（`:639-643`）、**归并后只做一次**反旋（`:653`）。即方案 A 想要的东西，改为沿用 TAIL 的 FP32 partial 契约。
 - **(b) `ROTATED_K_ORIGINAL_V`**：若 V 不旋，KVarN 在结构上等价于 TAIL 已有的 fp8 body ⇒ 尾部接线退化为一个 launcher 分支，**可能零内核改动**。取证/落地前须确认上游契约提供该域（`ggml.h` 同时定义 `ORIGINAL` 与 `ROTATED_K_ORIGINAL_V`，见 `docs/port-records/kvarn-kv-tail-feasibility-report.md:44`）。
 - **(c) 最低形态**：直接暴露 KVarN 内建精确后缀（`kKvarnSinkPages=1` + `kKvarnTailSlots=3`，≈384 token 已近精确）作为「尾部」，把 `--kv-tail-tokens ≤384` 映射上去，属配置工作。
-- **明确写时旋转**；**新增 f16 旋转入口为独立交付物**。
+  **⚠ 订正（v19，D-19 ③）**：「≈384 token 已近精确」**过于乐观**：3 槽 = **sink 组 + 滚动首/末组**（`attention.cu:84-89`），
+  `claim_tail_slot` 在首选与备用槽都被占用时**返回 −1 ⇒ 该行不 staging**（`:100-114`），`retire` 只清"被整组覆盖"的页（`:291-315`）
+  ⇒ 它**不是**"最新 384 连续精确"，也不能承诺"最新 N 精确"。且该内建区**本来就在运行**，接出来**不产生新质量**（只免除 fail-fast）。
+- **(c′) 有界第四选项（v19 新增，D-19 ④，未实测）**：把 KVarN 内建尾环由 3 个固定槽泛化为 `⌈N/128⌉+1` 个**滚动槽**，
+  让 **body 自己**在核内保留最新 N 个精确组。优点：复用 body 自身的核内合并 ⇒ **同时绕开** partial 元素类型（BF16 vs FP32）、
+  坐标系（旋转域）与 split 策略三项冲突，改动面收敛在 `attention.cu` 槽位簿记 + `decoder_state.cpp`/`state_image.cpp` 分配 + 容量核算。
+  代价：`--kv-tail-tokens` 会有**两套实现**（非 KVarN 走外部共享环形池、KVarN 走自建槽环），语义需分别定义；显存 ≈ N×D×Hkv×层×2(K+V)×2B（N=1024 时 ≈64 MiB/序列，与 §2.4 估算一致）。**须与 (a) 并列做一次成本/收益裁决。**
+- **明确写时旋转**；**BF16 尾可免去「新增 f16 旋转入口」**（`--kv-tail-type bf16` 已完整支持，且 BF16 尾环是逐位精确档 = 源行比特原样拷贝，见 `ops/common/kv_tail_element.cuh:46-55,73-75`）⇒ 该"独立交付物"**仅在坚持 f16 尾时才需要**（产品面裁决，见 D-18 订正）；若采 f16 尾，则需**新增 f16 旋转入口**。
+  **⚠ 订正（v19，D-19 ⑦）**：「写时旋转」**只对 KVarN 的内建 stage 成立**（`attention.cu:157-194`）。**外部精度尾环**上游的做法是**写原始行、读时旋转**
+  （写：`llama-kv-cache-kvarn.cpp:1004-1011`；读：`llama-graph.cpp:3845,3847` 的 `ggml_kvarn_wht_aux`；旋转域下 tail K 恒旋、tail V 仅在 `use_kvarn_rotated_domain` 时旋 `:3843-3855`）。
+  **上游合并契约（可照抄）**：合并在**旋转域**进行、**末尾只做一次反旋**（`llama-graph.cpp:3901-3904`）；统计量 = FP32 `float2(row max, denom)`、累加器 FP32、**无 split 轴**；
+  混合域（仅 prefill，`>16` query token）下 V 在**原始域**相遇（body 的 V 累加前逐 token 反旋，`portable.cuh:330-362,434-443`）。
+  **本仓可选等价替代**：尾 partial 在原始域算完后**只对 acc 旋一次**（§6.2 条 4 订正），比逐行旋更省。**两条路线都须在 WP6 落地时实测。**
 - **逐位一致这一要求本身可满足**：FORK `hadamard.cuh:9-31` 与 TAIL `hadamard_d256.cuh:46-65` 是**同一 Sylvester 顺序、同一符号约定、同一次 2⁻⁴ 归一**，两侧都未开 `use_fast_math`（TAIL `CMakeLists.txt` 只有 `/Zc:` 系列）。但注意 `hadamard_warp`（`hadamard.cuh:33`）是**死代码**，且 fork 是 256 线程/行、TAIL 是 1 warp/行，寄存器映射 `d = lane + 32r` 需重建。
 - **执行顺序**：**在 WP4 之前做一次低成本探针**判定 (a)/(b)/(c) 哪条成立，而不是把门禁拖到 WP6 才暴露。
+  - **⛔ 实际状态（2026-10-08，v18 / D-18）：该探针从未执行。** WP4 的验收只覆盖三档准入，本前置被**静默跳过**（进度记录 §3 与归档 §A 均无执行痕迹）。⇒ **WP6 开工前必须先补做本次探针**；(b) 的域契约在本仓**至今 0 命中**（只存在于上游 ggml 的散文描述中）。
+  - **✅ 已执行（2026-10-08，v19 / D-19；用户授权、无 GPU、读码 + 跨工程图谱 Tier-3）**：结论 = **(b) 否证 / (a) 忠实 / (c) 弱 / 提出 (c′)**。
+    **WP6 工期重估不变（10–15 天）**；**开工前仍须一次产品裁决**：选 **(a)**（忠实、保留外部共享尾环、但需新增 KVarN 专属 tail-partial 核与归并）还是 **(c′)**（有界、body 自建滚动槽、但 `--kv-tail-tokens` 出现两套实现）。**两者都未实测，工期估计均为区间。**
 
 ### 6.4 回退（硬约束）
 
@@ -567,12 +650,31 @@ exit 0；`ninfer_kvarn_test` 三档全绿（实测数字见附录 **D-11**）。
   单元素边界翻码根因一致（附录 D-12）。**判据未放宽**。
 - **回退**：无。
 
-### WP6 — 旋转域尾部合并（门禁，**10–15 天**）〔最高风险〕
-- 见 §6.3：优先 (b) `ROTATED_K_ORIGINAL_V`，回退 (a) k8v4 形状；**写时旋转**；**新增 f16 旋转入口**为独立交付物；`--kv-tail-type` f16/bf16 双支持。
-- **验收（A6/A7）**：`kvarn:k4v4 + tail{0,1024}` 的 decode-width **mean-KLD 单调下降**，tail=0 **逐位不变**；跨 group(128)/ring(64) 边界无重复/丢键。
-- **回退**：**fail-fast 拒绝** `kvarn + tail`（§6.4）。
+### WP6 — 旋转域尾部合并（**路线 = (a)**，10–15 天）〔最高风险〕〔**✅ 路线已裁决（2026-10-08；v20 / D-19 ⑧·⑨）**〕
+- **路线决定**：走 **(a)** —— 照 TAIL 已有的 `small_t_k8v4.cuh` 形状，把 KVarN body 接进**外部共享精确尾环**（`--kv-tail-tokens`）；KVarN 侧新增"**旋转域 tail partial + 两段式归并**"。
+  **理由与量化（D-19 ⑧）**：① **显存非决定因素** —— (a) **88 MiB/序列** vs (c′) 76.5 MiB（C=1，差 **12 MiB**）、C=8 差 104 MiB；
+  ② **(a) 的增量性能代价可忽略** —— 精确双写 64 KiB/token ≈ `6×10⁻⁶` 于权重流、最新 N 键多读 +46 MiB/步 但 **KV 仅占 decode 总流量 ~1.4% ⇒ 端到端 ≈ +0.4%**、workspace +0.4 MB（`attention.cu:567`）；
+  ③ 消除 `--kv-tail-tokens` 的**双实现语义**与本仓 **BF16-acc 偏离**、判据与其它档位**同构**。**(c′)（body 自建滚动槽）已否决**（省 ~3–5 天，换永久语义债）。
+  **历史门禁存档**：v18 判"证据不足"（§6.3 探针被静默跳过）→ v19 探针否证 **(b)**（`ROTATED_K_ORIGINAL_V` 只对 `>16` query token 生效、decode 恒 `ROTATED`、V **存储**恒旋转、**坐标系本身即障碍**；且本仓 BF16-acc 与共享 reducer 的 FP32 不符）。
+- **不变量（贯穿全部子步）**：**A6 的「`tail=0` 逐位不变」是 WP6.2 的接受条件**；`--kv-tail-type` **f16 必须显式拒绝或真支持，不得静默**（§6.4）；`kvarn + tail` 未完成前任一子步失败即回到 **fail-fast**（§6.4）。
+
+**WP6 分步（产出 / 验收 / 回退）**
+
+| 步 | 内容 | 产出 | 验收 | 回退 |
+|---|---|---|---|---|
+| **WP6.0** | **两项前置测量**（用户 08-12 指定；**GPU、~0.5–1 天**）：**0a 本机 prefill 噪声底**（同二进制 / 同 prompt / 单请求，重复 **≥5**，报 pp 的**中位数 + 最差 + 极差**；补 WP0 产出 ② 的欠账）；**0b 现有外部尾的纯 kernel 代价**（`--kv-dtype rk4v4`（或 `bf16`）× `--kv-tail-tokens {0,1024}`、**关 MTP**、decode-only、重复 **≥3**，报 tg 分布），把 A8 的 `−5.8% / −2.1pt` 分解为「纯 kernel」+「接受率」 | 两份落盘报告（命令 + 原始输出 + 分布） | ≥5 / ≥3 重复；中位数与最差齐；**结论回写 A1 / A8 / D-19** | 若无稳定判据 ⇒ 该腿**显式记「不可断言」**，不伪造判据 |
+| **WP6.1** | **KVarN tail-partial 路径（W1）**：新增**旋转域** tail partial，读外部精确尾环（bf16/f16 **原始行**），按分区算出 `(acc, m, l)`。**实现选"acc 旋一次"**（尾 partial 在**原始域**算完 → 只对 **FP32 acc** 施加 `W`；`W` 线性 ⇒ 与"先旋行再算"数学等价，代价见 §6.2 条 4 订正） | `src/ops/kvarn/` 新文件（**~300–450 行**） | 与 **FP64 oracle** 比 `(acc,m,l)` 落在**量化步长判据**内；`N=0` 时该路径**不被触发** | acc 旋转数值不达标 ⇒ 退回**逐行旋**（读时旋转） |
+| **WP6.2** | **归并改造（W2，最高风险）**：`partial_acc` **BF16→FP32**；`reduce_output_hadamard_kernel`（`decode_kernel.cuh:1037-1121`）改**两段式**：body splits → per-row `(acc,m,l)` → 与 tail 合并 → **一次反旋** → 输出。**照上游同构做法**（`fattn-kvarn-portable.cuh:784-786`、`fattn-tail.cuh:339-346`） | 改 **~120 行**（于 1155 行文件内）+ `decode.cu:113,120` | **A6：`tail=0` 输出逐位不变**（既有 `ninfer_kvarn_test` + 续列尾 e2e 逐字节比对）；A2 的 4/5/6 位穷举往返仍过；`ninfer_kvarn_test` **余量与 08-04 逐位同** | `tail=0` 无法逐位保持 ⇒ **拒绝该改造**，改走"**独立 merge 核**"（不动既有 reduce） |
+| **WP6.3** | **分区与接线（W2b/W3/W4/W5/W6）**：op 内部完成 `body_window = window − N` 分区（照 `small_t.cuh:147-170` 形状，**不必改 `text.cpp` 的 envelope**）；3 个 op 入口（`kvarn_attention.h`）加尾视图；6 个调用点（`text.cpp:391,414,567,622,1021,1045`、`context.cpp:1745`）；尾环写入接入 KVarN append（照 `small_t_tail_shadow.cuh` 71 行形状）；`startup.cpp:1035-1045` 解除 fail-fast | ~**250–350 行** | `kvarn:k4v4 + --kv-tail-tokens 1024` **端到端可跑**；`--kv-tail-type` 按裁决**显式拒绝或支持**；workspace 重算后不溢出 | 保留 fail-fast（§6.4） |
+| **WP6.4** | **A6/A7 脚手架（W7）**：FP32 oracle 覆盖「KVarN body × 旋进 bf16/f16 尾」的合并路径；跨 **group(128)/ring(64)** 边界的 needle 检索；边界用例（`N ≤ ring`、`N ≥ width`、跨 checkpoint 恢复、`N=0`） | 新测试 **~300–500 行**（照 `tests/ops/softmax_attention/causal_cache.cpp` 尾测形状） | oracle **精确**；needle **精确命中**；无重复计数 / 丢键 | — |
+| **WP6.5** | **容量 / 显存**：外部尾环进入 KVarN 的 `MemorySummary` 与容量曲线（**WP7 的 kvarn 部分提前到此**，因为 (a) 要新分配外部环），实测 ±5% | 代码 + 实测 | **A5** | 估算与实测分列，先报告后收敛 |
+| **WP6.6** | **质量 / 速度收口**：`kvarn:k4v4 + tail{0,1024}` 的 decode-width **mean-KLD 单调下降**；**显式处理 A4 的 N>384 风险**（至少测 `N ∈ {384, 1024}`，或声明阈值随 N 调整） | KLD / 字节 / 速度三联表（WP8 的 kvarn 行） | **A4**（+ `same_top` / max-KLD 双指标、≥3 重复）+ **A8** | A4 不达标 ⇒ 记录并裁决是否保留该特性 |
+| **WP6.7** | **回归**：A2 / A3 / MTP / 续列尾 / 前缀 / ctest 263 + **新增 `--vision` × kvarn 功能门** | 测试 + 跑批 | **A1 / A3** + 视觉功能门（A1 邻域口径） | — |
+
+- **⚠ 待定（WP6.3 之前必须有结论）**：尾的 dtype —— 采 **bf16** 则复用现成 BF16 旋转入口（**免**"f16 旋转入口"交付物；用户已接受"若采 bf16 尾则在本机复核"）；若坚持 **f16** 则须**新增 f16 旋转入口**（`kvarn_hadamard` 只收 BF16，`codec.cu:185-189`）。
 
 ### WP7 — 容量 / 显存核算落地（1.5–2 天）
+> **范围订正（v20）**：**kvarn 的外部精确尾环**（(a) 路线要新分配的那一份）归 **§7-WP6 的 WP6.5**；本包余下项（kvarn 本体 `per-token/head`、表与计算器同步）不变。
 - 加 kvarn 的 `per-token/head = 32*(Kb+Vb)+18` 到 `plan_cache`/`load.cpp`/`MemorySummary`；同步 `docs/config-calculator.html:529`；**表须含 16 full-attn 层 + 1 MTP 池**（+6.25%）与「页 64→128 的容量取整」。
 - **待核实**：StateImage slot 是否复制 kvarn sink/tail（真源 `decoder_state.cpp:118-161`，**不是** `state_image.cpp`）；若复制，按 slot × 并发计入 A5。
 - **验收（A5）**：显存估算与实测 ±5%，基准为**修正后**的表（含本产物实测权重 11,092,477,952 B）。
@@ -629,7 +731,7 @@ exit 0；`ninfer_kvarn_test` 三档全绿（实测数字见附录 **D-11**）。
 | ~~**地址空间页几何未随存储变化**~~ → **已消除（WP3①，2026-10-07，附录 D-9）** | 长上下文 kvarn **无法运行**（`create_active` 因 entitlement(64 页口径) > page_capacity(128 页口径) 返回 `nullopt`） | **已修**：页大小按 `kv_page_tokens(storage)` 贯穿（42 调用点 + 各页跨度字面量；`KVAddressSpaceStore` 取池几何）；验收达成 = `kvarn:k4v2` 在 ctx8192 / 229,348 token 跑通 |
 | **kvarn 续列尾未实现**（state_image 无 kvarn 镜像、无 capture/activate/restore） | 前缀复用/检查点往返时 kvarn 尾槽**丢失/陈旧** ⇒ 静默错答 | **WP3 剩余②**：实现尾槽续列；在实现前**限制**在无续列的 fresh 单请求路径（当前短上下文即此路径） |
 | **kvarn 与 `--mtp-attention-window` 组合未验证**（窗口变换走 64 页块表） | 静默错读 | **WP3 剩余③**：规划期拒绝二者同用 |
-| ~~**KVarN 尾槽标记在执行行复用时陈旧**~~（`reset_kvarn_tail_row` 曾零调用者） | 复用 row 的打分路由读入**上一占用者**的 sink/tail ⇒ 静默错答 | **已修（P3d，2026-10-08，D-16）**：`ProgramImpl::causal_score` 在绑定 Main row 0 后调用 `reset_kvarn_tail_row(0, …)` + 新单测 `ninfer_qwen3_5_kvarn_tail_row_reset_test`（PASS）。**⚠ 端到端对照未跑**（`kvarn:k4v4` KLD 臂 vs P3a `0.002120`）⇒ 若数值变化则 D-11/P3a 的 KLD 需重测 |
+| ~~**KVarN 尾槽标记在执行行复用时陈旧**~~（`reset_kvarn_tail_row` 曾零调用者） | 复用 row 的打分路由读入**上一占用者**的 sink/tail ⇒ 静默错答 | **已修（P3d，2026-10-08，D-16）**：`ProgramImpl::causal_score` 在绑定 Main row 0 后调用 `reset_kvarn_tail_row(0, …)` + 新单测 `ninfer_qwen3_5_kvarn_tail_row_reset_test`（PASS）。**端到端对照已跑（08-11，D-17）**：`kvarn:k4v4` KLD 臂 mean **0.002120**，与 D-11/P3a **逐位相同**（mean/median/P99/max/same_top/dlogp/PPL）⇒ 该协议上为**无害 no-op**、D-11/P3a 数值**无需重测**。**改判**：本项风险实测为「**已验证无害、必要性未证**」——本协议窗口恒 `context` 长且页号每窗口归零 ⇒ 陈旧标记与当前页号**重合**；`Engine::score_tokens` 的**变长窗口**冲突（`claim_tail_slot` 首选/备用槽皆被占 ⇒ 返回 −1、跳过 staging）**未实测**。本改动仍作**防御性正确性修复**保留 |
 
 ---
 
@@ -1068,6 +1170,212 @@ near-tie 翻转**（bf16@k1 分叉而 @k3 不分叉；rk4v4 反之；kvarn k=1/3
 **产物**：上述 5 文件；`/tmp/fix_build{1,2}.log`、`/tmp/host_*.log`。
 ---
 
+### D-17 P3d ① 的端到端对照 + 待裁决 3 项裁决 +「子代理无图谱」根因（2026-10-08）（**回写 §9 风险登记 / §7-WP2 邻域；版本 v16→v17**）
+
+**触发**：用户指示从进度 §5 待办 1 起步（最优先、原需 GPU）；GPU 实测空闲（0 MiB）。
+
+**① 命令与协议**（脚本 `.deps/kvarn-adm/verify_p3d_kld.sh`；日志 `p3d-verify-k4v4-t0.log`）
+```
+ninfer-perplexity <27B 产物> --corpus eval/corpora/perplexity-1m/manifest.json --quick --context 8192 \
+  --disjoint --score-width 8 --score-topk 100 --kv-dtype kvarn:k4v4 --kv-tail-tokens 0 \
+  --kld-base .deps/kvarn-adm/bf16-t0.topk
+# 协议与 run6.sh / D-10 / D-11 逐字相同；13m02.5s（05:18:09→05:31:18）；exit=0；GPU 中途 11,632 MiB
+```
+**二进制含本修复**：`ninfer-perplexity.exe` mtime 05:10:29 **晚于** `program_impl.cpp` 05:08:51，且对象已重编；修复点在 `program_impl.cpp:669`。
+
+**② 实测（229,348 评分 token / 28 窗口）—— 与 D-11/P3a 全部质量指标逐位相同**
+
+| 指标 | 修复后（08-11） | D-11 / P3a（修复前） |
+|---|---|---|
+| mean KLD | **0.002120**（0.00212012） | 0.002120 |
+| median | 0.000747 | 0.000747 |
+| P99 / P99.9 | 0.017190 / 0.076138 | 0.017190 /（未列） |
+| max | 7.175765 | 7.175765 |
+| same_top | 0.9817 | 0.9817 |
+| mean_target_dlogp | −0.000252 | −0.000252 |
+| PPL（overall） | 4.694357 | 4.69436 |
+| tok/s | 293.1 | 294.5（D-11）/ 289.1–292.8（P3a r1–r3） |
+
+**③ 判定**
+1. ① 的唯一可能后果（打分路由读入上一占用者的陈旧尾标记）在该协议上**未发生** ⇒ **无害 no-op**；**D-11 / P3a 数值无需重测**；§4.1-P3d「缺执行证据」关闭。
+2. **不利面（必须同报）**：本实验**只证「无害」，未证「必要」**。机制：`claim_tail_slot`（`attention.cu:100-118`）先按「标记 == 本页号」命中即复用、否则只 CAS `0xff` 槽；`tail_slot`（`:84-89`）只给 sink/首/末页分槽。本协议窗口恒 `context` 长（`apps/perplexity/evaluation.cpp:50-58`）且页号每窗口从 0 重启 ⇒ 标记**重合**。而 `Engine::score_tokens`（`engine.cpp:363`）接受**任意**窗口长度 ⇒ 变长窗口下陈旧页号可**冲突**（跳过 staging），其数值后果**未实测**。
+3. 本改动按**防御性正确性修复**保留（不清除标记的代价在变长窗口下是静默错答）。
+
+**④ 待裁决 3 项 —— 用户裁决**：(a) **不移植** FORK 的 `test_prefill_precision_real.cpp`（真实缺口在打分路由，已修 + 定点单测；FORK 该测试练的 prefill 路径本已受保护）；(b) **不补** `capture_identity_tag` 的 `kvarn_bits`（潜在、不可达；补则作废既有磁盘缓存）；(c) **kvarn bench 暂不纳入**（维持不重配）。
+
+**⑤ P3d 后 GPU 回归 3 项全绿**：`ninfer_kvarn_test`（WP5 余量与 08-04 逐位同：K bits4/5 `flips=1/65`、bits6 `0`；V 全 `0`；`over_step=0`、`wide_flips=0`；另 `codec bit-order roundtrip: 4/5/6-bit exhaustive OK`）、`ninfer_qwen3_5_kvarn_continuation_image_test`、`ninfer_qwen3_5_score_real_test`（**注**：后者用 `Fp8E4M3Row256`，非 KVarN ⇒ **不覆盖**本改动路由，仅作健全性检查；**KVarN + 打分路由暂无直接门禁测试**）。
+
+**⑥ 仓外工具发现（不属本仓交付面，但影响本计划的验证纪律）**：`~/.qoder/agents/` 下 4 份 `codebase-memory*` 代理定义的 `tools:`/`mcpServers:` 用**连字符**（`mcp__codebase-memory-mcp__*`），而运行时工具名归一为**下划线**（`mcp__codebase_memory_mcp__*`；主会话对连字符名报 `not found, did you mean <下划线>`）⇒ 子代理只拿到 `Read/Grep/Glob`，**图谱调用恒为 0**（**上一会话**两个 `codebase-memory` 子代理实测 42/64 次调用全为 Read/Grep）⇒ §3-08-03 的 P1 审计「两树均无调用者」是**无图谱下**的结论。**已修**（4 份定义改下划线，备份 `/tmp/agents-backup-20261008/`），但 `[AgentListingDelta] isInitial=true` **只在会话启动装载一次** ⇒ **须重启 Qoder**；重启是否**充分**未排除（探针复查：30 秒）。
+**图谱刷新**：`index_repository(mode=full)` ⇒ **45,944 节点 / 216,668 边**；`reset_kvarn_tail_row` inbound `callers_total=4`（**1 个生产调用点** `causal_score` + 3 个测试 hop）——刷新前同一查询为 `0`，属索引陈旧（04:35 < P3d 提交 05:12）。
+
+---
+
+### D-18 WP6 门禁评估：**「足够证据可开工」不成立**（2026-10-08）（**回写 §6.3 / §7-WP6；版本 v17→v18**）
+
+**触发**：用户询问「判断一下是否已有足够证据证明可以开始 WP6」。
+
+**① 已满足的条件**
+- **功能门「P1/P2 完成」**（§7 原文门禁）✅；P1–P4 全完成（D-12/D-14/D-15 + 本轮 D-17）。
+- **准入证据齐**：WP0.5-B 三档全过（D-11），P3a 三重复极差为 0。
+- **安全回退已落地**：`kvarn:* + --kv-tail-tokens>0` 规划期 **fail-fast 拒绝**（§6.4 要求；07-21 实现）⇒ **当前交付状态即回退态，无静默惰性风险**。
+- **工具链就绪**：子代理图谱已修复并验证（4 份 `~/.qoder/agents/codebase-memory*.md` 的 MCP 名连字符→下划线；**重启后探针通过**）。`list_projects` 可见 **6 个图谱工程**：`D-ninfer-KVarN`（上游华为/vLLM）、`D-ninfer-beellama.cpp`、`D-ninfer-ninfer`（上游）、**`D-ninfer-ninfer-rtx5090-mobile`（FORK）**、`D-ninfer-ninfer-16g-5070ti-5080-5090-qwen3.8-27b-gsq-rco`、本仓 ⇒ (a)/(b) 取证可**跨工程**做（`codebase-memory-port-auditor` 含 `compare_graphs`）。
+
+**② 未满足的条件（真正缺口）**
+1. **§6.3 的 (a)/(b)/(c) 低成本探针从未执行。** 计划书两处把它定为 **WP4 的前置**（§6.3 末句「在 WP4 之前做一次…而不是把门禁拖到 WP6 才暴露」；§7-WP4「前置：先做 §6.3 的低成本探针（判 (a)/(b)/(c)）」），但 WP4 的验收只覆盖三档准入 ⇒ **前置被静默跳过**；进度记录 §3 与 `docs/port-records/KVARN-PROGRESS-ARCHIVE-2026-10.md` §A **均无执行痕迹**（`grep 探针|ROTATED_K_ORIGINAL` 只命中计划书自身的强制语句）。⇒ **WP6 路线仍是假设**。
+2. **(b)（首选路线）的域契约在本仓未取证**：`ROTATED_K_ORIGINAL_V` 全树 grep **只命中** `docs/port-records/kvarn-kv-tail-feasibility-report.md:44`（描述**上游 ggml/llama.cpp** 契约）及其 worktree 副本，**本仓 C++ 代码 0 命中**。而 §6.3 自己写明 (b)「**取证/落地前须确认上游契约提供该域**」。
+3. **「f16 旋转入口」：条件性缺口（非硬缺口 —— 同轮订正）**：TAIL `kvarn_hadamard`（`src/ops/kvarn/codec.cu:185-189`）要求源/目标**均为 BF16**，而 `--kv-tail-type` **默认 f16** ⇒ §6.3 列为**独立交付物**的 f16 旋转入口尚未实现。**但 `--kv-tail-type bf16` 今天已完整支持**（`KvTailType{BFloat16,Float16}` `types.h:93-96`；`startup.cpp:204` 建 `DType::BF16` 环；`ops/common/kv_tail_element.cuh:45-68,86-93` 双特化 + `with_kv_tail_element` 分派；usage 已列 `bf16|f16`），且 **BF16 尾环是逐位精确档**（其特化故意 no-op、源行比特原样拷贝 `int4`；F16 档要 `bf16→float→half`）。⇒ **若 `kvarn + --kv-tail-tokens` 要求 bf16 尾，现成的 BF16 旋转入口即够用，本交付物可整条删掉**（属产品面裁决：§10-D3 把默认钉 f16 仅为对齐 TAIL 现状）。**该订正不改变本 D-18 的判定**（真正的阻塞是实现欠账 + partial 契约 + split 分叉，见第 2/4/5 条）。
+4. **A6/A7 无脚手架**：**无任何测试把 kvarn 与 `--kv-tail-tokens` 组合**（当前被规划期拒绝）；A6 要求的「KVarN body × 旋进 BF16/F16 尾合并路径的 FP32 oracle」与 A7 的 group(128)/ring(64) 边界用例**均不存在**。
+5. **工期与风险敞口**：WP6 = **10–15 天、最高风险**；(b) 若成立可能收缩为「一个 launcher 分支」，(a) 则是完整内核移植 ⇒ **路线未定即开工 = 把 10–15 天押在未知分支上**，正是 §6.3 明令要避免的情形。
+
+**③ 判定与建议**
+- **判定：证据不足，不建议现在启动 WP6。**
+- **建议下一步（有界的先决任务）**：**先授权 §6.3 探针** —— ~0.5–1 天、以读码 + **跨工程图谱**为主、**不需 GPU**；产出 = (a)/(b)/(c) 哪条成立 + WP6 重新估时 + (b) 的域契约在本仓的可达性结论。**探针结论落盘后再决定是否开工。**
+- **同时需要用户的产品裁决**：WP6 是否值得做 —— **不做**则 `kvarn + tail` **永久 fail-fast**，§1-A4「精度尾部在 KVarN body 上有可测质量增益」**不可达**（当前 fail-fast 已是有文档的合法终态，无缺陷）。
+
+### D-19 §6.3 探针**已执行**：(b) 否证 · (a) 忠实 · (c) 弱 · 新提 (c′)（2026-10-08）（**回写 §6.1/§6.2/§6.3/§7-WP6；版本 v18→v19**）
+
+**触发**：用户授权探针（「允许使用探针」），并同时明确三项终态目标（性能不劣化于上游 / `k4v4` 优于 `rk4v4` / 智力不劣化）。
+
+**方法**：本仓读码（`src/ops/kvarn/` 全树 + `small_t_*` + `kv_cache/append`）+ **跨工程图谱 Tier-3**（两个并发 `codebase-memory-port-auditor` 子代理：域契约探针与合并契约探针，
+覆盖 `D-ninfer-KVarN` / `D-ninfer-beellama.cpp` / `D-ninfer-ninfer-rtx5090-mobile`）+ 回读 `docs/port-records/kvarn-kv-tail-feasibility-report.md`。**未用 GPU。**
+
+**① (b) `ROTATED_K_ORIGINAL_V` —— 否证**
+- 域枚举确存：`beellama.cpp/ggml/include/ggml.h:461-466`（`AUTO=0 / ROTATED=1 / ORIGINAL=2 / ROTATED_K_ORIGINAL_V=3`）。
+- **只对 `n_query_tokens > 16` 自动生效**：`src/llama-kvarn.cpp:140-146`（`n_query_tokens <= 16` ⇒ 一律回 `ROTATED`）、
+  `ggml/src/ggml-cuda/fattn-kvarn-route-policy.h:8,176-186`（`rotated_query_max_specialized = 16`）
+  ⇒ **decode 与 ≤16-token 投机块恒为 `ROTATED`**，而尾部合并**正发生在这些步**。
+- **V 的存储始终是旋转域**：`ggml/src/ggml-cuda/kvarn.cu:3064-3080`（`emit_rotated == false` 时对**反量化后的 V** 再补一次 `kvarn_wht_*`）、
+  `fattn-kvarn-portable.cuh:330-352`、`fattn-mma-kvarn-impl.cuh:389`；上游参考实现同样旋 V（`KVarN/vllm/v1/attention/backends/kvarn_attn.py:1757-1758`，
+  读回同样反旋 `:1479,1495,1950-1951`）⇒ **不存在 K/V 不对称的存储格式**；"V original" 是**读出域**。
+  ⇒ **KVarN body 不能被当作 fp8 body**；§6.3(b) 的「尾部接线退化为一个 launcher 分支、可能零内核改动」**不成立**。
+- **坐标系本身就是障碍**（否证 §6.1 原判「不是坐标障碍，是实现欠账」）：本仓 `tests/ops/softmax_attention/causal_cache.cpp:1613-1623`（`tail_merge_wired`）
+  自述旋转域档位不接尾的原因 = 「其 reduce 核消费**旋转系 partial**，而原始 BF16 尾行**不表达于该系**」。
+- **独立第二证据（与旋转域无关，本仓自证）**：即便 V 不旋，**元素类型也不匹配** —— KVarN `partial_acc` 是 `__nv_bfloat16*`
+  （`src/ops/kvarn/decode.cu:113`、`decode_kernel.cuh:475,1037`），共享 reducer 收 `const float*`（`small_t.cuh:262`；fp8 侧 `small_t_fp8.cu:60`）
+  ⇒ §6.2 条 1 单独成立，与 (b) 的域问题**互相独立**。**两条障碍都指向 (a)。**
+
+**② (a) `small_t_k8v4` 形状 —— 忠实路线，仓内模板现成**
+- 模板要素已复核：K/V 都旋（`small_t_k8v4.cuh:208,229`）、核内旋 Q（`:263`）、归并 **FP32** partial（`:639-643`）、**归并后只做一次反旋**（`:653`）。
+- **新发现（D-19 ⑤）**：**不必逐行旋 tail 行** —— 尾部 partial 可在**原始域**算完后**只对 acc 做一次 D 维旋转**再并入共享归并
+  （`W` 线性 ⇒ 与"先并入再反旋"数学等价；且合并只在 `acc` 上线性，`m/l` 是标量不受域影响）。代价远低于旋 384 行 × D。**须在落地时实测确认。**
+- 接线面：`execution/text.cpp` **5 处** `ops::kvarn_attention` + 1 处 `ops::kvarn_kv_append`（`:391,414,567,622,1021,1045`）
+  + `program/storage/context.cpp:1745` 的 `kvarn_restore_tail`；另 `kvarn_attention_cached` **只有测试在用**（无生产调用点）。
+- KVarN 的归并入口在 `src/ops/kvarn/decode.cu:117-125`（`reduce_output_hadamard_kernel`）与 `decode_kernel.cuh:1037-1121`。
+
+**③ (c) 暴露内建精确后缀 —— 弱，且语义不符**（订正见 §6.3）
+- 实体：`kKvarnSinkPages=1`、`kKvarnTailSlots=3`（`include/ninfer/ops/kvarn.h:15-16`）；`tail_slot`（`attention.cu:84-89`）
+  ⇒ slot0 = sink 页、slot1 = **首**页、slot2 = **末**页；**分组粒度是 128（`position / kvarn::Group`），不是页 64**
+  （`tail_k.ne[1] == kvarn::Group`）⇒ 最多 3 组 = **384 token**。
+- 它**已在运行**：`rotate_stage_kernel`（`attention.cu:157-194`）**写时旋转**（存 WHT 后的 BF16），body 核经 `cache.tail_k/tail_v` 直接消费
+  （`decode.cu:105-107`）⇒ **接出来不产生新质量**，只免除 fail-fast。
+- **不能承诺"最新 N 精确"**：`claim_tail_slot`（`:100-114`）在首选与备用槽都被占时**返回 −1 ⇒ 该行不 staging**；
+  `retire_kernel`（`:291-315`）只清"被整组覆盖"的页 ⇒ decode（宽 1）**几乎不 retire**，陈旧页可长期占槽。
+- §6.3 原文的「≈384 token 已近精确」**过于乐观**。
+
+**④ (c′) body 自建滚动槽（本版新增，未实测）**：把内建尾环由 3 固定槽泛化为 `⌈N/128⌉+1` 滚动槽，让 **body 自己在核内**保留最新 N 个精确组。
+  优点：复用 body 自身的核内合并 ⇒ **同时绕开** partial 元素类型、坐标系、split 三项冲突。代价：`--kv-tail-tokens` 出现**两套实现**；显存 ≈ N×D×Hkv×层×2×2B（N=1024 ≈ 64 MiB/序列，与 §2.4 估算一致）。**与 (a) 并列待裁决。**
+
+**⑤ 用户三项终态目标的验收映射（含缺口）**
+1. **prefill / decode / MTP 性能不劣化于上游**：decode ✅ A1（`|Δ|≤0.88%`；**但 A1 已删除 prefill 腿** —— 同二进制单请求 prefill 实测 `−29%…+8%`，噪声底不可用）；
+   MTP ✅ A3（相对判据）+ A8（接受率）；**prefill 目前无可用判据** ⇒ 若须断言 prefill 不劣化，需**新协议**（重复/批量 prefill）。
+   **为什么删掉 prefill 腿（用户 08-12 要求解释）**：① 出处是 `docs/port-records/PORT-MEMORY.md §5.17(2)` 的实测 —— **同一个二进制、同一 prompt、单请求 prefill 重复跑**的吞吐散布达 **−29%…+8%**，
+   远大于任何要检测的效应量（A1 的 decode 门是 `|Δ|≤0.88%`）；② 机制上单请求 prefill 在本机没有"稳态"：16 GB 卡 + 10.3 GiB 产物时，它由**一次性分配/首次触页/驱动是否超额提交**主导，
+   没有跨请求/跨批次可平均的重复单元；③ 因此该腿要么被撤，要么必须换仪器 —— **撤掉不等于"prefill 无风险"，只等于"现仪器测不出"**。
+   **注意范围**：该删除针对的是 **A1（特性关闭时的零回归）**，所以**关掉 kvarn 的 prefill 也不在断言范围内**，不只是 kvarn 路径。
+   **要断言 prefill 不劣化，新协议至少需要**：㈠ 每配置 **≥3（更好 ≥5）次重复**，报**中位数 + 最差值**与分布，而非点估计；㈡ **批量/多请求**（或用链式长 prompt 分块）以便把单请求启动噪声平均掉；
+   ㈢ 控制变量（同产物、同 prompt 长度、同并发、冷热一致）+ 用 Nsight Systems 把"计算"与"分配"分开；㈣ 判据用**分布比较**（中位差落在实测跨次散布内）或**前置的 kernel/ttft 级拆分**，而非端到端点值；
+   ㈤ **先在落盘报告里给出本机 prefill 噪声底**（该数字目前**不存在**：A1 的 0.88% 是 decode 的；prefill 只有 PORT-MEMORY 的区间引述）。
+   **配套缺口**：WP0 的产出 ②「本机噪声底报告（decode-only pp/tg 重复 ≥3 次的分布）」**至今未产出**（§0 现值表记 WP0「模型冒烟 + KLD 基线**未做**」）⇒ 新的 prefill 协议须把这份噪声底一并补上。
+   **另注**：即使有了协议，带尾部的档位 prefill 成本**必然略增**（新 token 多一次精确双写 + 尾键多读 ≤N 行）⇒ 该判据应按 A8 的口径**按档位放宽**，而非要求"零变化"。
+2. **视觉不劣化**：**A1–A8 无任何一条覆盖视觉**。事实：视觉塔走**独立算子** `ops::packed_softmax_attention`（`execution/vision.cpp:385`），
+   **不使用分页 KV**（`vision.cpp` 无 kvarn 引用）⇒ kvarn / 精度尾**结构上无法改变视觉算子**；风险**仅在显存预算**
+   （kvarn 更省字节、尾部净增）⇒ 应作为 **A5 的推论/显存预算判据**，而非新视觉性能判据。
+   现有"视觉基线" `docs/performance.md:24-26`（85.7% 接受率、7.00 tok/round、与非投机视觉运行逐字节相同）取自 **RTX 3090 / sm_86 / int8 / DFlash2**，**非本机**，**不可作本机基线**。
+   另：`ninfer_qwen3_5_vision_workspace_test` 目前**失败**（先存主机标定上限，D-7 ④），属 A1 已披露项。
+3. **"智力不劣化"的准确表述**：应拆为两条可证伪口径 —— **(i) 特性关闭时引擎行为逐字节不变**（= A1：输出逐字节相同 + `MemorySummary` 逐字相同 + decode tok/s 在噪声内）；
+   **(ii) 特性开启时**，与 bf16/关闭态的**可测差异只能归因于 KV 量化本身**（KLD / `same_top` / needle 检索 A7 / MTP 接受率 A3），**采样与前端语义零变更**。
+   即「**除量化误差底噪外，引擎可观测行为不变**」，而非不可测的"智力不变"。
+4. **`k4v4` 优于 `rk4v4`：已实测成立且超出要求** —— `k4v4` mean KLD **0.002120** vs `rk4v4` **0.004426** = **2.09×**（同协议、tail=0），
+   且**同头/token 字节更少**（274 vs 280 B）。**限定**：该测量是 **tail=0**，WP6 后须以限定的 tail 配置重述。
+5. **⚠ A4 的效应量风险（不利面，须进 WP6 验收设计）**：KVarN body **本来就有** ~384 token 内建高精度区（③），而 `rk4v4` **没有任何内建尾**
+   ⇒ A4 已记录的 rk4v4 tail 增益带（**2.26–2.47×**，`docs/port-records/PORT-VERIFY-REPORT.en.md:189-194`）**不可外推**到 KVarN；
+   A4 的 **≥1.13×** 阈值**可能只在 N > 384 时可达**。**若不在验收设计里显式处理，WP6 可能"功能做完但判据不达标"。**
+
+**⑥ 未决**
+- **产品裁决：(a) 还是 (c′)**（忠实但重 / 有界但 `--kv-tail-tokens` 双实现）。
+- **A6/A7 脚手架仍不存在**（FP32 oracle × 跨 group(128)/ring(64) 边界；且**无任何测试把 kvarn 与 `--kv-tail-tokens` 组合** —— 已复核
+  `tests/models/qwen3_5/test_kvarn_tail_row_reset.cpp:74` 显式令 `kv_tail_tokens = 0`；该测试验的是 **KVarN 自身尾行标记重置**，不是精度尾环）。
+- 若采 (c′)：`--kv-tail-tokens` 的双实现语义（外部共享环 vs body 自建槽环）需定义。
+- 报告 §4.1 记 beellama 侧「BF16 尾同配置明显更差、**该卡必须用 F16 尾**」——**非本机、非本仓**观测；若采 bf16 尾须在本机复核（与 D-18 订正相关）。
+  **→ 用户已裁定（2026-10-08）：接受「若采 bf16 尾则在本机复核」** ⇒ **既不据该（非本机）观测否定 bf16 尾，也不据现有证据认可它**；复核编号入 WP6 的验收清单。
+
+**⑦ 上游合并契约（第二个并发子代理，Tier-2/3，`D-ninfer-beellama.cpp`）—— 同时**降低 (a) 的难度**并**否证 §6.2 条 2**（回写 §6.2）**
+- **统计量/累加器**：FP32 `float2(row max, denom)` + FP32 累加器；`GGML_ASSERT(KQV->type == GGML_TYPE_F32)`、`GGML_ASSERT(dst->type == GGML_TYPE_F32)`
+  （`ggml/src/ggml-cuda/fattn-tail.cuh:339-346,379-387`、`fattn-common.cuh:1551`、`fattn-kvarn-portable.cuh:826-829,834`）。**上游不存在 BF16 部分累加器**
+  ⇒ **本仓的 BF16 `partial_acc` 是对上游的偏离**（不是"上游的另一种变体"），修法 = **照上游改 FP32**。
+- **KVarN body 导出同构统计量**：`fattn-kvarn-portable.cuh:466-469,784-786`、`fattn-mma-kvarn-decode-combine.cuh:67-68`；
+  **附尾时由内核自并**（`portable.cuh:816,370-451`，仅 `split==0`；测试 `tests/test-kvarn.cpp:2318-2319` 记"附体时 body_meta 不产出"）；
+  入口 `GGML_CUDA_FATTN_KVARN_ENTRY_COMPACT_TAIL`（`fattn-kvarn-dispatch.cuh:44`、`fattn.cu:858-865`）。
+- **域**：**旋转域合并、末尾一次反旋**（`llama-graph.cpp:3901-3904`）；混合域（**仅 prefill，`>16` query token**）下 V 在**原始域**相遇
+  （body 的 V 累加前逐 token 反旋，`portable.cuh:330-362,434-443`）。materialize 回退按 `emit_rotated`/`!mixed_domain`（`fattn-tail.cuh:753-762`、`kvarn.cu:3064-3078`）。
+- **tail 行的旋转时点**：**写原始、读时旋转**（写 `llama-kv-cache-kvarn.cpp:1004-1011`；读 `llama-graph.cpp:3845,3847` 的 `ggml_kvarn_wht_aux`；
+  `kvarn.cu:788` 明写 "Stage and records are rotated-domain for both K and V" —— **内建 stage 是旋转域存储，外部精度尾环是原始行**，两者是不同 buffer）。
+- **split**：**tail 无 split 轴**（每行一对统计量，`fattn-tail.cuh:844-847`）；body 侧在导出前已把 splits 归约（`fattn-kvarn-portable.cuh:784-786`；split 数 `fattn-kvarn-dispatch.cu:615-618`）
+  ⇒ **两者不要求 split 一致**（子代理结论 (iv)：否）⇒ **§6.2 条 2 的"分叉"可规避（两段式归并），不是阻塞。**
+- **子代理限制**：未验证**非 KVarN（稠密 F16）**路下 `self_k_rot/self_v_rot` 是否可能非空 ⇒ 结论 (iii) 限定 KVarN 路；`D-ninfer-beellama.cpp` 工作树 dirty（`metadata_changed`）、未 reindex。
+
+⇒ **净效应**：§6.2 三条"一手反证"现为 —— **条 1 = 本仓自身偏离（照上游改 FP32 即可）**；**条 2 = 可规避（非阻塞）**；**条 3 = 条件性交付物（采 bf16 尾即免）**。**(a) 的技术风险低于 v18 的表述，但实现量不变**（仍是一个 KVarN 专属 tail-partial 路径 + 归并 + 6 处接线 + A6/A7 脚手架 + 容量核算）。
+
+**⑧ (a) 的量化：性能代价与改动难度（2026-10-08，用户要求「具体量化」后记录）**
+
+**前提核验（用户论证：16 GB 只能单流、24 GB+ 并发时更宽松）**：`max_concurrency` 默认 **1**（`include/ninfer/types.h:459`），
+`kv_table_rows = plan.max_concurrency`（`startup.cpp:200`）⇒ 内建环与外部环**都随并发线性放大**。
+- **C=1**：**(a) 88 MiB/序列**（内建 24 + 外部 64，N=1024）vs **(c′) 76.5 MiB**（`M=9` 槽；两者都含 MTP 池 ×1.0625）⇒ **差 12 MiB**。
+- **C=8**：**(a) ≈716 MiB** vs **(c′) ≈612 MiB** ⇒ **差 104 MiB**。
+- ⇒ **显存不是决定因素，用户判断成立。** (a) 的代价在别处（下表）。
+
+**性能代价（逐项）** —— 结构性前提：TAIL 的尾是**分区**不是追加（`body_window = window − tail_keys`，`small_t.cuh:151-152`），
+body 只覆盖 `[0, body_window)`、尾只覆盖 `[body_window, window)` ⇒ **注意力 FLOPs 不变**，只有最新 N 个 key 的**读取字节**从 4-bit 变 16-bit。
+
+| 项 | 量 | 相对基准 |
+|---|---|---|
+| 每 token 多一次精确双写 | 2 平面 × 256 × kv_heads 4 × 2 B = 4 KiB/层 → **64 KiB/token**（16 层） | decode 每 token 流式读 ~10.3 GiB 权重 ⇒ **~6×10⁻⁶**，可忽略 |
+| 最新 N 键的读取字节 | N=1024：bf16 读 **64 MiB/步** vs 同键 k4v4 读 **17.9 MiB** ⇒ **+46 MiB/步** | window 8192 的 KV 读 ≈ 143.6 MiB ⇒ **+32%**；但 **KV 只占 decode 总流量 ~1.4%** ⇒ 端到端 **≈ +0.4%** |
+| `partial_acc` BF16→FP32 的 workspace | `attention.cu:567` 的 `D*2+8` → `D*4+8` 字节/行；decode（splits=82、q_heads=24）⇒ **+0.4 MB** | 每步读写各一次 ⇒ +0.8 MB ⇒ **≈0.6%** 于 143.6 MiB，可忽略 |
+| 两段式多一次 per-row 往返 | tokens×q_heads×(D+2)×4 B ≈ **25 KB/步** | 可忽略 |
+| f16 尾的旋转入口 | **可免**（用户已接受 bf16 尾 ⇒ 复用现成 BF16 入口） | — |
+
+⇒ **(a) 的"增量"性能代价可忽略**。被感知的是**尾部固有、与路线无关**的代价：记录值 **decode −5.8% / MTP 接受率 −2.1 pt**
+（`docs/port-records/PORT-MEMORY.md:663-670`，post-fix 配对 A/B，口径 `--spec mtp --draft-tokens 7 --kv-dtype rk4v4-e8 --max-context 4096`，tail 0→1024）。
+**两条限定**：① 该 −5.8% 是**带 MTP 的 decode tok/s**（含接受率联动），**不是纯 kernel 时间**；② **尾部在非 MTP decode 上的纯 kernel 代价从未单独测过**
+⇒ 若要断言"性能不劣化"，这是**一项待补的测量**（A8 已按此口径放宽判据）。(c′) 读同样多的 bf16 尾键 ⇒ **这部分代价两者相同**。
+
+**改动难度（逐项）**
+
+| 工作项 | 位置 | 规模 | 风险 |
+|---|---|---|---|
+| **W1** 新增 KVarN 专用 tail-partial 路径 | 新文件（照 `small_t_tail.cuh` 406 行 / `small_t_k8v4.cuh` 661 行） | **~300–450 行新代码** | 中 |
+| **W2** `partial_acc` BF16→FP32 + 两段式归并 | `decode_kernel.cuh` 的 `reduce_output_hadamard_kernel`（`:1037-1121`，~85 行）+ 签名/寻址 `:475,556-577,1029-1030`（~6 处）+ `decode.cu:113,120` | **改 ~120 行**（在 1155 行文件内） | **高**（核心归并；A2/A6 必须重跑） |
+| **W2b** body 窗口分区（`body_window = window − N`） | `attention.cu` + `decode.cu` 的 `logical_capacity`/split 计算（照 `small_t.cuh:147-170` 的形状；**分区在 op 内部完成 ⇒ 不必改 `text.cpp`**） | **~40–70 行** | 中（A4/A7 正确性） |
+| **W3** workspace 尺寸重算 | `attention.cu:559-568` | ~10 行 | 低 |
+| **W4** 接线：3 个 op 入口加尾视图 + 6 个调用点 | `include/ninfer/ops/kvarn_attention.h`；`text.cpp:391,414,567,622,1021,1045`；`context.cpp:1745` | **~80 行** | 中 |
+| **W5** 尾环写入接入 KVarN append | 照 `small_t_tail_shadow.cuh`（71 行）的形状 | **~80–120 行** | 中 |
+| **W6** 规划解除 fail-fast + 容量计费 | `startup.cpp:1035-1045`、`decoder_state.cpp:160-177`、`MemorySummary`/容量曲线（WP7） | ~60–100 行 | 中 |
+| **W7** A6/A7 脚手架（FP32 oracle + group(128)/ring(64) 边界） | `tests/`（照 `tests/ops/softmax_attention/causal_cache.cpp` 4,000+ 行的尾测形状） | **~300–500 行新测试** | 中 |
+| **W8** 回归 | A2 位序往返、A3/MTP、续列尾/前缀 e2e、ctest 263 项 | 跑，不改 | **高**（判据须仍过） |
+
+**合计**：新代码 **≈900–1,400 行**（含测试）、改动 **≈300 行**、触及 **12–15 个文件**；**工期 10–15 天**（沿用计划书区间）。
+**难度的真正来源是 W2**（改核心归并 + BF16→FP32）。**利好**：上游 beellama 正是这么做的（FP32 acc、旋转域合并后一次反旋）
+⇒ W2 是「**照上游对齐**」，不是发明新契约；**唯一必须钉住的是 A6 的「tail=0 逐位不变」**。
+**与 (c′) 的对照**：省掉 W1/W2（约 −5–8 天），但新增「A6/A7 判据重写 + 双实现语义」（约 +2–3 天）⇒ 净差 ~3–5 天，代价是**永久语义债**。
+
+**⑨ 路线裁决（2026-10-08）**：**用户确认 = (a)**（照 `small_t_k8v4.cuh` 形状，接进外部共享精确尾环）。理由：① 16 GB 单流下**显存非决定因素**（⑧ 已验证：与 (c′) 仅差 12 MiB @C=1、104 MiB @C=8）；
+② (a) 的**增量性能代价可忽略**（⑧ 表），被感知的只有**尾部固有、两条路线共付**的代价；③ (a) **消除** `--kv-tail-tokens` 的双实现语义与本仓 **BF16-acc 偏离**、判据与其它档位**同构**。
+**(c′) 否决**（省 ~3–5 天，换永久语义债）。**已写入 §6.3 与 §7-WP6（分步计划 WP6.0–WP6.7）；§7-WP6 另含两项前置测量（WP6.0a/0b）。**
+**公开的残余风险**：W2（改核心归并 + BF16→FP32）是本轮**唯一高回归项**，由 A6 的「`tail=0` 逐位不变」抵住；若该不变量无法保持，回退到"独立 merge 核"。
+
+---
+
 ## 已归档信息索引
 
 本次精简（2026-10-08）**只搬运、不改写**：下表三份归档文件收录的是本计划书与进度日志中
@@ -1084,5 +1392,12 @@ near-tie 翻转**（bf16@k1 分叉而 @k3 不分叉；rk4v4 反之；kvarn k=1/3
 **0.002688**）、**D-11**（发布档三档 `k4v4` 0.002120 / `k5v5` 0.001432 / `k6v6` 0.001233，
 对 `rk4v4`/`nvfp4`/`k8v4` 为 2.09×/2.07×/2.18×）、**D-12**（GPU 收尾四件 + P2 前置）、
 **D-13**（token 级 MTP 分叉表）、**D-14**（P3b 档位并入名字 + `capture_identity_tag` 发现）、
-**D-15**（P3c parser 单测）、**D-16**（P3d 三项 LOW 修复，含 CausalScore 尾标记重置的生产变更）；
+**D-15**（P3c parser 单测）、**D-16**（P3d 三项 LOW 修复，含 CausalScore 尾标记重置的生产变更）、
+**D-17**（P3d ① 的 KLD 端到端对照＝逐位 `0.002120` ⇒ 无害但**必要性未证**；待裁决 3 项裁决；「子代理无图谱」根因与修复）、
+**D-18**（**WP6 门禁评估：证据不足** —— §6.3 的 (a)/(b)/(c) 探针从未执行、(b) 的域契约本仓 0 命中、A6/A7 脚手架不存在；**订正**：「f16 旋转入口」**仅在坚持 f16 尾时才需要**，采 `--kv-tail-type bf16` 可免；建议先补探针）、
+**D-19**（**§6.3 探针已执行**：**(b) 否证**〔`ROTATED_K_ORIGINAL_V` 只对 `>16` query token 生效、decode 恒旋转、V 存储恒旋转；且坐标系本身即障碍〕、
+**(a) 为忠实路线**、**(c) 弱且语义不符**、**新提有界 (c′)**；**上游合并契约** = FP32 `float2(row max,denom)` + 无 split 轴 + 旋转域合并后一次反旋 + 尾行写原始读时旋转 ⇒
+**§6.2 条 1 改判「本仓自身偏离」、条 2 改判「可规避」**；并给出**用户三项终态目标 → A1–A8 的映射与缺口**：prefill 腿已删（无判据）、**视觉无判据但结构上不受影响**（走独立算子、不用分页 KV ⇒ 归 A5 显存预算）、
+「智力不劣化」应拆为「关闭时逐字节不变 + 开启时差异仅归因量化」、`k4v4` vs `rk4v4` **已实测 2.09×** 但为 tail=0、**A4 的 ≥1.13× 在 KVarN 上可能只在 N>384 可达**；
+**⑧/⑨ = 路线裁决「(a)」+ 其量化**（显存差 **12 MiB @C=1 / 104 MiB @C=8**、「增量性能代价可忽略」、改动 **≈900–1,400 行新码 + ≈300 行改、12–15 文件、10–15 天**；**(c′) 否决**）；计划书 v20 另把 **WP6 拆为 WP6.0–WP6.7**、并**入队两项前置测量**）；
 以及 §1 A1–A8 现行判据、§7 各 WP 现状与验收、§9 风险登记、§10 D1–D6。
