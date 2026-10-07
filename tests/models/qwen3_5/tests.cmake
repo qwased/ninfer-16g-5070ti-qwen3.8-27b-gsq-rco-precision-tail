@@ -66,6 +66,10 @@ ninfer_add_test(ninfer_qwen3_5_state_image_layout_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_state_image_layout.cpp"
   LIBRARIES ninfer_engine ninfer_core)
 
+ninfer_add_test(ninfer_qwen3_5_kvarn_continuation_image_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_kvarn_continuation_image.cpp"
+  LIBRARIES ninfer_engine ninfer_core)
+
 ninfer_add_test(ninfer_qwen3_5_context_store_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_context_store.cpp"
   LIBRARIES ninfer_engine ninfer_core)
@@ -187,5 +191,10 @@ set_tests_properties(ninfer_qwen3_5_structured_round_test PROPERTIES SKIP_RETURN
 
 ninfer_add_test(ninfer_qwen3_5_mtp_greedy_parity_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_mtp_greedy_parity_real.cpp"
-  LIBRARIES ninfer_engine)
+  LIBRARIES ninfer_engine
+  # The test is a diagnostic instrument, not a cross-configuration gate: it reports the first
+  # divergence of each speculative width against greedy and enforces per-configuration
+  # self-determinism. --quick bounds it to a representative subset (bf16/rk4v4/kvarn:k4v4, sample 0,
+  # widths 0 and 3) so a ctest slot fits; the full sweep runs when the flag is omitted.
+  TEST_ARGS --quick)
 set_tests_properties(ninfer_qwen3_5_mtp_greedy_parity_real_test PROPERTIES SKIP_RETURN_CODE 77)

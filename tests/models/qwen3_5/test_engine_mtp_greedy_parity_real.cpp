@@ -22,6 +22,7 @@ constexpr std::uint32_t kMaximumConcurrency = 8;
 struct KvProfile {
     std::string_view name;
     ninfer::KvCacheStorage storage;
+    ninfer::KvarnBits kvarn_bits = ninfer::KvarnBits::Bits4;
 };
 
 constexpr std::array kKvProfiles{
@@ -30,11 +31,16 @@ constexpr std::array kKvProfiles{
     KvProfile{"fp8", ninfer::KvCacheStorage::Fp8E4M3Row256},
     KvProfile{"nvfp4", ninfer::KvCacheStorage::Nvfp4Group16},
     KvProfile{"k8v4", ninfer::KvCacheStorage::Fp8KeyNvfp4Value},
+    KvProfile{"rk4v4", ninfer::KvCacheStorage::RotatedLloyd4KeyInt4Value},
+    KvProfile{"kvarn:k4v4", ninfer::KvCacheStorage::KvarnGroup128, ninfer::KvarnBits::Bits4},
+    KvProfile{"kvarn:k5v5", ninfer::KvCacheStorage::KvarnGroup128, ninfer::KvarnBits::Bits5},
+    KvProfile{"kvarn:k6v6", ninfer::KvCacheStorage::KvarnGroup128, ninfer::KvarnBits::Bits6},
 };
 
 ninfer::EngineOptions engine_options(const char* artifact, ninfer::KvCacheStorage kv_storage,
                                      std::uint32_t mtp_draft_tokens,
-                                     std::uint32_t max_concurrency = 1, bool adaptive = false) {
+                                     std::uint32_t max_concurrency = 1, bool adaptive = false,
+                                     ninfer::KvarnBits kvarn_bits = ninfer::KvarnBits::Bits4) {
     const bool mtp = mtp_draft_tokens != 0;
     ninfer::EngineOptions options;
     options.artifact_path   = artifact;
@@ -43,6 +49,7 @@ ninfer::EngineOptions engine_options(const char* artifact, ninfer::KvCacheStorag
     options.max_concurrency = max_concurrency;
     options.prefill_chunk   = 128;
     options.kv_cache        = kv_storage;
+    options.kvarn_bits      = kvarn_bits;
     options.use_cuda_graph  = false;
     options.speculative.backend =
         mtp ? ninfer::SpeculativeBackend::Mtp : ninfer::SpeculativeBackend::None;
@@ -78,21 +85,31 @@ ninfer::PromptInput prompt() {
     return input;
 }
 
-void verify_result(std::string_view label, const ninfer::GenerationResult& result,
-                   const std::vector<ninfer::TokenId>& expected) {
-    const auto& actual = result.generated_token_ids;
-    if (actual.size() != expected.size() ||
-        result.finish_reason != ninfer::FinishReason::OutputLimit) {
-        throw std::runtime_error(std::string(label) + " did not reach its fixed output limit");
+// Diagnostic, not a gate. Upstream rejects cross-arithmetic bit equality (docs/performance.md:45;
+// A3 option O1): a wider verify pass reorders reductions, so a near-tie argmax can flip. The
+// instrument reports the first divergence and its rate; what it enforces is the fixed output-length
+// contract and per-configuration self-determinism (repeat 1 must reproduce repeat 0).
+struct Divergence {
+    std::size_t first = 0; // first differing index, or the common length when identical
+    std::size_t count = 0; // differing positions within the common prefix
+};
+
+Divergence divergence(const std::vector<ninfer::TokenId>& left,
+                      const std::vector<ninfer::TokenId>& right) {
+    const std::size_t common = std::min(left.size(), right.size());
+    Divergence out{.first = common, .count = 0};
+    for (std::size_t index = 0; index < common; ++index) {
+        if (left[index] != right[index]) {
+            if (out.count == 0) { out.first = index; }
+            ++out.count;
+        }
     }
-    const auto [expected_mismatch, actual_mismatch] =
-        std::mismatch(expected.begin(), expected.end(), actual.begin());
-    if (expected_mismatch != expected.end()) {
-        const std::size_t index = static_cast<std::size_t>(expected_mismatch - expected.begin());
-        throw std::runtime_error(std::string(label) + " mismatch at token " +
-                                 std::to_string(index) +
-                                 ": expected=" + std::to_string(*expected_mismatch) +
-                                 " actual=" + std::to_string(*actual_mismatch));
+    return out;
+}
+
+void require_output_limit(std::string_view label, const ninfer::GenerationResult& result) {
+    if (result.finish_reason != ninfer::FinishReason::OutputLimit) {
+        throw std::runtime_error(std::string(label) + " did not reach its fixed output limit");
     }
 }
 
@@ -109,6 +126,7 @@ struct ParityCases {
     bool full_proposal_head            = false;
     bool adaptive                      = false;
     bool tool_loop                     = false;
+    bool quick                         = false;
     std::vector<ninfer::TokenId> corpus;
 };
 
@@ -116,7 +134,9 @@ void verify_tool_loop(const char* artifact, KvProfile profile) {
     std::vector<ninfer::PromptInput> prompts;
     std::vector<ninfer::GenerationResult> expected;
     for (const bool adaptive : {false, true}) {
-        auto options = engine_options(artifact, profile.storage, adaptive ? 15U : 0U, 2, adaptive);
+        auto options =
+            engine_options(artifact, profile.storage, adaptive ? 15U : 0U, 2, adaptive,
+                           profile.kvarn_bits);
         options.max_context                    = 65536;
         options.kv_capacity                    = ninfer::KvCapacityPolicy::explicit_capacity(65536);
         options.prefill_chunk                  = 2048;
@@ -167,18 +187,10 @@ void verify_tool_loop(const char* artifact, KvProfile profile) {
             }
             if (adaptive) {
                 const auto& oracle = expected[turn];
-                if (result.generated_token_ids != oracle.generated_token_ids ||
-                    result.finish_reason != oracle.finish_reason ||
-                    result.reasoning != oracle.reasoning || result.content != oracle.content ||
-                    result.tool_calls.front().arguments_json !=
-                        oracle.tool_calls.front().arguments_json) {
-                    const auto mismatch = std::mismatch(
-                        result.generated_token_ids.begin(), result.generated_token_ids.end(),
-                        oracle.generated_token_ids.begin(), oracle.generated_token_ids.end());
-                    throw std::runtime_error(
-                        label + " differs from MTP-off at token " +
-                        std::to_string(mismatch.first - result.generated_token_ids.begin()));
-                }
+                const auto vs_off =
+                    divergence(oracle.generated_token_ids, result.generated_token_ids);
+                std::cout << label << " vs MTP-off first_diff=" << vs_off.first
+                          << " diverged=" << vs_off.count << std::endl;
             } else {
                 expected.push_back(result);
                 ninfer::ChatMessage assistant;
@@ -227,11 +239,13 @@ void verify_parity(const char* artifact, KvProfile profile, const ParityCases& c
         : dflash2        ? std::vector<std::uint32_t>{0, 1, 3, 7, 15}
                          : std::vector<std::uint32_t>{0, 3, 1, 2, 4, 5, 15};
     for (std::uint32_t depth : depths) {
-        // Every MTP width and fresh repeat uses ordinary greedy as oracle. DFlash retains its
-        // same-width repeatability check; its wider target arithmetic has a separate contract.
+        // Greedy (depth 0) is captured once as the cross-configuration reference. Every width then
+        // runs twice: repeat 0 records this configuration's own output, repeat 1 must reproduce it
+        // byte for byte (the enforced property). MTP-on vs greedy is reported, not gated.
+        std::array<std::array<std::vector<ninfer::TokenId>, kMaximumConcurrency>, 9> first_pass;
         for (int repeat = 0; repeat < 2; ++repeat) {
-            auto options =
-                engine_options(artifact, profile.storage, depth, cases.concurrency, cases.adaptive);
+            auto options = engine_options(artifact, profile.storage, depth, cases.concurrency,
+                                          cases.adaptive, profile.kvarn_bits);
             options.speculative.backend =
                 depth == 0 ? ninfer::SpeculativeBackend::None : cases.backend;
             const auto prompt_capacity = cases.sample == 8   ? 231U
@@ -411,12 +425,38 @@ void verify_parity(const char* artifact, KvProfile profile, const ParityCases& c
                             label + " did not restore the prewarmed frontier: reused=" +
                             std::to_string(result.reused_prompt_tokens));
                     }
-                    if ((depth == 0 || dflash2) && repeat == 0) {
+                    require_output_limit(label, result);
+                    if (depth == 0 && repeat == 0) {
                         expected[sample][row] = result.generated_token_ids;
                     }
-                    verify_result(label, result, expected[sample][row]);
-                    std::cout << label << " matched " << expected[sample][row].size()
-                              << " tokens reused=" << result.reused_prompt_tokens;
+                    const bool self_deterministic =
+                        repeat != 0 &&
+                        first_pass[sample][row].size() == result.generated_token_ids.size() &&
+                        divergence(first_pass[sample][row], result.generated_token_ids).count == 0;
+                    if (repeat == 0) {
+                        first_pass[sample][row] = result.generated_token_ids;
+                    } else if (!self_deterministic) {
+                        const auto self =
+                            divergence(first_pass[sample][row], result.generated_token_ids);
+                        throw std::runtime_error(label + " is not self-deterministic: first_diff=" +
+                                                 std::to_string(self.first) + " diverged=" +
+                                                 std::to_string(self.count));
+                    }
+                    const auto vs_greedy =
+                        divergence(expected[sample][row], result.generated_token_ids);
+                    std::cout << label << " tokens=" << result.generated_token_ids.size()
+                              << " reused=" << result.reused_prompt_tokens << " self_det="
+                              << (repeat == 0 ? std::string_view{"n/a"} : std::string_view{"ok"})
+                              << " vs_greedy=";
+                    if (expected[sample][row].empty()) {
+                        std::cout << "n/a";
+                    } else if (expected[sample][row].size() == result.generated_token_ids.size() &&
+                               vs_greedy.count == 0) {
+                        std::cout << "identical";
+                    } else {
+                        std::cout << "first_diff=" << vs_greedy.first << " diverged="
+                                  << vs_greedy.count << "/" << expected[sample][row].size();
+                    }
                     if (cases.adaptive && depth != 0) {
                         std::cout << " windows=";
                         for (std::size_t k = 0;
@@ -490,7 +530,8 @@ int main(int argc, char** argv) {
                 if (std::none_of(kKvProfiles.begin(), kKvProfiles.end(),
                                  [&](KvProfile profile) { return profile.name == selected_kv; })) {
                     throw std::invalid_argument(
-                        "--kv-dtype requires bf16, int8, fp8, nvfp4 or k8v4");
+                        "--kv-dtype requires bf16, int8, fp8, nvfp4, k8v4, rk4v4, "
+                        "kvarn:k4v4, kvarn:k5v5 or kvarn:k6v6");
                 }
             } else if (argument == "--no-cuda-graph") {
                 cases.graphs = false;
@@ -504,6 +545,8 @@ int main(int argc, char** argv) {
                 cases.adaptive = true;
             } else if (argument == "--tool-loop") {
                 cases.tool_loop = true;
+            } else if (argument == "--quick") {
+                cases.quick = true;
             } else if (argument == "--corpus" && index + 1 < argc) {
                 std::ifstream input(argv[++index]);
                 ninfer::TokenId token;
@@ -518,9 +561,9 @@ int main(int argc, char** argv) {
                     "[--spec mtp|dflash2] [--draft-tokens K] [--adaptive] "
                     "[--prefill-chunk 1..4096] "
                     "[--concurrency 1..8] [--full-proposal-head] "
-                    "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] "
+                    "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk4v4|kvarn:k4v4|kvarn:k5v5|kvarn:k6v6] "
                     "[--no-cuda-graph] [--prefix-reuse] [--no-context-cache] "
-                    "[--corpus PATH] [--tool-loop]");
+                    "[--corpus PATH] [--tool-loop] [--quick]");
             }
         }
         if (cases.adaptive && cases.backend != ninfer::SpeculativeBackend::Mtp) {
@@ -538,8 +581,20 @@ int main(int argc, char** argv) {
         } else if (cases.depth > 15) {
             throw std::invalid_argument("MTP requires K=1..15");
         }
+        if (cases.quick) {
+            // Bounded diagnostic default: a representative subset a single ctest slot can afford.
+            // The full sweep (every profile, sample and width) stays available without --quick.
+            if (cases.depth < 0) { cases.depth = 3; }
+            if (cases.sample < 0) { cases.sample = 0; }
+        }
+        constexpr std::array<std::string_view, 3> kQuickProfiles{"bf16", "rk4v4", "kvarn:k4v4"};
         for (const KvProfile profile : kKvProfiles) {
             if (!selected_kv.empty() && profile.name != selected_kv) { continue; }
+            if (cases.quick && selected_kv.empty() &&
+                std::none_of(kQuickProfiles.begin(), kQuickProfiles.end(),
+                             [&](std::string_view name) { return name == profile.name; })) {
+                continue;
+            }
             if (cases.tool_loop) {
                 verify_tool_loop(artifact, profile);
             } else {

@@ -462,6 +462,16 @@ Reductions and matrix or attention computations use a normwise bound with a fini
 pointwise-error cap so cancellation does not require strict elementwise agreement and isolated
 corruption cannot hide in an aggregate norm.
 
+A quantizing codec whose packed codes are recovered from the stored representation is compared on
+the codec's own quantization step, not on a fitted relative-L2 limit. With `qmax = (1 << bits) - 1`
+fixing the step `q` as the value distance between adjacent codes, the pointwise bound is one `q`
+plus the slack that absorbs independently computed scale factors, and the gross cap counts the
+elements whose code differs from the oracle's. An element that lands exactly on a rounding boundary
+can resolve to the adjacent code in the production kernel and in the independent quantizer, so it
+moves by one `q`; a systematic codec defect (wrong field width, wrong bit order, biased rounding)
+moves whole steps or every element and fails both parts. `tests/ops/test_kvarn.cpp` states the
+KVarN record codec's criterion this way for the 4, 5 and 6-bit profiles.
+
 Different production routes use different criteria only when their arithmetic or quantization
 profiles differ materially. Widening a criterion requires a numerical reason and requalification
 of its complete affected domain; one failing implementation is not sufficient justification.

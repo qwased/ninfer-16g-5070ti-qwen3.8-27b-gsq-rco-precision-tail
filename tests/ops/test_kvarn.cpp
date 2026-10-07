@@ -198,8 +198,20 @@ std::vector<float> make_input(std::uint32_t seed, bool value) {
     return result;
 }
 
-std::vector<double> codec_oracle(const std::vector<float>& input, bool key, int bits) {
-    std::vector<double> result(input.size());
+// The independent FP64 oracle for one KVarN tile. `decoded` is the represented value
+// `(code * scale + zero) * factor`; `step` is the theoretical quantization step
+// `(max - min) / qmax * row_scale * column_scale` at `qmax = (1 << bits) - 1`, i.e. the
+// value distance between two adjacent codes; `code` is the integer the oracle selected in
+// the balanced domain.
+struct CodecOracle {
+    std::vector<double> decoded;
+    std::vector<double> step;
+    std::vector<std::uint32_t> code;
+};
+
+CodecOracle codec_oracle(const std::vector<float>& input, bool key, int bits) {
+    CodecOracle result{std::vector<double>(input.size()), std::vector<double>(input.size()),
+                       std::vector<std::uint32_t>(input.size(), 0)};
     for (int tile = 0; tile < kTiles; ++tile) {
         const std::size_t base = static_cast<std::size_t>(tile) * kTileElements;
         const int rows         = key ? kD : kGroup;
@@ -234,9 +246,12 @@ std::vector<double> codec_oracle(const std::vector<float>& input, bool key, int 
                     f16_to_f32(f32_to_f16(static_cast<float>(balanced.column_scale[col])));
                 const float decoded =
                     std::fma(static_cast<float>(code), absorbed_scale, absorbed_zero) * other_scale;
-                const int token               = key ? col : row;
-                const int d                   = key ? row : col;
-                result[base + token * kD + d] = decoded;
+                const int token                 = key ? col : row;
+                const int d                     = key ? row : col;
+                const std::size_t index         = base + static_cast<std::size_t>(token) * kD + d;
+                result.decoded[index]           = decoded;
+                result.step[index]              = static_cast<double>(absorbed_scale) * other_scale;
+                result.code[index]              = static_cast<std::uint32_t>(code);
             }
         }
     }
@@ -269,13 +284,6 @@ struct DeviceStorage {
     }
 };
 
-// Calibrated in WP4.3 from the measured device-vs-FP64-oracle deviation. The device and the
-// oracle run independent Sinkhorn passes, so elements sitting on a quantization boundary can
-// land on adjacent codes; the bound therefore allows a step-sized max deviation.
-constexpr double oracle_relative_l2_limit(int bits) {
-    return bits == 4 ? 1.0e-3 : bits == 5 ? 1.0e-3 : 1.0e-3;
-}
-
 int compare_profile(const char* label, const std::vector<double>& actual,
                     const std::vector<double>& expected, double limit, bool report = false) {
     double error_squared     = 0.0;
@@ -303,12 +311,81 @@ int compare_profile(const char* label, const std::vector<double>& actual,
     return 0;
 }
 
+// WP5: the KVarN codec tolerance is a quantization-step criterion, not a fitted relative-L2 bound.
+// `qmax = (1 << bits) - 1` fixes the theoretical step q = (max - min) / qmax * row_scale *
+// column_scale, the value distance between two adjacent codes. The device kernels and this FP64
+// oracle run independent Sinkhorn passes, so an element sitting on a rounding boundary can resolve
+// to the adjacent code and move by exactly one q. The criterion therefore has the two parts that
+// op-development.md 6.3 requires of a floating-point criterion -- a pointwise bound plus a finite
+// gross pointwise-error cap:
+//   1. pointwise: |actual - expected| <= q * (1 + kStepSlack) for every element. The slack absorbs
+//      the small difference between the two independently computed row/column scale factors; it is
+//      far below the size of a real codec defect, which moves elements by whole steps.
+//   2. gross cap: the number of elements whose code differs from the oracle's stays a tiny fraction
+//      of the tile. Wrong field width, wrong bit order or biased rounding moves essentially every
+//      element, so a systematic defect cannot hide behind the pointwise bound.
+constexpr double kStepSlack       = 5.0e-2;
+constexpr double kMaxFlipFraction = 1.0e-3;
+
+struct StepCriterion {
+    std::size_t total      = 0;
+    std::size_t flips      = 0;  // elements whose code differs from the oracle's
+    std::size_t wide_flips = 0;  // code differences beyond one neighbouring code
+    std::size_t over_step  = 0;  // pointwise deviations beyond q * (1 + kStepSlack)
+    double worst_ratio     = 0.0; // max |actual - expected| / q over the tile
+};
+
+int check_step_criterion(const char* label, const std::vector<double>& actual,
+                         const std::vector<double>& expected, const std::vector<double>& step,
+                         const std::vector<std::uint32_t>& actual_code,
+                         const std::vector<std::uint32_t>& expected_code) {
+    StepCriterion stats;
+    stats.total = actual.size();
+    for (std::size_t index = 0; index < actual.size(); ++index) {
+        if (!std::isfinite(actual[index]) || !std::isfinite(expected[index])) {
+            std::cerr << label << ": non-finite value at " << index << '\n';
+            return 1;
+        }
+        const double q    = step[index];
+        const double ratio = std::abs(actual[index] - expected[index]) / std::max(q, 1.0e-30);
+        stats.worst_ratio  = std::max(stats.worst_ratio, ratio);
+        if (ratio > 1.0 + kStepSlack) { ++stats.over_step; }
+        if (actual_code[index] != expected_code[index]) {
+            ++stats.flips;
+            const std::uint32_t gap = actual_code[index] > expected_code[index]
+                                          ? actual_code[index] - expected_code[index]
+                                          : expected_code[index] - actual_code[index];
+            if (gap > 1) { ++stats.wide_flips; }
+        }
+    }
+    const std::size_t flip_cap = static_cast<std::size_t>(kMaxFlipFraction * stats.total);
+    std::cout << label << ": step_ratio_max=" << stats.worst_ratio << " flips=" << stats.flips
+              << "/" << flip_cap << " over_step=" << stats.over_step
+              << " wide_flips=" << stats.wide_flips << " of " << stats.total << '\n';
+    int failures = 0;
+    if (stats.over_step != 0) {
+        std::cerr << label << ": " << stats.over_step << " elements exceed one quantization step (max "
+                  << stats.worst_ratio << " steps)\n";
+        ++failures;
+    }
+    if (stats.wide_flips != 0) {
+        std::cerr << label << ": " << stats.wide_flips << " codes differ by more than one step\n";
+        ++failures;
+    }
+    if (stats.flips > flip_cap) {
+        std::cerr << label << ": " << stats.flips << " boundary flips exceed the cap " << flip_cap
+                  << '\n';
+        ++failures;
+    }
+    return failures;
+}
+
 template <int Bits>
 int run_codec_case() {
     const std::vector<float> key             = make_input(0x4b41524eU, false);
     const std::vector<float> value           = make_input(0x56324736U, true);
-    const std::vector<double> expected_key   = codec_oracle(key, true, Bits);
-    const std::vector<double> expected_value = codec_oracle(value, false, Bits);
+    const CodecOracle expected_key           = codec_oracle(key, true, Bits);
+    const CodecOracle expected_value         = codec_oracle(value, false, Bits);
     DeviceBuffer device_key                  = to_device_bf16(key);
     DeviceBuffer device_value                = to_device_bf16(value);
     DeviceStorage<Bits> storage;
@@ -327,10 +404,6 @@ int run_codec_case() {
     const std::vector<double> actual_key   = from_device_f32(decoded_key, key.size());
     const std::vector<double> actual_value = from_device_f32(decoded_value, value.size());
     int failures                           = 0;
-    failures += compare_profile("KVarN K official oracle", actual_key, expected_key,
-                                oracle_relative_l2_limit(Bits), true);
-    failures += compare_profile("KVarN V official oracle", actual_value, expected_value,
-                                oracle_relative_l2_limit(Bits), true);
 
     const auto k_codes    = from_device<std::uint8_t>(storage.k_codes, storage.k_codes.bytes);
     const auto k_scales   = from_device<std::uint16_t>(storage.k_scales, kD * kTiles);
@@ -342,23 +415,27 @@ int run_codec_case() {
     const auto v_zeros    = from_device<std::uint16_t>(storage.v_token_zeros, kGroup * kTiles);
     std::vector<double> represented_key(key.size());
     std::vector<double> represented_value(value.size());
+    std::vector<std::uint32_t> device_key_codes(key.size(), 0);
+    std::vector<std::uint32_t> device_value_codes(value.size(), 0);
     for (int tile = 0; tile < kTiles; ++tile) {
         for (int token = 0; token < kGroup; ++token) {
             for (int d = 0; d < kD; ++d) {
                 const std::size_t output = static_cast<std::size_t>(tile) * kTileElements +
                                            static_cast<std::size_t>(token) * kD + d;
-                const int kc = static_cast<int>(ops::kvarn_unpack_code(
+                const std::uint32_t kc = ops::kvarn_unpack_code(
                     &k_codes[(static_cast<std::size_t>(tile) * kD + d) *
                              ops::kvarn_k_row_bytes(Bits)],
-                    token * Bits, Bits));
+                    token * Bits, Bits);
+                device_key_codes[output] = kc;
                 represented_key[output] =
                     std::fma(static_cast<float>(kc), f16_to_f32(k_scales[tile * kD + d]),
                              f16_to_f32(k_zeros[tile * kD + d])) *
                     f16_to_f32(k_tokens[tile * kGroup + token]);
-                const int vc = static_cast<int>(ops::kvarn_unpack_code(
+                const std::uint32_t vc = ops::kvarn_unpack_code(
                     &v_codes[(static_cast<std::size_t>(tile) * kGroup + token) *
                              ops::kvarn_v_row_bytes(Bits)],
-                    d * Bits, Bits));
+                    d * Bits, Bits);
+                device_value_codes[output] = vc;
                 represented_value[output] =
                     std::fma(static_cast<float>(vc), f16_to_f32(v_scales[tile * kGroup + token]),
                              f16_to_f32(v_zeros[tile * kGroup + token])) *
@@ -369,6 +446,10 @@ int run_codec_case() {
     failures += compare_profile("KVarN K stored-bit decode", actual_key, represented_key, 2.0e-7);
     failures +=
         compare_profile("KVarN V stored-bit decode", actual_value, represented_value, 2.0e-7);
+    failures += check_step_criterion("KVarN K official oracle", actual_key, expected_key.decoded,
+                                     expected_key.step, device_key_codes, expected_key.code);
+    failures += check_step_criterion("KVarN V official oracle", actual_value, expected_value.decoded,
+                                     expected_value.step, device_value_codes, expected_value.code);
 
     const auto check_roundtrip = [&](const char* label, const std::vector<std::uint8_t>& stored,
                                      std::vector<std::uint8_t>& destination) {
@@ -409,6 +490,54 @@ int run_codec_case() {
     }
     failures += check_roundtrip("KVarN K pack/unpack roundtrip", k_codes, k_roundtrip);
     failures += check_roundtrip("KVarN V pack/unpack roundtrip", v_codes, v_roundtrip);
+    return failures;
+}
+
+// Exhaustive per-code bit-order roundtrip for every packed width. Each representable code, placed
+// at each K/V in-row field offset, must read back identical, and a code must never touch or read a
+// byte outside its own row. The device roundtrip above only re-packs the codes the kernels happened
+// to produce; this pins the little-endian LSB-first field order itself, including the codes that
+// straddle a byte boundary (bits 5 and 6 at most offsets), on the host with no device involved.
+int run_codec_bit_order_case() {
+    constexpr int kCodecRowBytes = 256; // >= the widest row (V, 6 bits -> 192 B)
+    int failures                 = 0;
+    for (int bits : {4, 5, 6}) {
+        const std::uint32_t qmax = (1U << bits) - 1U;
+        for (int key = 0; key < 2; ++key) {
+            const bool is_key    = key == 1;
+            const int fields     = is_key ? ops::kKvarnGroup : ops::kKvarnHeadDim;
+            const int row_bytes  = is_key ? ops::kvarn_k_row_bytes(bits) : ops::kvarn_v_row_bytes(bits);
+            const char* side     = is_key ? "K" : "V";
+            for (int field = 0; field < fields; ++field) {
+                const std::int32_t bit = field * bits;
+                const int low_byte     = bit >> 3;
+                const int high_byte    = ((bit & 7) + bits > 8) ? low_byte + 1 : low_byte;
+                for (std::uint32_t code = 0; code <= qmax; ++code) {
+                    std::uint8_t row[kCodecRowBytes];
+                    std::memset(row, 0, sizeof(row));
+                    // A sentinel beyond the row end proves the codec never reads out of its row.
+                    std::memset(row + row_bytes, 0xff, sizeof(row) - static_cast<std::size_t>(row_bytes));
+                    ops::kvarn_pack_code(row, bit, bits, code);
+                    const std::uint32_t readback = ops::kvarn_unpack_code(row, bit, bits);
+                    if (readback != code) {
+                        std::cerr << "KVarN " << side << " bit-order: bits=" << bits
+                                  << " field=" << field << " code=" << code
+                                  << " readback=" << readback << '\n';
+                        ++failures;
+                    }
+                    for (int byte = 0; byte < row_bytes; ++byte) {
+                        if (byte != low_byte && byte != high_byte && row[byte] != 0) {
+                            std::cerr << "KVarN " << side << " bit-order: bits=" << bits
+                                      << " field=" << field << " code=" << code << " clobbered byte "
+                                      << byte << '\n';
+                            ++failures;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (failures == 0) { std::cout << "KVarN codec bit-order roundtrip: 4/5/6-bit exhaustive OK\n"; }
     return failures;
 }
 
@@ -1710,6 +1839,7 @@ int main() {
     failures += run_codec_case<4>();
     failures += run_codec_case<5>();
     failures += run_codec_case<6>();
+    failures += run_codec_bit_order_case();
     failures += run_hadamard_case();
     failures += run_publication_settlement_case<2, 1>();
     failures += run_publication_settlement_case<4, 16>();
