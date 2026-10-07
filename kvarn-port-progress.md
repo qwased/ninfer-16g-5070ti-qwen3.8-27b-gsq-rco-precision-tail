@@ -35,9 +35,10 @@
 分叉不劣于基线**）→ **08-06 P3b 档位并入名字（六展示面 GPU 实测全过）+ 图谱使用纪律落盘（AGENTS.md + skill）**。全文见 §3。
 
 **工作树**：WP1–WP5/P1 的逐文件清单已归档（归档 §D）；这些改动**已于 2026-10-08 提交**
-（`beda920a` feat / `fe76ad42` test / `6aea191b` docs）。**此后新增的未提交改动**：① 文档归档精简（计划书 + 本日志 +
-`docs/port-records/KVARN-*-ARCHIVE*.md` 三份新文件）；② **P3b 的 7 个源码文件**（见 §3-08-06）+ 计划书 v14/附录 D-14；
-③ `AGENTS.md` 与 `~/.qoder/skills/codebase-memory/SKILL.md`（后者在仓库外）。**均未提交**（用户约束：保留工作树）。
+（`beda920a` feat / `fe76ad42` test / `6aea191b` docs）。**本轮（P3b + 图谱纪律）的改动亦已于 2026-10-08 提交**：
+`6836b2de` feat（7 个源码文件：`MemorySummary` + 四展示面）/ `3e780a41` docs（计划书 v14 + 附录 D-14 + 本日志 §3-08-06 +
+三份 `docs/port-records/KVARN-*-ARCHIVE*` 归档）/ `efdb1dce` docs（`AGENTS.md` 的 codebase-memory 小节）。
+**工作树现为干净**；唯一未入库项是 `~/.qoder/skills/codebase-memory/SKILL.md`（在仓库外，非本仓版本控制范围）。
 
 > **工作树改动清单**：WP1 新增 12 个 ops 文件 + 2 个头 + 2 个测试、WP2 的 16 文件、WP3 的 14 文件、
 > WP4 的 `kvarn.h` 泛化、WP5/P1 的 4 个测试与 `op-development.md` §6.3 —— **逐字清单（含函数名与守卫点）
@@ -462,7 +463,8 @@ k4v4/k5v5 的磁盘检查点可同 tag。**实测该隐患被目录名兜住**�
 
 **未做 / 未測（如實）**：① **P3c（kvarn parser 單測）未做**；② 儀器覆蓋殘留（`k5v5/k6v6` 只測 k=1、`sample 0` 之外未測、
 測試名仍含 `parity`）**未動**；③ 計劃書 §7-WP7 的 `MemorySummary` **容量口徑**未動（本次只加**名字欄位**）；
-④ 未重跑全量 ctest（只跑受影響的 6 項 + 四目標構建）；⑤ **未提交**（用戶約束）。
+④ 未重跑全量 ctest（只跑受影響的 6 項 + 四目標構建）；⑤ **已提交**（用户于本轮末指示提交）：
+`6836b2de` feat（7 源码文件）/ `3e780a41` docs（计划书 v14 + 本日志 + 三份归档）/ `efdb1dce` docs（AGENTS.md）。
 **產物**：源碼 7 文件；`.deps/kvarn-adm/{p3b_names.sh,p3b_perp.sh,p3b_text.txt,p3b-*.log}`（gitignored）；
 `profiles/perplexity/**/kvarn-kXvX/**`（gitignored）；`AGENTS.md`、`~/.qoder/skills/codebase-memory/SKILL.md`；
 計劃書 v14 + 附錄 D-14。
@@ -504,10 +506,11 @@ k4v4/k5v5 的磁盘检查点可同 tag。**实测该隐患被目录名兜住**�
 WP0.5-A 定案 / WP0.5-B（代理 + 正式）/ WP0.5-C / WP1 / WP2 / **WP3 全部（①·②·③·④·⑥）** / WP4 / WP5 全部。
 
 ### 4.3 不要做
-不动 `.worktrees/{m5a,wp1,wp2,wp3}`；不重配 `build-port`（一律按目标构建）；**不提交**（用户约束）。
+不动 `.worktrees/{m5a,wp1,wp2,wp3}`；不重配 `build-port`（一律按目标构建）；**未经明确要求不提交**（用户约束；本轮用户已明确要求提交）。
 
 > **订正（2026-10-08）**：上句的「不提交」是当时的用户约束；用户当日指示「先提交再继续进行」⇒ 08-03/08-04/08-05
-> 的改动已提交（`fe76ad42` test / `6aea191b` docs）。**本次文档归档精简本身仍未提交**（除非另行要求）。
+> 的改动已提交（`fe76ad42` test / `6aea191b` docs）。**文档归档精简与 P3b 亦已于同日提交**
+> （`6836b2de` feat / `3e780a41` docs / `efdb1dce` docs）。
 
 ### 4.4 历史 WP 状态（存档）
 
@@ -534,7 +537,7 @@ P3b 报告名并入 `KvarnBits`、P3c kvarn parser 单测）与 3 个待裁决�
 
 **当前状态（务必先核验，勿臆断）**
 1. **GPU 空闲**（显存 0 MiB）；`ninfer_tests/ninfer/ninfer-serve/ninfer-perplexity` 均**最新构建绿**。
-2. 工作树：本轮 08-03/08-04/08-05 的改动**已于 2026-10-08 提交**（用户当日要求先提交）——`fe76ad42` test（诊断仪器改造 + `tests.cmake` 的 `TEST_ARGS --quick` + 续列尾单测 marker 修复）、`6aea191b` docs（计划书 v11→v13 + 本日志 08-03…08-05）。**本日志与计划书的归档精简本身仍未提交**。逐文件清单见归档 §D。
+2. 工作树：本轮 08-03/08-04/08-05 的改动**已于 2026-10-08 提交**（用户当日要求先提交）——`fe76ad42` test（诊断仪器改造 + `tests.cmake` 的 `TEST_ARGS --quick` + 续列尾单测 marker 修复）、`6aea191b` docs（计划书 v11→v13 + 本日志 08-03…08-05）。**文档归档精简与 P3b 亦已于同日提交（`3e780a41` docs / `6836b2de` feat / `efdb1dce` docs），工作树现干净**。逐文件清单见归档 §D。
 3. `ninfer_qwen3_5_kvarn_continuation_image_test` **host + device 段全绿**；`ninfer_kvarn_test` **全绿**（余量 65×）；
    `ninfer_qwen3_5_mtp_greedy_parity_real_test`（`--quick`）**Passed 130.68 s**、全扫可无 `--quick` 手动跑。
 
@@ -576,7 +579,7 @@ P3b 报告名并入 `KvarnBits`、P3c kvarn parser 单测）与 3 个待裁决�
 - 只跑 host 段/无设备测试时用 `CUDA_VISIBLE_DEVICES=99`（强制 0 设备 ⇒ 不掉显存）。
 - 模型（唯一，勿 glob）：`D:/ninfer/ninfer-precision-tail-package/model/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-vision-bf16-mtp.ninfer`。
 - **16 GB 显存**：跑前 `nvidia-smi` 确认只有 1 个计算进程；perplexity 走 default `--cuda-memory-policy`，实测峰值 11.7 GiB。
-- **不要提交**（用户约束：保留工作树）。不要动 `.worktrees/{m5a,wp1,wp2,wp3}`（与 kvarn 无关）与 `.deps/`（gitignore）。
+- **未经明确要求不要提交**（用户约束；本轮 2026-10-08 用户已明确要求提交，故工作树现干净）。不要动 `.worktrees/{m5a,wp1,wp2,wp3}`（与 kvarn 无关）与 `.deps/`（gitignore）。
 - 每次推进**追加**本文件 §3、WP 边界更新 §0 快照、把影响验收/未决项/风险的结论**回写计划书**。
 - 本轮新增了 `codebase-memory-port-auditor` 子代理（Tier 3，移植完整性/否定性结论审计）并改写了 `codebase-memory` skill；
   若新窗口看不到该 agent 类型，重开会话即可。结构性问题（"是否漏了调用点""是否未被使用"）**必须**用它，
