@@ -322,10 +322,41 @@ int main() {
     const ServeOptions k8v4 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "k8v4"});
     failures += check(k8v4.kv_cache == ninfer::KvCacheStorage::Fp8KeyNvfp4Value,
                       "--kv-dtype k8v4 did not select asymmetric K8V4 KV");
+    failures += check(defaults.kvarn_bits == ninfer::KvarnBits::Bits4,
+                      "the server KVarN width must default to k4v4");
+    const ServeOptions kvarn_bare = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "kvarn"});
+    failures += check(kvarn_bare.kv_cache == ninfer::KvCacheStorage::KvarnGroup128 &&
+                          kvarn_bare.kvarn_bits == ninfer::KvarnBits::Bits4,
+                      "bare --kv-dtype kvarn is not the k4v4 KVarN family default");
+    const ServeOptions kvarn4 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "kvarn:k4v4"});
+    failures += check(kvarn4.kv_cache == ninfer::KvCacheStorage::KvarnGroup128 &&
+                          kvarn4.kvarn_bits == ninfer::KvarnBits::Bits4,
+                      "--kv-dtype kvarn:k4v4 did not select the 4-bit KVarN body");
+    const ServeOptions kvarn5 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "kvarn:k5v5"});
+    failures += check(kvarn5.kv_cache == ninfer::KvCacheStorage::KvarnGroup128 &&
+                          kvarn5.kvarn_bits == ninfer::KvarnBits::Bits5,
+                      "--kv-dtype kvarn:k5v5 did not select the 5-bit KVarN body");
+    const ServeOptions kvarn6 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "kvarn:k6v6"});
+    failures += check(kvarn6.kv_cache == ninfer::KvCacheStorage::KvarnGroup128 &&
+                          kvarn6.kvarn_bits == ninfer::KvarnBits::Bits6,
+                      "--kv-dtype kvarn:k6v6 did not select the 6-bit KVarN body");
+    const ninfer::EngineOptions kvarn5_engine = make_engine_options(kvarn5);
+    failures += check(kvarn5_engine.kv_cache == ninfer::KvCacheStorage::KvarnGroup128 &&
+                          kvarn5_engine.kvarn_bits == ninfer::KvarnBits::Bits5,
+                      "the KVarN storage and packed width did not reach the Engine options");
+    for (const char* spelling : {"kvarn:k4v2", "kvarn:k3v3", "kvarn:k4v5", "kvarn:k7v7"}) {
+        bool rejected = false;
+        try {
+            (void)parse({"ninfer-serve", "model.ninfer", "--kv-dtype", spelling});
+        } catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "serve admitted a KVarN spelling outside the published widths");
+    }
     const std::string kv_help = serve_usage_text("ninfer-serve");
     failures += check(kv_help.find("nvfp4") != std::string::npos &&
                           kv_help.find("k8v4") != std::string::npos,
                       "serve help omits a production KV storage mode");
+    failures += check(kv_help.find("kvarn:k4v4|k5v5|k6v6") != std::string::npos,
+                      "serve help omits the published KVarN widths");
 
     // Every one of these parses without error whether or not the service carries it to the Engine,
     // so the mapping from parsed options to Engine options is what has to be checked.

@@ -244,6 +244,36 @@ int run_tests() {
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", "k8v4"});
     failures += check(k8v4.kv_cache == ninfer::KvCacheStorage::Fp8KeyNvfp4Value,
                       "--kv-dtype k8v4 did not select asymmetric K8V4 KV");
+    failures += check(memory_defaults.kvarn_bits == ninfer::KvarnBits::Bits4,
+                      "CLI KVarN width must default to k4v4");
+    const ninfer::cli::Options kvarn_bare =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", "kvarn"});
+    failures += check(kvarn_bare.kv_cache == ninfer::KvCacheStorage::KvarnGroup128 &&
+                          kvarn_bare.kvarn_bits == ninfer::KvarnBits::Bits4,
+                      "bare --kv-dtype kvarn is not the k4v4 KVarN family default");
+    const ninfer::cli::Options kvarn4 =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", "kvarn:k4v4"});
+    failures += check(kvarn4.kv_cache == ninfer::KvCacheStorage::KvarnGroup128 &&
+                          kvarn4.kvarn_bits == ninfer::KvarnBits::Bits4,
+                      "--kv-dtype kvarn:k4v4 did not select the 4-bit KVarN body");
+    const ninfer::cli::Options kvarn5 =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", "kvarn:k5v5"});
+    failures += check(kvarn5.kv_cache == ninfer::KvCacheStorage::KvarnGroup128 &&
+                          kvarn5.kvarn_bits == ninfer::KvarnBits::Bits5,
+                      "--kv-dtype kvarn:k5v5 did not select the 5-bit KVarN body");
+    const ninfer::cli::Options kvarn6 =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", "kvarn:k6v6"});
+    failures += check(kvarn6.kv_cache == ninfer::KvCacheStorage::KvarnGroup128 &&
+                          kvarn6.kvarn_bits == ninfer::KvarnBits::Bits6,
+                      "--kv-dtype kvarn:k6v6 did not select the 6-bit KVarN body");
+    for (const char* spelling : {"kvarn:k4v2", "kvarn:k3v3", "kvarn:k4v5", "kvarn:k7v7"}) {
+        failures +=
+            check(rejects([&] {
+                      (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype",
+                                   spelling});
+                  }),
+                  "CLI admitted a KVarN spelling outside the published K=V widths");
+    }
     const std::string help = ninfer::cli::usage_text("ninfer-cli");
     failures += check(parse({"ninfer-cli", "model.ninfer", "--prompt", "x"}).rope_yarn_factor ==
                           1.0F,
@@ -342,6 +372,8 @@ int run_tests() {
     failures +=
         check(help.find("nvfp4") != std::string::npos && help.find("k8v4") != std::string::npos,
               "CLI help omits a production KV storage mode");
+    failures += check(help.find("kvarn:k4v4|k5v5|k6v6") != std::string::npos,
+                      "CLI help omits the published KVarN widths");
     const ninfer::cli::Options route_defaults =
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello"});
     failures += check(!route_defaults.prefill_cublas && route_defaults.prefill_cublas_projections &&
