@@ -20,7 +20,8 @@ English reference text, English long-form text, Chinese reference text, and NInf
 
 The default evaluation uses a 4,096-token context and a 2,048-token stride. Use `--context` and
 `--stride` to change that protocol, or score one UTF-8 file with `--text FILE`. The available Main
-KV representations are `bf16`, `int8`, `fp8`, `rk8v4`, `rk4v4`, `nvfp4`, and `k8v4`.
+KV representations are `bf16`, `int8`, `fp8`, `rk8v4`, `rk4v4`, `nvfp4`, `k8v4`, and KVarN
+`kvarn:k4v4`, `kvarn:k5v5`, `kvarn:k6v6` (the bare spelling `kvarn` is `kvarn:k4v4`).
 
 `--kv-tail-tokens N` enables the exact KV tail: the newest `N` tokens of every sequence stay
 unquantized (BF16) in a second pool and attention merges an exact tail partial with the quantized
@@ -30,7 +31,8 @@ corpus twice, at `--kv-tail-tokens 0` and at the chosen `N`, and comparing the p
 is implemented for the storages whose decoded key plane is in original coordinates — `bf16` and the
 INT8 family (`int8`, `rk8v4`, `rk4v4`, `rk4v4-e8`, `rk2v4-e8`); the rotated-value formats `fp8`,
 `nvfp4` and `k8v4` allocate the pool but no attention route reads or writes it, so the tail is inert
-there and a tail-on run of those bytes is identical to tail-off.
+there and a tail-on run of those bytes is identical to tail-off; `kvarn:*` rejects the tail outright
+rather than allocating it unused.
 
 The tail merge is implemented only on the small-T attention route, which the causal-scoring pass
 reaches only for a query width of eight or fewer tokens; the default 1024-wide score tile runs the

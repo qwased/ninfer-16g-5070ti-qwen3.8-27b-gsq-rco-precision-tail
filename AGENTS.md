@@ -169,6 +169,34 @@ statement is individually true. For every implementation task:
    Disclose remaining uncertainty without silently making it a new requirement.
    Disclosure does not excuse unmet completion conditions.
 
+## Durable progress record
+
+Long-running work must keep its progress on disk, not only in the conversation. Context is
+summarized and lost between sessions, so a conclusion that exists only in a chat transcript is not
+durable. For any multi-step effort — a port, a migration, a multi-work-package plan — maintain one
+progress record in the repository alongside the plan it serves, and treat it as part of the
+deliverable:
+
+1. **One record, one authority.** A single file next to the plan holds the live state; do not
+   scatter progress across several notes. The plan names the record, and the record names the plan.
+
+2. **Log every step, including the ones that hurt.** Failures, rejected approaches, measurements
+   that contradict the plan, and unresolved items are recorded with the same care as successes.
+   An omitted adverse result is a lost result.
+
+3. **Update at every work-package boundary.** Refresh a status snapshot, append a dated entry with
+   the measured numbers, the exact commands, and the disposition, then write back to the plan any
+   conclusion that changes acceptance criteria, open decisions, or risks.
+
+4. **Measured reality wins.** When a measurement contradicts the plan, correct the plan and mark the
+   superseded claim rather than deleting it. Never narrow scope or reinterpret a criterion after
+   seeing an unfavorable result.
+
+5. **An unupdated record means the work package is not complete.**
+
+The current instance is the KVarN port: `kvarn-port-progress.md` is the record, and
+`kvarn-port-into-precision-tail-plan.md` §0.5 states the per-work-package protocol.
+
 ## Reference navigation
 
 Read the authority relevant to the current decision; this is not a mandatory reading list.
@@ -182,7 +210,7 @@ Read the authority relevant to the current decision; this is not a mandatory rea
 | Op contracts, implementation ownership, numerical/performance qualification | `docs/maintainer/op-development.md` |
 | Test/benchmark commands and published performance | `tests/README.md`, `bench/README.md`, `docs/performance.md` |
 | Build system, toolchain and configuration options | `docs/maintainer/build-system.md`; host details in "Windows build environment" below |
-| KVarN port plan and precision-tail records | `kvarn-port-into-precision-tail-plan.md` (active); archived records in `docs/port-records/` (`PORT-BEELLAMA-SPEC.md`, `PORT-MEMORY.md`, `PORT-DOD.md`) |
+| KVarN port plan, progress record and precision-tail records | `kvarn-port-into-precision-tail-plan.md` (active plan; §0.5 record protocol), `kvarn-port-progress.md` (active progress record); archived records in `docs/port-records/` (`PORT-BEELLAMA-SPEC.md`, `PORT-MEMORY.md`, `PORT-DOD.md`) |
 | In-tree C++ interface | `include/ninfer/engine.h`, `include/ninfer/types.h` |
 
 [Documentation map](docs/README.md) routes to narrower authorities when needed.

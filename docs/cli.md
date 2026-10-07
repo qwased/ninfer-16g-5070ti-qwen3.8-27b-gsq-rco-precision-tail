@@ -248,8 +248,8 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--device N` | CUDA device index | `0` |
 | `--devices A,B,...` | one pipeline stage per listed CUDA device (2 to 8, Linux; see the [README](../README.md#several-gpus-pipeline-stages---devices-ab)); overrides `--device` | none |
 | `--stage-layers A,B,...` | layers per stage, in `--devices` order; omitted means a split chosen from each device's free memory | memory-balanced |
-| `--kv-dtype bf16\|int8\|fp8\|rk8v4\|rk4v4\|rk4v4-e8\|nvfp4\|k8v4` | KV-cache storage. `rk8v4` is opt-in RotorQuant, `rk4v4` opt-in Lloyd-Max 4-bit keys and `rk4v4-e8` opt-in E8-lattice INT4 keys; all eight are accepted on this fork's sm_86/sm_89 targets | `bf16` |
-| `--kv-tail-tokens N` | keep the newest `N` tokens of each sequence unquantized in a device-only exact KV pool that attention merges with the quantized body; `0` disables the tail; merged for `bf16` and the INT8 family (`int8`, `rk8v4`, `rk4v4`, `rk4v4-e8`, `rk2v4-e8`) only, and allocated-but-inert for `fp8`, `nvfp4`, `k8v4` | `0` |
+| `--kv-dtype bf16\|int8\|fp8\|rk8v4\|rk4v4\|rk4v4-e8\|rk2v4-e8\|nvfp4\|k8v4\|kvarn:k4v4\|k5v5\|k6v6` | KV-cache storage. `rk8v4` is opt-in RotorQuant, `rk4v4` opt-in Lloyd-Max 4-bit keys, `rk4v4-e8` opt-in E8-lattice INT4 keys, and `kvarn:*` opt-in KVarN: keys and values packed at one shared code width into 128-token rotated records (the bare spelling `kvarn` is `kvarn:k4v4`). KVarN rejects `--kv-tail-tokens` and `--mtp-attention-window`. All are accepted on this fork's sm_86/sm_89 targets | `bf16` |
+| `--kv-tail-tokens N` | keep the newest `N` tokens of each sequence unquantized in a device-only exact KV pool that attention merges with the quantized body; `0` disables the tail; merged for `bf16` and the INT8 family (`int8`, `rk8v4`, `rk4v4`, `rk4v4-e8`, `rk2v4-e8`) only, and allocated-but-inert for `fp8`, `nvfp4`, `k8v4`; rejected for `kvarn:*` | `0` |
 | `--kv-tail-type bf16\|f16` | element type of the exact-tail ring. Both are 16-bit, so the pool size, page geometry and `MemorySummary` are identical; `f16` has 10 mantissa bits vs `bf16`'s 7 and is the default, `bf16` is the split-verification form | `f16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | `1..15` for MTP, DFlash and DFlash2 | unset |
@@ -342,7 +342,16 @@ indices: 31% smaller than `rk8v4`, within 3% of `nvfp4`'s size, better perplexit
 `rk4v4-e8` has `rk4v4`'s size but snaps each octet of a scaled G64 key group to the nearest E8
 lattice point before the codes are clamped to [-8, 7]; the coset bit is not stored, so per-value
 error is no better than plain INT4. `fp8` and `k8v4` are each beaten by `rk8v4` on size, speed and
-quality together, so neither has a niche. The prepared prompt must fit
+quality together, so neither has a niche.
+`kvarn:k4v4`, `kvarn:k5v5` and `kvarn:k6v6` are KVarN: one shared code width for keys and values,
+packed into 128-token records in a rotation-then-Hadamard domain that the Sinkhorn-balanced
+quantizer writes and attention decodes directly, with no separate dequantization pass. Measured on
+the 27B GSQ-RCO artifact at context 8192 over 229,348 scoring tokens, `k4v4` (274 B/token/KV head)
+reaches mean KLD 0.002120 against a `bf16` body — better than `rk4v4` (0.004426) and `nvfp4`
+(0.004385) while using fewer bytes, and better than `k8v4` (0.002688) at 32% fewer bytes; `k5v5`
+(338 B) reaches 0.001432 and `k6v6` (402 B) 0.001233. Decode speed is within 0.5% of `bf16` for
+`k4v4` and 2.8% for `k6v6`. `kvarn:*` requires D256 heads and is admitted on a single rank only;
+the exact KV tail and `--mtp-attention-window` are not supported with it. The prepared prompt must fit
 `--max-context`; generation stops at the remaining context capacity when necessary.
 `--kv-capacity N` controls the shared physical Main Text KV pool independently and is rounded up to
 the 64-token page size. `--kv-capacity auto` loads the selected weights, measures the remaining GPU
