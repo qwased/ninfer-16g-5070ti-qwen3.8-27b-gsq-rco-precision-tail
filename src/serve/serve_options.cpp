@@ -50,7 +50,7 @@ std::uint64_t parse_u64(const char* text, const char* label) {
     return static_cast<std::uint64_t>(value);
 }
 
-KvCacheStorage parse_kv_dtype(const char* text) {
+KvCacheStorage parse_kv_dtype(const char* text, KvarnBits& kvarn_bits) {
     const std::string value(text);
     if (value == "bf16") { return KvCacheStorage::BFloat16; }
     if (value == "int8") { return KvCacheStorage::Int8Group64; }
@@ -65,6 +65,20 @@ KvCacheStorage parse_kv_dtype(const char* text) {
     if (value == "rk2v4-e8") { return KvCacheStorage::RotatedE8RootKeyInt4Value; }
     if (value == "nvfp4") { return KvCacheStorage::Nvfp4Group16; }
     if (value == "k8v4") { return KvCacheStorage::Fp8KeyNvfp4Value; }
+    // KVarN: rotated-domain K=V body at 128-token records. The bare `kvarn` spelling is the k4v4
+    // profile.
+    if (value == "kvarn" || value == "kvarn:k4v4") {
+        kvarn_bits = KvarnBits::Bits4;
+        return KvCacheStorage::KvarnGroup128;
+    }
+    if (value == "kvarn:k5v5") {
+        kvarn_bits = KvarnBits::Bits5;
+        return KvCacheStorage::KvarnGroup128;
+    }
+    if (value == "kvarn:k6v6") {
+        kvarn_bits = KvarnBits::Bits6;
+        return KvCacheStorage::KvarnGroup128;
+    }
     throw std::invalid_argument("invalid kv-dtype: " + value);
 }
 
@@ -194,7 +208,8 @@ std::string serve_usage_text(const char* argv0) {
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            "); alias --vram-headroom-mib\n"
            "  --kv-dtype T                  KV storage: bf16 (default), int8, fp8, rk8v4,\n"
-           "                                rk4v4, rk4v4-e8, rk2v4-e8, nvfp4 or k8v4\n"
+           "                                rk4v4, rk4v4-e8, rk2v4-e8, nvfp4, k8v4, or\n"
+           "                                kvarn:k4v4|k5v5|k6v6 (KVarN; bare kvarn = k4v4)\n"
            "  --kv-tail-tokens N            keep the newest N tokens of each sequence\n"
            "                                unquantized as an exact KV tail that attention\n"
            "                                merges with the quantized body (0 = off)\n"
@@ -806,7 +821,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--stage-layers") {
             options.stage_layers = parse_stage_layers(require_value("--stage-layers"));
         } else if (arg == "--kv-dtype") {
-            options.kv_cache = parse_kv_dtype(require_value("--kv-dtype"));
+            options.kv_cache = parse_kv_dtype(require_value("--kv-dtype"), options.kvarn_bits);
         } else if (arg == "--kv-tail-tokens") {
             options.kv_tail_tokens = parse_kv_tail_tokens(require_value("--kv-tail-tokens"));
         } else if (arg == "--kv-tail-type") {

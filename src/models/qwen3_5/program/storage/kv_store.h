@@ -371,7 +371,7 @@ public:
     materialize_transfer_destination(DeviceKVPageReservation& reservation,
                                      std::uint32_t committed_columns) {
         if (committed_columns == 0 ||
-            committed_columns > static_cast<std::uint32_t>(kPagedKVPageSize) || free_count_ == 0) {
+            committed_columns > physical_->geometry().page_tokens || free_count_ == 0) {
             throw std::invalid_argument("logical KV transfer destination is invalid");
         }
         DeviceKVPageLease lease   = physical_->materialize_one(reservation);
@@ -645,7 +645,7 @@ public:
         Page& page = require(handle);
         if (!page.device_replica || page.writer_references != 1 ||
             columns < page.committed_columns ||
-            columns > static_cast<std::uint32_t>(kPagedKVPageSize)) {
+            columns > physical_->geometry().page_tokens) {
             throw std::invalid_argument("logical KV committed coverage is not monotonic");
         }
         page.committed_columns = columns;
@@ -874,7 +874,8 @@ public:
     KVAddressSpaceStore(LogicalKVPageStore& pages, KVExecutionTablePool& tables,
                         std::uint32_t address_capacity, std::uint32_t page_capacity)
         : pages_(&pages), tables_(&tables), page_capacity_(page_capacity),
-          addresses_(address_capacity), free_(address_capacity),
+          page_tokens_(checked_page_tokens(pages)), addresses_(address_capacity),
+          free_(address_capacity),
           memberships_(checked_membership_cells(address_capacity, page_capacity)),
           free_count_(address_capacity) {
         if (address_capacity == 0 || page_capacity == 0 ||
@@ -1081,7 +1082,7 @@ public:
         if (entitlement < required_pages || entitlement > page_capacity_) {
             throw std::invalid_argument("KV retained-prefix entitlement is invalid");
         }
-        const std::uint32_t page_size    = static_cast<std::uint32_t>(kPagedKVPageSize);
+        const std::uint32_t page_size    = page_tokens_;
         const std::uint32_t full_pages   = frontier / page_size;
         const std::uint32_t tail_columns = frontier % page_size;
         if (staged_tail_release && tail_columns == 0) {
@@ -1213,7 +1214,7 @@ public:
         for (std::uint32_t page = 0; page < fork.full_pages_; ++page) {
             const LogicalKVPageHandle logical = membership(source, page);
             pages_->retain_reference(logical, false);
-            pages_->protect_coverage(logical, static_cast<std::uint32_t>(kPagedKVPageSize));
+            pages_->protect_coverage(logical, page_tokens_);
             membership(destination, page) = logical;
         }
         if (fork.tail_destination_) {
@@ -1266,7 +1267,7 @@ public:
             destination.page_count != 0 || destination.committed_frontier != 0) {
             throw std::logic_error("KV cached-prefix destination is not empty");
         }
-        const std::uint32_t page_size = static_cast<std::uint32_t>(kPagedKVPageSize);
+        const std::uint32_t page_size = page_tokens_;
         if (tail_columns >= page_size || tail_source.has_value() != (tail_columns != 0)) {
             throw std::invalid_argument("KV cached-prefix tail is inconsistent");
         }
@@ -1350,7 +1351,7 @@ public:
         for (std::uint32_t page = 0; page < full; ++page) {
             const LogicalKVPageHandle logical = fork.full_pages_[page];
             pages_->retain_reference(logical, false);
-            pages_->protect_coverage(logical, static_cast<std::uint32_t>(kPagedKVPageSize));
+            pages_->protect_coverage(logical, page_tokens_);
             membership(destination, page) = logical;
         }
         if (fork.tail_destination_) {
@@ -1360,7 +1361,7 @@ public:
         }
         destination.page_count = required_pages;
         destination.committed_frontier =
-            full * static_cast<std::uint32_t>(kPagedKVPageSize) + fork.tail_columns_;
+            full * page_tokens_ + fork.tail_columns_;
         destination.reservation = std::move(fork.page_reservation_);
         destination.row.emplace(std::move(*fork.row_));
         fork.row_.reset();
@@ -1405,7 +1406,7 @@ public:
             throw std::logic_error("active KV snapshot frontier is not fully materialized");
         }
 
-        const std::uint32_t page_size = static_cast<std::uint32_t>(kPagedKVPageSize);
+        const std::uint32_t page_size = page_tokens_;
         KVActiveSnapshotShape shape{
             .full_pages   = frontier / page_size,
             .tail_columns = frontier % page_size,
@@ -1547,7 +1548,7 @@ public:
             const LogicalKVPageHandle logical = membership(source, page);
             if (pages_->writer_references(logical) != 0) { pages_->set_writer(logical, false); }
             pages_->retain_reference(logical, false);
-            pages_->protect_coverage(logical, static_cast<std::uint32_t>(kPagedKVPageSize));
+            pages_->protect_coverage(logical, page_tokens_);
             membership(destination, page) = logical;
         }
         if (snapshot.tail_destination_) {
@@ -1664,11 +1665,11 @@ public:
             throw std::invalid_argument("KV committed frontier is invalid");
         }
         if (frontier == address.committed_frontier) { return; }
-        const std::uint32_t page_size          = static_cast<std::uint32_t>(kPagedKVPageSize);
+        const std::uint32_t page_size          = page_tokens_;
         const std::uint32_t first_changed_page = address.committed_frontier / page_size;
         const std::uint32_t final_changed_page = (frontier - 1U) / page_size;
         for (std::uint32_t page = first_changed_page; page <= final_changed_page; ++page) {
-            const std::uint32_t begin   = page * static_cast<std::uint32_t>(kPagedKVPageSize);
+            const std::uint32_t begin   = page * page_tokens_;
             const std::uint32_t columns = std::min(page_size, frontier - begin);
             if (columns > pages_->committed_columns(membership(address, page))) {
                 pages_->commit_coverage(membership(address, page), columns);
@@ -1697,7 +1698,7 @@ public:
         };
         if (target != 0) {
             const std::uint32_t columns =
-                frontier - (target - 1U) * static_cast<std::uint32_t>(kPagedKVPageSize);
+                frontier - (target - 1U) * page_tokens_;
             if (tail_changes(columns) &&
                 !pages_->can_destructive_truncate(membership(address, target - 1U), columns)) {
                 throw std::logic_error("KV truncate would overwrite protected coverage");
@@ -1712,7 +1713,7 @@ public:
         }
         if (target != 0) {
             const std::uint32_t columns =
-                frontier - (target - 1U) * static_cast<std::uint32_t>(kPagedKVPageSize);
+                frontier - (target - 1U) * page_tokens_;
             if (tail_changes(columns)) {
                 pages_->destructive_truncate(membership(address, target - 1U), columns);
             }
@@ -1736,7 +1737,7 @@ public:
         }
         if (target != 0) {
             const std::uint32_t columns =
-                frontier - (target - 1U) * static_cast<std::uint32_t>(kPagedKVPageSize);
+                frontier - (target - 1U) * page_tokens_;
             const LogicalKVPageHandle tail = membership(address, target - 1U);
             if (columns != pages_->committed_columns(tail) &&
                 !(tail_host_replica_will_be_released
@@ -1765,7 +1766,7 @@ public:
         }
         if (target != 0) {
             const std::uint32_t columns =
-                frontier - (target - 1U) * static_cast<std::uint32_t>(kPagedKVPageSize);
+                frontier - (target - 1U) * page_tokens_;
             const LogicalKVPageHandle tail = membership(address, target - 1U);
             if (columns != pages_->committed_columns(tail)) {
                 pages_->destructive_truncate_inactive(tail, columns);
@@ -1937,6 +1938,12 @@ private:
         bool active   = false;
     };
 
+    [[nodiscard]] static std::uint32_t checked_page_tokens(const LogicalKVPageStore& pages) {
+        const std::uint32_t tokens = pages.physical_pool().geometry().page_tokens;
+        if (tokens == 0) { throw std::invalid_argument("KV page geometry has no page tokens"); }
+        return tokens;
+    }
+
     [[nodiscard]] static std::size_t checked_membership_cells(std::uint32_t addresses,
                                                               std::uint32_t pages) {
         if (pages != 0 && addresses > std::numeric_limits<std::size_t>::max() / pages) {
@@ -1945,8 +1952,8 @@ private:
         return static_cast<std::size_t>(addresses) * pages;
     }
 
-    [[nodiscard]] static std::uint32_t pages_for_tokens(std::uint32_t tokens) noexcept {
-        return tokens == 0 ? 0U : 1U + (tokens - 1U) / static_cast<std::uint32_t>(kPagedKVPageSize);
+    [[nodiscard]] std::uint32_t pages_for_tokens(std::uint32_t tokens) const noexcept {
+        return tokens == 0 ? 0U : 1U + (tokens - 1U) / page_tokens_;
     }
 
     [[nodiscard]] static std::uint32_t next_generation(std::uint32_t generation) noexcept {
@@ -1970,10 +1977,10 @@ private:
                 }
                 for (std::uint32_t page = 0; page < pages_for_tokens(address.checkpoint_frontier);
                      ++page) {
-                    const std::uint32_t begin = page * static_cast<std::uint32_t>(kPagedKVPageSize);
-                    pages_->protect_coverage(membership(address, page),
-                                             std::min(static_cast<std::uint32_t>(kPagedKVPageSize),
-                                                      address.checkpoint_frontier - begin));
+                    const std::uint32_t begin = page * page_tokens_;
+                    pages_->protect_coverage(
+                        membership(address, page),
+                        std::min(page_tokens_, address.checkpoint_frontier - begin));
                 }
             }
         } catch (...) { std::terminate(); }
@@ -2051,6 +2058,11 @@ private:
     LogicalKVPageStore* pages_    = nullptr;
     KVExecutionTablePool* tables_ = nullptr;
     std::uint32_t page_capacity_  = 0;
+    // Tokens one physical page of this store's pool holds. Pre-existing formats keep 64; KVarN's
+    // record spans a 128-token group, so its body pages hold 128. Every page/token conversion here
+    // derives its stride from this rather than `kPagedKVPageSize`, or a 128-token body would be
+    // sized and addressed as if it held 64.
+    std::uint32_t page_tokens_    = kPagedKVPageSize;
     std::vector<Address> addresses_;
     std::vector<std::uint32_t> free_;
     std::vector<LogicalKVPageHandle> memberships_;

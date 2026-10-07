@@ -181,6 +181,9 @@ std::string hybrid_cache_fingerprint(const EngineOptions& options, const std::st
            std::to_string(error ? 0LL : static_cast<long long>(time.time_since_epoch().count()));
     out += ";signature=" + signature;
     out += ";kv=" + std::to_string(static_cast<int>(options.kv_cache));
+    // KVarN's code width is part of the format identity: k4v4 and k5v5 share the storage value but
+    // not the stored bytes.
+    out += ";kvbn=" + std::to_string(static_cast<int>(options.kvarn_bits));
     out += ";kvt=" + std::to_string(options.kv_tail_tokens);
     out += options.kv_tail_type == KvTailType::Float16 ? ";kvtt=f16" : ";kvtt=bf16";
     out += ";speculative=" + std::to_string(static_cast<int>(options.speculative.backend));

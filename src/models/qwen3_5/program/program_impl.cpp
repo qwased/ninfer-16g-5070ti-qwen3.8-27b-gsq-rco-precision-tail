@@ -624,7 +624,7 @@ std::vector<ScoredTarget> ProgramImpl::causal_score(PreparedPromptData&& prompt,
     const auto token_count                     = static_cast<std::uint32_t>(token_count_size);
     const std::uint32_t predictor_count        = token_count - 1U;
     const std::uint32_t scored_predictor_begin = first_target - 1U;
-    const std::uint32_t entitlement            = kv_pages_for_frontier(predictor_count);
+    const std::uint32_t entitlement            = kv_pages_for_frontier(predictor_count, kv_storage);
     if (entitlement == 0) { throw std::logic_error("causal score has no KV entitlement"); }
 
     std::optional<StateImageHandle> state;

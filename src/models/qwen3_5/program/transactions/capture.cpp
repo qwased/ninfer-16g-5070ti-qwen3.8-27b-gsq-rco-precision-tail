@@ -723,6 +723,7 @@ bool ProgramImpl::prepare_active_capture(ActiveCaptureTransaction& transaction) 
         }
     }
 
+    capture_sequence_kvarn_tail(sequence, transaction.source_state);
     state_store->freeze(transaction.source_state);
     if (transaction.state_placement == qwen3_5::CaptureStatePlacement::DeviceFork) {
         (void)state_store->begin_fork(transaction.source_state, transaction.destination_state);

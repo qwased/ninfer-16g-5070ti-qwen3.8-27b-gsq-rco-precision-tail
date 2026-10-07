@@ -17,7 +17,9 @@ std::uint64_t elapsed_ns(Clock::time_point started) noexcept;
 
 std::int32_t checked_i32(std::uint32_t value, const char* label);
 
-std::uint32_t kv_pages_for_frontier(std::uint32_t frontier) noexcept;
+// Pages `frontier` tokens occupy in the Main or Backend KV pool. The page size follows the storage
+// (KVarN records span a 128-token group); everything else keeps 64.
+std::uint32_t kv_pages_for_frontier(std::uint32_t frontier, KvCacheStorage storage) noexcept;
 
 std::size_t context_resource_index(runtime::ContextResourceClass resource);
 

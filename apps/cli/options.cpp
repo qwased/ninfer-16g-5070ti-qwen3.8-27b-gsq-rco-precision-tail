@@ -107,7 +107,7 @@ float parse_float(const char* text, std::string_view label, float minimum, float
     return static_cast<float>(value);
 }
 
-KvCacheStorage parse_kv_cache(std::string_view text) {
+KvCacheStorage parse_kv_cache(std::string_view text, KvarnBits& kvarn_bits) {
     if (text == "bf16") { return KvCacheStorage::BFloat16; }
     if (text == "int8") { return KvCacheStorage::Int8Group64; }
     if (text == "fp8") { return KvCacheStorage::Fp8E4M3Row256; }
@@ -121,6 +121,20 @@ KvCacheStorage parse_kv_cache(std::string_view text) {
     if (text == "rk2v4-e8") { return KvCacheStorage::RotatedE8RootKeyInt4Value; }
     if (text == "nvfp4") { return KvCacheStorage::Nvfp4Group16; }
     if (text == "k8v4") { return KvCacheStorage::Fp8KeyNvfp4Value; }
+    // KVarN: rotated-domain K=V body at 128-token records. The bare `kvarn` spelling is the k4v4
+    // profile.
+    if (text == "kvarn" || text == "kvarn:k4v4") {
+        kvarn_bits = KvarnBits::Bits4;
+        return KvCacheStorage::KvarnGroup128;
+    }
+    if (text == "kvarn:k5v5") {
+        kvarn_bits = KvarnBits::Bits5;
+        return KvCacheStorage::KvarnGroup128;
+    }
+    if (text == "kvarn:k6v6") {
+        kvarn_bits = KvarnBits::Bits6;
+        return KvCacheStorage::KvarnGroup128;
+    }
     throw std::invalid_argument("invalid kv-dtype: " + std::string(text));
 }
 
@@ -196,7 +210,8 @@ std::string usage_text(const char* argv0) {
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            "); alias --vram-headroom-mib\n"
            "  --kv-dtype T                  bf16 (default), int8, fp8, rk8v4, rk4v4,\n"
-           "                                rk4v4-e8, rk2v4-e8, nvfp4 or k8v4\n"
+           "                                rk4v4-e8, rk2v4-e8, nvfp4, k8v4, or\n"
+           "                                kvarn:k4v4|k5v5|k6v6 (KVarN; bare kvarn = k4v4)\n"
            "  --kv-tail-tokens N            keep the newest N tokens of each sequence\n"
            "                                unquantized as an exact KV tail that attention\n"
            "                                merges with the quantized body (0 = off)\n"
@@ -385,7 +400,7 @@ Options parse_options(int argc, char** argv) {
         } else if (arg == "--stage-layers") {
             options.stage_layers = parse_stage_layers(value(arg));
         } else if (arg == "--kv-dtype") {
-            options.kv_cache = parse_kv_cache(value(arg));
+            options.kv_cache = parse_kv_cache(value(arg), options.kvarn_bits);
         } else if (arg == "--kv-tail-tokens") {
             options.kv_tail_tokens = parse_kv_tail_tokens(value(arg));
         } else if (arg == "--kv-tail-type") {

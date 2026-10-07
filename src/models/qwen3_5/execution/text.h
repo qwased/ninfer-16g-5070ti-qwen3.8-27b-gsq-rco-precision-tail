@@ -119,6 +119,10 @@ public:
 
     void set_mtp_proposal_extent(std::uint32_t extent) noexcept { mtp_proposal_extent_ = extent; }
 
+    // KVarN only: while set, attention appends to the writable tail instead of encoding completed
+    // groups, so a rejected speculative suffix can be overwritten.
+    void set_kvarn_provisional(bool provisional) noexcept { kvarn_provisional_ = provisional; }
+
     void set_linear_state_slots(std::int32_t source_slot, std::int32_t destination_slot);
     void set_gdn_state_action(GdnStateAction action, const GdnReplayRecords* replay_records);
 
@@ -284,6 +288,7 @@ private:
     std::int64_t prefill_split_frontier_      = -1;
     Tensor* rewrite_checkpoint_hidden_output_ = nullptr;
     std::uint32_t mtp_proposal_extent_        = 0;
+    bool kvarn_provisional_                   = false;
     std::span<const cudaEvent_t> layer_ready_;
 
     const Weight* embed_                        = nullptr;

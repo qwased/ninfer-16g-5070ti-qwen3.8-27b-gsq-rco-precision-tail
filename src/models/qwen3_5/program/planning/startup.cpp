@@ -18,6 +18,7 @@
 #include "ninfer/ops/linear_topk.h"
 #include "ninfer/ops/gdn_gating_proj.h"
 #include "ninfer/ops/gdn_input_proj.h"
+#include "ninfer/ops/kvarn_attention.h"
 #include "ninfer/ops/linear_add.h"
 #include "ninfer/ops/linear_swiglu.h"
 #include "ninfer/ops/sampling.h"
@@ -68,9 +69,12 @@ std::int32_t checked_i32(std::uint64_t value, const char* label) {
     return static_cast<std::int32_t>(value);
 }
 
-std::uint32_t page_count(std::uint32_t capacity) {
-    if (capacity == 0) { throw std::invalid_argument("Paged KV capacity must be positive"); }
-    return 1U + (capacity - 1U) / static_cast<std::uint32_t>(kPagedKVPageSize);
+std::uint32_t page_count(std::uint32_t capacity,
+                         std::uint32_t page_tokens = static_cast<std::uint32_t>(kPagedKVPageSize)) {
+    if (capacity == 0 || page_tokens == 0) {
+        throw std::invalid_argument("Paged KV capacity must be positive");
+    }
+    return 1U + (capacity - 1U) / page_tokens;
 }
 
 // The Main KV pages a plan may hold. The Legacy cache retains context in continuations whose pages
@@ -78,12 +82,13 @@ std::uint32_t page_count(std::uint32_t capacity) {
 // page no active lease holds as cached blocks, so only the token capacity representation (pages *
 // page size in int32) bounds it and automatic sizing spends the free VRAM on cache.
 std::uint64_t maximum_main_page_groups(std::uint32_t concurrency, std::uint32_t logical_pages,
+                                       std::uint32_t page_tokens,
                                        const ContextCacheOptions& cache) {
     std::uint64_t maximum = static_cast<std::uint64_t>(concurrency) * logical_pages;
     if (cache.enabled && cache.mode == ContextCacheMode::Hybrid) {
         maximum = std::max<std::uint64_t>(
             maximum, static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max()) /
-                         static_cast<std::uint64_t>(kPagedKVPageSize));
+                         static_cast<std::uint64_t>(page_tokens));
     }
     if (maximum > std::numeric_limits<std::uint32_t>::max()) {
         throw std::overflow_error("maximum Main KV page count exceeds uint32");
@@ -132,13 +137,14 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
         "Qwen3.5 StateImage slot count exceeds int32");
     const auto effective_prefill_chunk =
         static_cast<std::int32_t>(std::min(plan.prefill_chunk, plan.capacity));
-    const std::uint32_t logical_pages  = page_count(plan.capacity);
+    const std::uint32_t page_tokens = static_cast<std::uint32_t>(kv_page_tokens(plan.kv_storage));
+    const std::uint32_t logical_pages  = page_count(plan.capacity, page_tokens);
     const std::uint32_t physical_pages = plan.main_page_groups;
     const std::uint64_t mtp_extra_pages =
         plan.features.mtp()
             ? static_cast<std::uint64_t>(plan.max_concurrency) *
-                  ((static_cast<std::uint64_t>(plan.draft_window - 1U) + kPagedKVPageSize - 1U) /
-                   static_cast<std::uint32_t>(kPagedKVPageSize))
+                  ((static_cast<std::uint64_t>(plan.draft_window - 1U) + page_tokens - 1U) /
+                   page_tokens)
             : 0ULL;
     const std::uint32_t mtp_physical_pages = static_cast<std::uint32_t>(
         checked_i32(static_cast<std::uint64_t>(physical_pages) + mtp_extra_pages,
@@ -189,6 +195,7 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
             .kv_heads                  = dimension(config.attention->num_key_value_heads),
             .attention_head_dim        = dimension(config.attention->head_dim),
             .kv_storage                = plan.kv_storage,
+            .kvarn_bits                = plan.kvarn_bits,
             .enable_mtp                = plan.features.mtp(),
             .kv_table_rows             = static_cast<std::int32_t>(plan.max_concurrency),
             .text_physical_page_groups = physical_pages,
@@ -230,6 +237,16 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                 .head_dim = dimension(draft->attention.head_dim),
             };
         }
+    }
+    if (plan.kv_storage == KvCacheStorage::KvarnGroup128) {
+        // KVarN's sink/tail live outside the paged records, so a continuation image carries them
+        // for the full-attention layers plus the MTP pool when it exists.
+        state_image_spec.kvarn = qwen3_5::KvarnContinuationStateSpec{
+            .text_layers = config.full_attention_layers,
+            .mtp_layers  = plan.features.mtp() ? 1U : 0U,
+            .kv_heads    = dimension(config.attention->num_key_value_heads),
+            .head_dim    = dimension(config.attention->head_dim),
+        };
     }
     out.state_images =
         qwen3_5::plan_state_image_device_pool(builder_pointers, state_shards, state_image_spec);
@@ -406,6 +423,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
     const std::int32_t narrowest_drafts =
         *std::min_element(round_widths.begin(), round_widths.end()) - 1;
     const ops::CausalAttentionExecutionEnvelope text_envelope{1, plan.capacity};
+    const std::uint32_t page_tokens = static_cast<std::uint32_t>(kv_page_tokens(plan.kv_storage));
     // Prefill chunks of 17 to 64 rows may take the chunked small-T route over a long context.
     const ops::CausalAttentionExecutionEnvelope prefill_envelope{
         .min_visible_keys = 1, .max_visible_keys = plan.capacity, .small_prefill = true};
@@ -445,6 +463,21 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                         p.weight.qtype, p.weight.n, p.weight.k,
                         execution::residual_projection_policy(p, wide_verification), first, last)));
     };
+    // The attention workspace contract is Op-specific: a KVarN body keeps the current chunk in its
+    // own rotated frame and prices its own scratch.
+    const auto attention_workspace = [&](ops::CausalAttentionExecutionEnvelope envelope,
+                                         std::int32_t batch_size, std::int32_t min_width,
+                                         std::int32_t max_width) -> std::size_t {
+        if (plan.kv_storage == KvCacheStorage::KvarnGroup128) {
+            return ops::kvarn_attention_workspace_capacity_bytes(
+                dimension(config.attention->num_attention_heads), envelope, batch_size, min_width,
+                max_width);
+        }
+        return ops::causal_softmax_attention_workspace_capacity_bytes(
+            {dimension(config.attention->head_dim), dimension(config.attention->num_attention_heads),
+             dimension(config.attention->num_key_value_heads)},
+            plan.kv_storage, envelope, batch_size, min_width, max_width);
+    };
     const auto target_body = [&](WorkspaceLayoutBuilder& layout, std::int32_t first,
                                  std::int32_t last, TextPhase phase, GdnWorkspacePath path,
                                  std::int32_t batch_size, std::int32_t min_width,
@@ -463,12 +496,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                     scratch(layout, execution::attention_projection_workspace_bytes(*attention,
                                                                                     first, last));
                     (void)workspace::text_attention_results(layout, config, last);
-                    scratch(layout,
-                            ops::causal_softmax_attention_workspace_capacity_bytes(
-                                {dimension(config.attention->head_dim),
-                                 dimension(config.attention->num_attention_heads),
-                                 dimension(config.attention->num_key_value_heads)},
-                                plan.kv_storage, envelope, batch_size, min_width, max_width));
+                    scratch(layout, attention_workspace(envelope, batch_size, min_width, max_width));
                     add_scratch(layout, attention->output, first, last, wide_verification);
                 } else {
                     const auto& gdn = std::get<execution::GdnParameters>(block.mixer);
@@ -536,13 +564,9 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
         (void)workspace::mtp_attention_results(layout, config, tokens);
         if (plan.mtp_attention_window != 0) {
             (void)workspace::paged_kv_window(
-                layout, static_cast<std::int32_t>(page_count(plan.capacity)), tokens, 1);
+                layout, static_cast<std::int32_t>(page_count(plan.capacity, page_tokens)), tokens, 1);
         }
-        scratch(layout, ops::causal_softmax_attention_workspace_capacity_bytes(
-                            {dimension(config.attention->head_dim),
-                             dimension(config.attention->num_attention_heads),
-                             dimension(config.attention->num_key_value_heads)},
-                            plan.kv_storage, envelope, 1, tokens, tokens));
+        scratch(layout, attention_workspace(envelope, 1, tokens, tokens));
         (void)workspace::mtp_post_attention(layout, config, tokens);
         mtp_post_mixer(layout, tokens, tokens);
     };
@@ -578,11 +602,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
         matrix(layout, DType::BF16, dimension(config.attention->query_width()), 1);
         matrix(layout, DType::I32, 3, 1);
         matrix(layout, DType::BF16, dimension(config.attention->query_width()), 1);
-        scratch(layout, ops::causal_softmax_attention_workspace_capacity_bytes(
-                            {dimension(config.attention->head_dim),
-                             dimension(config.attention->num_attention_heads),
-                             dimension(config.attention->num_key_value_heads)},
-                            plan.kv_storage, text_envelope, 1, 1, 1));
+        scratch(layout, attention_workspace(text_envelope, 1, 1, 1));
         matrix(layout, DType::BF16, dimension(config.hidden_size), 1);
         matrix(layout, DType::BF16, dimension(config.hidden_size), 1);
         mtp_post_mixer(layout, 1, 1);
@@ -686,13 +706,9 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                 (void)workspace::mtp_attention_results(layout, config, tokens);
                 if (plan.mtp_attention_window != 0) {
                     (void)workspace::paged_kv_window(
-                        layout, static_cast<std::int32_t>(page_count(plan.capacity)), width, batch);
+                        layout, static_cast<std::int32_t>(page_count(plan.capacity, page_tokens)), width, batch);
                 }
-                scratch(layout, ops::causal_softmax_attention_workspace_capacity_bytes(
-                                    {dimension(config.attention->head_dim),
-                                     dimension(config.attention->num_attention_heads),
-                                     dimension(config.attention->num_key_value_heads)},
-                                    plan.kv_storage, verify_envelope, batch, width, width));
+                scratch(layout, attention_workspace(verify_envelope, batch, width, width));
                 (void)workspace::mtp_post_attention(layout, config, tokens);
                 mtp_post_mixer(layout, tokens, tokens);
             };
@@ -988,16 +1004,19 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
         }
         if (options.enable_vision) { unsupported("vision"); }
     }
-    const std::uint32_t logical_pages = page_count(options.max_context);
+    const std::uint32_t page_tokens =
+        static_cast<std::uint32_t>(kv_page_tokens(options.kv_cache));
+    const std::uint32_t logical_pages = page_count(options.max_context, page_tokens);
     const std::uint32_t minimum_pages = std::max(logical_pages, options.max_concurrency);
-    const std::uint64_t maximum_pages64 =
-        maximum_main_page_groups(options.max_concurrency, logical_pages, options.context_cache);
+    const std::uint64_t maximum_pages64 = maximum_main_page_groups(
+        options.max_concurrency, logical_pages, page_tokens, options.context_cache);
     switch (options.kv_capacity.mode) {
     case KvCapacityMode::Explicit: {
         if (options.kv_capacity.explicit_tokens < options.max_context) {
             throw std::invalid_argument("kv_capacity must be at least max_context");
         }
-        const std::uint32_t requested_pages = page_count(options.kv_capacity.explicit_tokens);
+        const std::uint32_t requested_pages =
+            page_count(options.kv_capacity.explicit_tokens, page_tokens);
         if (requested_pages < minimum_pages || requested_pages > maximum_pages64) {
             throw std::invalid_argument(
                 "kv_capacity is outside the usable range for max_context and max_concurrency");
@@ -1012,6 +1031,17 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
     if (options.speculative.mtp_attention_window != 0 &&
         options.speculative.backend != SpeculativeBackend::Mtp) {
         throw std::invalid_argument("an MTP attention window requires the MTP backend");
+    }
+    if (options.kv_cache == KvCacheStorage::KvarnGroup128) {
+        // Both options rewrite how history rows are addressed, and neither is wired into the KVarN
+        // body yet. Reject them instead of silently ignoring the request.
+        if (options.kv_tail_tokens != 0) {
+            throw std::invalid_argument(
+                "KVarN does not support the exact KV tail yet; --kv-tail-tokens must be 0");
+        }
+        if (options.speculative.mtp_attention_window != 0) {
+            throw std::invalid_argument("KVarN does not support --mtp-attention-window yet");
+        }
     }
     switch (options.speculative.backend) {
     case SpeculativeBackend::None:
@@ -1077,7 +1107,8 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->capacity            = inputs.capacity;
     impl->main_page_groups    = main_page_groups;
     impl->kv_capacity         = static_cast<std::uint32_t>(checked_i32(
-        static_cast<std::uint64_t>(main_page_groups) * static_cast<std::uint32_t>(kPagedKVPageSize),
+        static_cast<std::uint64_t>(main_page_groups) *
+            static_cast<std::uint32_t>(kv_page_tokens(inputs.kv_storage)),
         "resolved Paged KV capacity exceeds int32"));
     impl->max_concurrency     = inputs.max_concurrency;
     impl->prefill_chunk       = inputs.prefill_chunk;
@@ -1100,6 +1131,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->device              = inputs.device;
     impl->context_cache       = inputs.context_cache;
     impl->kv_storage          = inputs.kv_storage;
+    impl->kvarn_bits          = inputs.kvarn_bits;
     impl->kv_tail_tokens      = inputs.kv_tail_tokens;
     impl->kv_tail_type        = inputs.kv_tail_type;
     impl->persistent          = persistent_layout(*impl);
@@ -1135,7 +1167,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
                                   *impl->context_cache.max_private_continuations,
                                   *impl->context_cache.max_shared_prefixes, impl->capacity,
                                   impl->persistent.state_images.host.image_bytes,
-                                  impl->persistent.host_kv_text_page_stride);
+                                  impl->persistent.host_kv_text_page_stride, impl->kv_storage);
     }
     impl->workspace           = build_workspace_plan(*impl);
     if (impl->use_cuda_graph) {
@@ -1258,7 +1290,8 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
 
 void resolve_host_cache_budget(ContextCacheOptions& cache, std::uint32_t private_capacity,
                                std::uint32_t shared_capacity, std::uint32_t capacity,
-                               std::uint64_t state_image_bytes, std::uint64_t host_kv_group_bytes) {
+                               std::uint64_t state_image_bytes, std::uint64_t host_kv_group_bytes,
+                               KvCacheStorage storage) {
     const std::uint64_t budget     = *cache.host_cache_budget_bytes;
     const std::uint64_t configured = cache.max_long_anchors_per_continuation.value_or(0);
     // The budget is the ceiling for the whole retention tier, so it decides the anchor count only
@@ -1279,13 +1312,12 @@ void resolve_host_cache_budget(ContextCacheOptions& cache, std::uint32_t private
         // that can ever be useful is bounded by the Main pages the logical capacity admits: a
         // StateImage buys back `buyback_tokens` tokens of re-prefill (page-aligned, so priced in
         // whole page groups).
+        const std::uint64_t page_tokens =
+            static_cast<std::uint64_t>(kv_page_tokens(storage));
         const std::uint64_t buyback_tokens =
-            std::max<std::uint64_t>(1, state_image_bytes / host_kv_group_bytes) *
-            static_cast<std::uint64_t>(kPagedKVPageSize);
-        const std::uint64_t capacity_pages =
-            1ULL + (capacity - 1ULL) / static_cast<std::uint64_t>(kPagedKVPageSize);
-        const std::uint64_t buyback_pages =
-            1ULL + (buyback_tokens - 1ULL) / static_cast<std::uint64_t>(kPagedKVPageSize);
+            std::max<std::uint64_t>(1, state_image_bytes / host_kv_group_bytes) * page_tokens;
+        const std::uint64_t capacity_pages = 1ULL + (capacity - 1ULL) / page_tokens;
+        const std::uint64_t buyback_pages  = 1ULL + (buyback_tokens - 1ULL) / page_tokens;
         const std::uint64_t ceiling =
             capacity_pages / buyback_pages > 2ULL ? capacity_pages / buyback_pages - 2ULL : 0ULL;
         const std::uint64_t headroom_images =
@@ -1382,6 +1414,7 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .ngram_min_match            = options.speculative.ngram_min_match,
         .speculative_backend        = options.speculative.backend,
         .kv_storage                 = options.kv_cache,
+        .kvarn_bits                 = options.kvarn_bits,
         .kv_tail_tokens             = options.kv_tail_tokens,
         .kv_tail_type               = options.kv_tail_type,
         .proposal_head              = options.speculative.proposal_head,
@@ -1395,16 +1428,18 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .device                     = options.device,
         .context_cache              = options.context_cache,
     };
-    const std::uint32_t logical_pages = page_count(inputs.capacity);
+    const std::uint32_t page_tokens =
+        static_cast<std::uint32_t>(kv_page_tokens(inputs.kv_storage));
+    const std::uint32_t logical_pages = page_count(inputs.capacity, page_tokens);
     const std::uint32_t minimum_pages = std::max(logical_pages, inputs.max_concurrency);
-    const auto maximum_pages          = static_cast<std::uint32_t>(
-        maximum_main_page_groups(inputs.max_concurrency, logical_pages, inputs.context_cache));
+    const auto maximum_pages          = static_cast<std::uint32_t>(maximum_main_page_groups(
+        inputs.max_concurrency, logical_pages, page_tokens, inputs.context_cache));
 
     auto planner     = std::make_unique<qwen3_5::detail::SequencePlannerImpl>();
     planner->inputs  = inputs;
     planner->minimum = build_sequence_candidate(inputs, minimum_pages);
     planner->curve   = runtime::SequenceCapacityCurve{
-          .main_page_tokens                     = static_cast<std::uint32_t>(kPagedKVPageSize),
+          .main_page_tokens                     = page_tokens,
           .minimum_main_page_groups             = minimum_pages,
           .maximum_main_page_groups             = maximum_pages,
           .minimum_device_reservation_bytes     = planner->minimum->device_reservation_bytes,

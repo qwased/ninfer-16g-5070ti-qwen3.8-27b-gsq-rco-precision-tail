@@ -263,14 +263,14 @@ RequestBasePlan ProgramImpl::plan_request(const PreparedPromptData& prompt,
             base->summary.prompt_tokens + (base->summary.effective_output_tokens == 0
                                                ? 0U
                                                : base->summary.effective_output_tokens - 1U);
-        base->text_kv_page_entitlement = kv_pages_for_tokens(reserved_context_tokens);
+        base->text_kv_page_entitlement = kv_pages_for_tokens(reserved_context_tokens, kv_storage);
         if (speculative_backend == SpeculativeBackend::Mtp) {
             const std::uint32_t mtp_tokens    = static_cast<std::uint32_t>(std::min<std::uint64_t>(
                 capacity,
                 static_cast<std::uint64_t>(reserved_context_tokens) + draft_window - 1ULL));
-            base->backend_kv_page_entitlement = kv_pages_for_tokens(mtp_tokens);
+            base->backend_kv_page_entitlement = kv_pages_for_tokens(mtp_tokens, kv_storage);
         } else if (speculative_backend == SpeculativeBackend::DFlash) {
-            base->backend_kv_page_entitlement = kv_pages_for_tokens(reserved_context_tokens);
+            base->backend_kv_page_entitlement = kv_pages_for_tokens(reserved_context_tokens, kv_storage);
         }
     } else {
         // The lease covers a bounded window of the remaining output, not the whole client budget:
@@ -282,17 +282,17 @@ RequestBasePlan ProgramImpl::plan_request(const PreparedPromptData& prompt,
         const std::uint32_t widest             = widest_verify_window();
         const std::uint32_t main_window_tokens = std::max(leased_output_tokens, widest + 1U);
         base->text_kv_page_entitlement         = kv_pages_for_tokens(
-            std::min(capacity, base->summary.prompt_tokens + main_window_tokens - 1U));
+            std::min(capacity, base->summary.prompt_tokens + main_window_tokens - 1U), kv_storage);
         if (speculative_backend == SpeculativeBackend::Mtp) {
             const std::uint32_t backend_window_tokens =
                 std::max(leased_output_tokens,
                          widest + std::min(draft_window, qwen3_5::kMtpDecodeMaximumDrafts));
             base->backend_kv_page_entitlement = kv_pages_for_tokens(
-                std::min(capacity, base->summary.prompt_tokens + backend_window_tokens - 1U));
+                std::min(capacity, base->summary.prompt_tokens + backend_window_tokens - 1U), kv_storage);
         } else if (speculative_backend == SpeculativeBackend::DFlash) {
             const std::uint32_t backend_window_tokens = std::max(leased_output_tokens, widest + 1U);
             base->backend_kv_page_entitlement         = kv_pages_for_tokens(
-                std::min(capacity, base->summary.prompt_tokens + backend_window_tokens - 1U));
+                std::min(capacity, base->summary.prompt_tokens + backend_window_tokens - 1U), kv_storage);
         }
     }
     detail::PhysicalDeviceResources root_active{
@@ -860,13 +860,13 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
         add_state_transfer(runtime::ContextTransferDirection::HostToDevice);
         add_kv_transfer(runtime::ContextResourceClass::MainKV,
                         runtime::ContextTransferDirection::HostToDevice, *text_kv_pages,
-                        kv_pages_for_tokens(plan->disk_restore_frontier));
+                        kv_pages_for_tokens(plan->disk_restore_frontier, kv_storage));
         const std::uint32_t backend_frontier =
             backend_frontier_at(speculative_backend, plan->disk_restore_frontier);
         if (backend_kv_pages && backend_frontier != 0) {
             add_kv_transfer(runtime::ContextResourceClass::BackendKV,
                             runtime::ContextTransferDirection::HostToDevice, *backend_kv_pages,
-                            kv_pages_for_tokens(backend_frontier));
+                            kv_pages_for_tokens(backend_frontier, kv_storage));
         }
     }
     if (source != nullptr || shared_source != nullptr) {
@@ -910,7 +910,7 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
                 partial_tail_cow_required(*backend_kv_addresses, *source_kv->backend,
                                           backend_frontier);
         }
-        const std::uint32_t main_required = kv_pages_for_tokens(plan->reuse_base);
+        const std::uint32_t main_required = kv_pages_for_tokens(plan->reuse_base, kv_storage);
         const std::uint32_t main_device =
             device_kv_prefix_pages(*text_kv_addresses, source_kv->text, plan->reuse_base);
         if (main_device > main_required) {
@@ -928,7 +928,7 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
                             main_missing, main_contiguous_runs);
         }
         if (source_kv->backend && backend_frontier != 0) {
-            const std::uint32_t backend_required = kv_pages_for_tokens(backend_frontier);
+            const std::uint32_t backend_required = kv_pages_for_tokens(backend_frontier, kv_storage);
             const std::uint32_t backend_device   = device_kv_prefix_pages(
                 *backend_kv_addresses, *source_kv->backend, backend_frontier);
             if (backend_device > backend_required) {
@@ -947,7 +947,7 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
             }
         }
         if (plan->text_prefix_fork_required) {
-            const std::uint32_t page_size = static_cast<std::uint32_t>(kPagedKVPageSize);
+            const std::uint32_t page_size = device_kv_tokens_per_page();
             if (plan->reuse_base % page_size != 0) {
                 add_kv_transfer(runtime::ContextResourceClass::MainKV,
                                 runtime::ContextTransferDirection::DeviceToDevice, *text_kv_pages,
@@ -977,11 +977,11 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
             throw std::logic_error("retained source has no KV address space");
         }
         const std::uint32_t main_full_pages =
-            plan->reuse_base / static_cast<std::uint32_t>(kPagedKVPageSize);
+            plan->reuse_base / device_kv_tokens_per_page();
         const std::uint32_t backend_frontier =
             backend_frontier_at(speculative_backend, plan->reuse_base);
         const std::uint32_t backend_full_pages =
-            backend_frontier / static_cast<std::uint32_t>(kPagedKVPageSize);
+            backend_frontier / device_kv_tokens_per_page();
         if (main_full_pages > active.main_kv_pages ||
             backend_full_pages > active.backend_kv_pages) {
             throw std::logic_error("retained prefix exceeds its active KV entitlement");
@@ -996,7 +996,7 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
                 },
         };
         detail::PhysicalResources source_replica_additions;
-        const std::uint32_t main_required = kv_pages_for_tokens(plan->reuse_base);
+        const std::uint32_t main_required = kv_pages_for_tokens(plan->reuse_base, kv_storage);
         const std::uint32_t main_device =
             device_kv_prefix_pages(*text_kv_addresses, source_kv->text, plan->reuse_base);
         if (main_device > main_required) {
@@ -1005,7 +1005,7 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
         source_replica_additions.device.main_kv_pages = main_required - main_device;
         if (source_kv->backend) {
             const std::uint32_t backend_required =
-                backend_frontier == 0 ? 0U : kv_pages_for_tokens(backend_frontier);
+                backend_frontier == 0 ? 0U : kv_pages_for_tokens(backend_frontier, kv_storage);
             const std::uint32_t backend_device = device_kv_prefix_pages(
                 *backend_kv_addresses, *source_kv->backend, backend_frontier);
             if (backend_device > backend_required) {
@@ -1021,13 +1021,13 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
                 KVAddressSpaceHandle address, std::uint32_t frontier, std::uint32_t active_pages,
                 std::uint32_t missing_source_pages, bool prefix_fork, bool& staged,
                 runtime::ContextResourceClass resource) {
-                const std::uint32_t required = kv_pages_for_tokens(frontier);
+                const std::uint32_t required = kv_pages_for_tokens(frontier, kv_storage);
                 const std::uint64_t final_without_release =
                     static_cast<std::uint64_t>(required) + active_pages;
                 const std::uint32_t capacity = pages.physical_pool().usable_pages();
                 if (final_without_release <= capacity) { return true; }
                 if (!prefix_fork || frontier == 0 ||
-                    frontier % static_cast<std::uint32_t>(kPagedKVPageSize) == 0 ||
+                    frontier % device_kv_tokens_per_page() == 0 ||
                     final_without_release != static_cast<std::uint64_t>(capacity) + 1U ||
                     required > addresses.mapped_pages(address)) {
                     return false;
@@ -1145,10 +1145,10 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
             KVAddressSpaceHandle address, std::uint32_t frontier, bool prefix_fork) {
             std::pair<std::uint32_t, std::size_t> out;
             if (!prefix_fork || frontier == 0 ||
-                frontier % static_cast<std::uint32_t>(kPagedKVPageSize) == 0) {
+                frontier % device_kv_tokens_per_page() == 0) {
                 return out;
             }
-            const std::uint32_t required = kv_pages_for_tokens(frontier);
+            const std::uint32_t required = kv_pages_for_tokens(frontier, kv_storage);
             if (required > addresses.mapped_pages(address)) {
                 throw std::logic_error("checkpoint KV requirement exceeds address membership");
             }

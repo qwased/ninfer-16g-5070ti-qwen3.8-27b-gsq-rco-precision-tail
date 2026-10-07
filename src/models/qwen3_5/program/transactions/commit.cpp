@@ -657,6 +657,7 @@ bool ProgramImpl::publish_active_continuation(SequenceState& state, RequestContr
             state.rewrite_checkpoint = {};
         }
         if (state_store->role(state.state.read) == StateImageRole::ActiveMutable) {
+            capture_sequence_kvarn_tail(state, state.state.read);
             state_store->freeze(state.state.read);
         } else if (state_store->role(state.state.read) != StateImageRole::CheckpointImmutable) {
             return false;

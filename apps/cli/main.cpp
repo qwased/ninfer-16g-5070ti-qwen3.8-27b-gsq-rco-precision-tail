@@ -100,6 +100,8 @@ std::string format_kv_cache(ninfer::KvCacheStorage storage) {
         return "nvfp4";
     case ninfer::KvCacheStorage::Fp8KeyNvfp4Value:
         return "k8v4";
+    case ninfer::KvCacheStorage::KvarnGroup128:
+        return "kvarn";
     }
     return "unknown";
 }
@@ -319,6 +321,7 @@ int main(int argc, char** argv) {
         engine_options.kv_capacity              = cli.kv_capacity;
         engine_options.prefill_chunk            = cli.prefill_chunk;
         engine_options.kv_cache                 = cli.kv_cache;
+        engine_options.kvarn_bits               = cli.kvarn_bits;
         engine_options.kv_tail_tokens           = cli.kv_tail_tokens;
         engine_options.kv_tail_type             = cli.kv_tail_type;
         engine_options.speculative              = cli.speculative;

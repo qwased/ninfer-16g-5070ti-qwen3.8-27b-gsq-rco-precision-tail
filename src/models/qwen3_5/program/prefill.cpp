@@ -353,17 +353,17 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
                                                          std::optional<std::uint32_t> frontier) {
                 if (!frontier ||
                     (addresses.committed_frontier(address) == *frontier &&
-                     addresses.mapped_pages(address) == kv_pages_for_frontier(*frontier))) {
+                     addresses.mapped_pages(address) == kv_pages_for_frontier(*frontier, kv_storage))) {
                     return;
                 }
                 bool releases_tail               = false;
-                const std::uint32_t target_pages = kv_pages_for_frontier(*frontier);
+                const std::uint32_t target_pages = kv_pages_for_frontier(*frontier, kv_storage);
                 if (target_pages != 0) {
                     const LogicalKVPageHandle tail =
                         addresses.logical_page(address, target_pages - 1U);
                     const std::uint32_t columns =
                         *frontier -
-                        (target_pages - 1U) * static_cast<std::uint32_t>(kPagedKVPageSize);
+                        (target_pages - 1U) * device_kv_tokens_per_page();
                     if (columns != pages.committed_columns(tail) && pages.host_resident(tail)) {
                         if (host_kv_extents == nullptr ||
                             stale_tail_count == stale_tail_replicas.size()) {
@@ -404,7 +404,7 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
                 (text_kv_addresses->committed_frontier(sequence.kv->text) !=
                      *transaction.text_activation_frontier ||
                  text_kv_addresses->mapped_pages(sequence.kv->text) !=
-                     kv_pages_for_frontier(*transaction.text_activation_frontier))) {
+                     kv_pages_for_frontier(*transaction.text_activation_frontier, kv_storage))) {
                 text_kv_addresses->destructive_truncate_inactive(
                     sequence.kv->text, *transaction.text_activation_frontier);
             }
@@ -413,7 +413,7 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
                 (backend_kv_addresses->committed_frontier(*sequence.kv->backend) !=
                      *transaction.backend_activation_frontier ||
                  backend_kv_addresses->mapped_pages(*sequence.kv->backend) !=
-                     kv_pages_for_frontier(*transaction.backend_activation_frontier))) {
+                     kv_pages_for_frontier(*transaction.backend_activation_frontier, kv_storage))) {
                 backend_kv_addresses->destructive_truncate_inactive(
                     *sequence.kv->backend, *transaction.backend_activation_frontier);
             }
@@ -658,6 +658,7 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
         sequence.endpoint_valid = false;
         if (!preserving_source) { trim_sequence_kv(sequence, base, backend_kv_valid(sequence)); }
         bind_sequence_kv(sequence);
+        activate_sequence_kvarn_tail(sequence);
         const std::uint32_t backend_materialized =
             speculative_backend == SpeculativeBackend::Mtp
                 ? std::min(capacity,

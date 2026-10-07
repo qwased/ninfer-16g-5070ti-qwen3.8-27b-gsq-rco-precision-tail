@@ -75,6 +75,8 @@ struct Options {
 #else
     ninfer::KvCacheStorage kv = ninfer::KvCacheStorage::Fp8E4M3Row256;
 #endif
+    // KVarN code width, meaningful only when kv is KvarnGroup128.
+    ninfer::KvarnBits kvarn_bits = ninfer::KvarnBits::Bits4;
     // Exact KV tail: the newest N tokens per sequence stay unquantized and attention merges an exact
     // tail partial with the quantized body. Zero disables it; the ring element type is F16 or BF16
     // (see --kv-tail-type), independent of the body coding.
@@ -115,7 +117,8 @@ std::string usage_text() {
            "        union of the two top-K sets plus the target token, both sides renormalized over\n"
            "        that support, with a token missing from one side floored at that side's K-th log\n"
            "        probability. Only incremental KLD between runs has meaning)\n"
-           "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] [--output "
+           "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4|\n"
+           "                   kvarn:k4v4|k5v5|k6v6] [--output "
            "<directory>]\n"
            "       [--kv-tail-tokens N] [--kv-tail-type bf16|f16]\n"
            "       [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--mtp-experts-q4] "
@@ -211,9 +214,18 @@ Options parse_options(int argc, char** argv) {
                 out.kv = ninfer::KvCacheStorage::Nvfp4Group16;
             } else if (dtype == "k8v4") {
                 out.kv = ninfer::KvCacheStorage::Fp8KeyNvfp4Value;
+            } else if (dtype == "kvarn" || dtype == "kvarn:k4v4") {
+                out.kvarn_bits = ninfer::KvarnBits::Bits4;
+                out.kv         = ninfer::KvCacheStorage::KvarnGroup128;
+            } else if (dtype == "kvarn:k5v5") {
+                out.kvarn_bits = ninfer::KvarnBits::Bits5;
+                out.kv         = ninfer::KvCacheStorage::KvarnGroup128;
+            } else if (dtype == "kvarn:k6v6") {
+                out.kvarn_bits = ninfer::KvarnBits::Bits6;
+                out.kv         = ninfer::KvCacheStorage::KvarnGroup128;
             } else {
                 usage_error("--kv-dtype must be bf16, int8, fp8, rk8v4, rk4v4, rk4v4-e8, "
-                            "rk2v4-e8, nvfp4, or k8v4");
+                            "rk2v4-e8, nvfp4, k8v4, or kvarn:k4v4|k5v5|k6v6");
             }
         } else if (option == "--kv-tail-tokens") {
             out.kv_tail_tokens =
@@ -304,6 +316,8 @@ std::string kv_name(ninfer::KvCacheStorage value) {
         return "nvfp4";
     case ninfer::KvCacheStorage::Fp8KeyNvfp4Value:
         return "k8v4";
+    case ninfer::KvCacheStorage::KvarnGroup128:
+        return "kvarn";
     }
     throw std::logic_error("unknown KV dtype");
 }
@@ -385,6 +399,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     engine_options.score_width      = options.score_width;
     engine_options.score_topk       = static_cast<int>(options.score_topk);
     engine_options.kv_cache         = options.kv;
+    engine_options.kvarn_bits       = options.kvarn_bits;
     engine_options.kv_tail_tokens   = options.kv_tail_tokens;
     engine_options.kv_tail_type     = options.kv_tail_type;
     engine_options.lm_head_q4       = options.lm_head_q4;

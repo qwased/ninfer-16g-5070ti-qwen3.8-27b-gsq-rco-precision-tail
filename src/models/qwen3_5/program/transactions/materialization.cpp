@@ -581,13 +581,13 @@ void ProgramImpl::prepare_consumed_source(MaterializationTransaction& transactio
             }
             continue;
         }
-        const std::uint32_t target_pages = kv_pages_for_frontier(target.frontier);
+        const std::uint32_t target_pages = kv_pages_for_frontier(target.frontier, kv_storage);
         if (target_pages != 0) {
             const LogicalKVPageHandle tail =
                 target.addresses->logical_page(target.address, target_pages - 1U);
             const std::uint32_t columns =
                 target.frontier -
-                (target_pages - 1U) * static_cast<std::uint32_t>(kPagedKVPageSize);
+                (target_pages - 1U) * device_kv_tokens_per_page();
             target.releases_stale_host_tail = columns != target.pages->committed_columns(tail) &&
                                               target.pages->host_resident(tail);
             if (target.releases_stale_host_tail) {
@@ -842,7 +842,7 @@ void ProgramImpl::prepare_materialization(MaterializationTransaction& transactio
             std::vector<MaterializationTransaction::KVRestorePage>& restores,
             std::vector<DeviceKVPageHandle>& destinations) {
             const std::uint32_t mapped = activation_frontier
-                                             ? kv_pages_for_frontier(*activation_frontier)
+                                             ? kv_pages_for_frontier(*activation_frontier, kv_storage)
                                              : addresses.mapped_pages(address);
             if (mapped > addresses.mapped_pages(address)) {
                 throw std::logic_error("KV activation frontier exceeds address membership");
@@ -977,7 +977,7 @@ void ProgramImpl::prepare_prefix_forks(MaterializationTransaction& transaction) 
             *text_kv_addresses, *text_kv_pages, *transaction.text_prefix_fork,
             details.text_retained_tail_release, transaction.text_retained_tail,
             transaction.text_retained_tail_backup);
-        if (*transaction.text_activation_frontier % static_cast<std::uint32_t>(kPagedKVPageSize) !=
+        if (*transaction.text_activation_frontier % device_kv_tokens_per_page() !=
             0) {
             start_context_transfer_timer(runtime::ContextResourceClass::MainKV);
             text_kv_pages->physical_pool().copy_page(
@@ -1010,7 +1010,7 @@ void ProgramImpl::prepare_prefix_forks(MaterializationTransaction& transaction) 
             details.backend_retained_tail_release, transaction.backend_retained_tail,
             transaction.backend_retained_tail_backup);
         if (*transaction.backend_activation_frontier %
-                static_cast<std::uint32_t>(kPagedKVPageSize) !=
+                device_kv_tokens_per_page() !=
             0) {
             start_context_transfer_timer(runtime::ContextResourceClass::BackendKV);
             backend_kv_pages->physical_pool().copy_page(

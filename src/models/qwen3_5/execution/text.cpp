@@ -27,6 +27,7 @@
 #include "ninfer/ops/linear_add.h"
 #include "ninfer/ops/linear_pair.h"
 #include "ninfer/ops/linear_swiglu.h"
+#include "ninfer/ops/kvarn_attention.h"
 #include "ninfer/ops/mtp_pack.h"
 #include "ninfer/ops/position.h"
 #include "ninfer/ops/residual_add.h"
@@ -383,31 +384,51 @@ void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& po
                                            active_sequence_batch_});
         Tensor position_batch = positions.view({width, active_sequence_batch_});
         Tensor table_rows     = *active_backend_kv_table_rows_;
-        auto view             = batch_mtp_kv_->batch_layer_view(0);
-        if (mtp_attention_window_ != 0) {
-            window_mtp_attention(view, table_rows, position_batch, *active_valid_columns_);
+        if (batch_mtp_kv_->storage() == KvCacheStorage::KvarnGroup128) {
+            // A KVarN body stages and attends in one call and applies no gate epilogue, so the gate
+            // multiplies the result here instead. `--mtp-attention-window` is refused for a KVarN
+            // body at planning, so no window transform applies to this row set.
+            ops::kvarn_attention(
+                q_batch, k_batch, v_batch, position_batch, *active_valid_columns_, table_rows,
+                static_cast<float>(1.0 / std::sqrt(static_cast<double>(config_.attention->head_dim))),
+                batch_mtp_kv_->kvarn_batch_layer_view(0), kvarn_provisional_, envelope, work_,
+                a_batch, s);
+            ops::sigmoid_mul(gate_batch, a_batch, s);
+        } else {
+            auto view = batch_mtp_kv_->batch_layer_view(0);
+            if (mtp_attention_window_ != 0) {
+                window_mtp_attention(view, table_rows, position_batch, *active_valid_columns_);
+            }
+            ops::causal_softmax_attention(
+                q_batch, k_batch, v_batch, position_batch, *active_valid_columns_, table_rows,
+                {dimension(config_.attention->head_dim),
+                 dimension(config_.attention->num_attention_heads),
+                 dimension(config_.attention->num_key_value_heads)},
+                static_cast<float>(1.0 / std::sqrt(static_cast<double>(config_.attention->head_dim))),
+                view, envelope, work_, a_batch, s, &gate_batch);
         }
-        ops::causal_softmax_attention(
-            q_batch, k_batch, v_batch, position_batch, *active_valid_columns_, table_rows,
-            {dimension(config_.attention->head_dim),
-             dimension(config_.attention->num_attention_heads),
-             dimension(config_.attention->num_key_value_heads)},
-            static_cast<float>(1.0 / std::sqrt(static_cast<double>(config_.attention->head_dim))),
-            view, envelope, work_, a_batch, s, &gate_batch);
     } else {
-        Tensor position_rows = positions.view({T, 1});
+        Tensor position_rows = positions.view({T});
         Tensor table_rows    = io_.backend_kv_table_row;
-        auto view            = batch_mtp_kv_->batch_layer_view(0);
-        if (mtp_attention_window_ != 0) {
-            window_mtp_attention(view, table_rows, position_rows, Tensor{});
+        if (batch_mtp_kv_->storage() == KvCacheStorage::KvarnGroup128) {
+            ops::kvarn_attention(
+                qn, kn, v, position_rows, Tensor{}, table_rows,
+                static_cast<float>(1.0 / std::sqrt(static_cast<double>(config_.attention->head_dim))),
+                batch_mtp_kv_->kvarn_batch_layer_view(0), kvarn_provisional_, envelope, work_, a, s);
+            ops::sigmoid_mul(gate, a, s);
+        } else {
+            auto view = batch_mtp_kv_->batch_layer_view(0);
+            if (mtp_attention_window_ != 0) {
+                window_mtp_attention(view, table_rows, position_rows, Tensor{});
+            }
+            ops::causal_softmax_attention(
+                qn, kn, v, position_rows, Tensor{}, table_rows,
+                {dimension(config_.attention->head_dim),
+                 dimension(config_.attention->num_attention_heads),
+                 dimension(config_.attention->num_key_value_heads)},
+                static_cast<float>(1.0 / std::sqrt(static_cast<double>(config_.attention->head_dim))),
+                view, envelope, work_, a, s, &gate);
         }
-        ops::causal_softmax_attention(
-            qn, kn, v, position_rows.view({T}), Tensor{}, table_rows,
-            {dimension(config_.attention->head_dim),
-             dimension(config_.attention->num_attention_heads),
-             dimension(config_.attention->num_key_value_heads)},
-            static_cast<float>(1.0 / std::sqrt(static_cast<double>(config_.attention->head_dim))),
-            view, envelope, work_, a, s, &gate);
     }
 
     const auto post = workspace::mtp_post_attention(work_, config_, T);
@@ -497,9 +518,24 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
     auto scratch_scope = work_.scope();
     Tensor x_last;
     Tensor ah_last;
+    // A KVarN body has no cached-attention form on this path, so the final chunk is appended by the
+    // attention call itself and needs the whole chunk's rotated K/V to outlive the bulk scope.
+    const bool kvarn_final =
+        final_chunk && batch_mtp_kv_ != nullptr &&
+        batch_mtp_kv_->storage() == KvCacheStorage::KvarnGroup128;
+    Tensor final_key;
+    Tensor final_value;
     if (final_chunk) {
         x_last  = work_.alloc(DType::BF16, {dimension(config_.hidden_size), 1});
         ah_last = work_.alloc(DType::BF16, {dimension(config_.hidden_size), 1});
+        if (kvarn_final) {
+            final_key = work_.alloc(DType::BF16, {dimension(config_.attention->head_dim),
+                                                  dimension(config_.attention->num_key_value_heads),
+                                                  T});
+            final_value =
+                work_.alloc(DType::BF16, {dimension(config_.attention->head_dim),
+                                          dimension(config_.attention->num_key_value_heads), T});
+        }
     }
 
     {
@@ -509,18 +545,30 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
         mtp_forward_stem(ids, hidden, input_embeddings, x, ah);
 
         Tensor k_flat = work_.alloc(DType::BF16, {dimension(config_.attention->key_width()), T});
-        Tensor v_flat = work_.alloc(DType::BF16, {dimension(config_.attention->key_width()), T});
+        Tensor v_flat =
+            kvarn_final ? final_value.view({dimension(config_.attention->key_width()), T})
+                        : work_.alloc(DType::BF16, {dimension(config_.attention->key_width()), T});
         mtp_kv_projection(ah, mtp_->projection, *config_.attention, k_flat, v_flat, work_, s);
         Tensor k = k_flat.view({dimension(config_.attention->head_dim),
                                 dimension(config_.attention->num_key_value_heads), T});
         Tensor v = v_flat.view({dimension(config_.attention->head_dim),
                                 dimension(config_.attention->num_key_value_heads), T});
         Tensor kn =
-            work_.alloc(DType::BF16, {dimension(config_.attention->head_dim),
-                                      dimension(config_.attention->num_key_value_heads), T});
+            kvarn_final ? final_key
+                        : work_.alloc(DType::BF16, {dimension(config_.attention->head_dim),
+                                                    dimension(config_.attention->num_key_value_heads),
+                                                    T});
         ops::rmsnorm(k, mtp_->key_norm, config_.rms_norm_eps, true, kn, s);
         text_rope(rope_positions, *config_.rope_parameters, rope_yarn_, kn, s);
-        ops::kv_cache_append(kn, v, positions, mtp_kv_.layer_view(0), s);
+        if (kvarn_final) {
+            // The attention call below appends this whole final chunk.
+        } else if (batch_mtp_kv_ != nullptr &&
+                   batch_mtp_kv_->storage() == KvCacheStorage::KvarnGroup128) {
+            ops::kvarn_kv_append(kn, v, positions, Tensor{}, io_.backend_kv_table_row,
+                                 batch_mtp_kv_->kvarn_batch_layer_view(0), false, s);
+        } else {
+            ops::kv_cache_append(kn, v, positions, mtp_kv_.layer_view(0), s);
+        }
 
         if (final_chunk) {
             const std::size_t column_bytes =
@@ -568,13 +616,22 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
 
         Tensor a = work_.alloc(DType::BF16, {dimension(config_.attention->head_dim),
                                              dimension(config_.attention->num_attention_heads), 1});
-        ops::causal_softmax_attention_cached(
-            qn, last_position,
-            {dimension(config_.attention->head_dim),
-             dimension(config_.attention->num_attention_heads),
-             dimension(config_.attention->num_key_value_heads)},
-            static_cast<float>(1.0 / std::sqrt(static_cast<double>(config_.attention->head_dim))),
-            mtp_kv_.layer_view(0), envelope, work_, a, s);
+        if (kvarn_final) {
+            // Append and attend the whole chunk in one call, then commit it: this chunk's K/V are
+            // not speculative.
+            ops::kvarn_attention(
+                qn, final_key, final_value, positions, Tensor{}, io_.backend_kv_table_row,
+                static_cast<float>(1.0 / std::sqrt(static_cast<double>(config_.attention->head_dim))),
+                batch_mtp_kv_->kvarn_batch_layer_view(0), false, envelope, work_, a, s);
+        } else {
+            ops::causal_softmax_attention_cached(
+                qn, last_position,
+                {dimension(config_.attention->head_dim),
+                 dimension(config_.attention->num_attention_heads),
+                 dimension(config_.attention->num_key_value_heads)},
+                static_cast<float>(1.0 / std::sqrt(static_cast<double>(config_.attention->head_dim))),
+                mtp_kv_.layer_view(0), envelope, work_, a, s);
+        }
         ops::sigmoid_mul(gate, a, s);
 
         Tensor o = work_.alloc(DType::BF16, {dimension(config_.hidden_size), 1});
@@ -783,6 +840,8 @@ void TextContext::target_verify_batch_impl(const Tensor& ids, const Tensor& cach
         ScopedValue<const Tensor*> valid_binding(active_valid_columns_, &valid_columns);
         ScopedValue<std::int32_t> batch_binding(active_sequence_batch_, batch);
         ScopedValue<std::int32_t> width_binding(active_sequence_width_, width);
+        // The verified drafts' own K/V must not be encoded until acceptance decides the extent.
+        ScopedValue<bool> kvarn_binding(kvarn_provisional_, true);
 
         Tensor x        = work_.alloc(DType::BF16, {dimension(config_.hidden_size), columns});
         Tensor flat_ids = ids.view({columns});
@@ -958,27 +1017,47 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase 
                                            active_sequence_batch_});
         Tensor position_batch = cache_positions.view({width, active_sequence_batch_});
         const Tensor valid = active_valid_columns_ != nullptr ? *active_valid_columns_ : Tensor{};
-        // The gate rides along with the attention call: where the route can, the reduce epilogue
-        // applies it at the store, and every other route applies it inside the Op. One contract
-        // either way, and the same bytes the standalone multiply produced. A rotated output
-        // projection takes the ungated attention, gated and rotated in one pass below.
-        ops::causal_softmax_attention(
-            q_batch, k_batch, v_batch, position_batch, valid, kv_table_rows,
-            {dimension(config_.attention->head_dim),
-             dimension(config_.attention->num_attention_heads),
-             dimension(config_.attention->num_key_value_heads)},
-            static_cast<float>(1.0 / std::sqrt(static_cast<double>(config_.attention->head_dim))),
-            batch_text_kv_->batch_layer_view(fidx), *active_causal_attention_envelope_, work_,
-            a_batch, s, rotated_output ? nullptr : &gate_batch);
+        if (batch_text_kv_->storage() == KvCacheStorage::KvarnGroup128) {
+            ops::kvarn_attention(
+                q_batch, k_batch, v_batch, position_batch, valid, kv_table_rows,
+                static_cast<float>(1.0 / std::sqrt(static_cast<double>(config_.attention->head_dim))),
+                batch_text_kv_->kvarn_batch_layer_view(fidx), kvarn_provisional_,
+                *active_causal_attention_envelope_, work_, a_batch, s);
+            // The KVarN Op applies no gate epilogue; the rotated projection below gates and rotates
+            // in one pass, and the primal one takes the standalone multiply.
+            if (!rotated_output) { ops::sigmoid_mul(gate_batch, a_batch, s); }
+        } else {
+            // The gate rides along with the attention call: where the route can, the reduce epilogue
+            // applies it at the store, and every other route applies it inside the Op. One contract
+            // either way, and the same bytes the standalone multiply produced. A rotated output
+            // projection takes the ungated attention, gated and rotated in one pass below.
+            ops::causal_softmax_attention(
+                q_batch, k_batch, v_batch, position_batch, valid, kv_table_rows,
+                {dimension(config_.attention->head_dim),
+                 dimension(config_.attention->num_attention_heads),
+                 dimension(config_.attention->num_key_value_heads)},
+                static_cast<float>(1.0 / std::sqrt(static_cast<double>(config_.attention->head_dim))),
+                batch_text_kv_->batch_layer_view(fidx), *active_causal_attention_envelope_, work_,
+                a_batch, s, rotated_output ? nullptr : &gate_batch);
+        }
     } else {
-        ops::causal_softmax_attention(
-            qn, kn, v, cache_positions, Tensor{}, kv_table_rows,
-            {dimension(config_.attention->head_dim),
-             dimension(config_.attention->num_attention_heads),
-             dimension(config_.attention->num_key_value_heads)},
-            static_cast<float>(1.0 / std::sqrt(static_cast<double>(config_.attention->head_dim))),
-            batch_text_kv_->batch_layer_view(fidx), *active_causal_attention_envelope_, work_, a, s,
-            rotated_output ? nullptr : &gate);
+        if (batch_text_kv_->storage() == KvCacheStorage::KvarnGroup128) {
+            ops::kvarn_attention(
+                qn, kn, v, cache_positions, Tensor{}, kv_table_rows,
+                static_cast<float>(1.0 / std::sqrt(static_cast<double>(config_.attention->head_dim))),
+                batch_text_kv_->kvarn_batch_layer_view(fidx), kvarn_provisional_,
+                *active_causal_attention_envelope_, work_, a, s);
+            if (!rotated_output) { ops::sigmoid_mul(gate, a, s); }
+        } else {
+            ops::causal_softmax_attention(
+                qn, kn, v, cache_positions, Tensor{}, kv_table_rows,
+                {dimension(config_.attention->head_dim),
+                 dimension(config_.attention->num_attention_heads),
+                 dimension(config_.attention->num_key_value_heads)},
+                static_cast<float>(1.0 / std::sqrt(static_cast<double>(config_.attention->head_dim))),
+                batch_text_kv_->batch_layer_view(fidx), *active_causal_attention_envelope_, work_, a,
+                s, rotated_output ? nullptr : &gate);
+        }
     }
     const bool wide = wide_residual_verification(ph, active_sequence_batch_, T, T);
     Tensor gated    = a.view({dimension(config_.attention->query_width()), T});
@@ -1647,6 +1726,8 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
 
                     Tensor ar_position = io_.mtp->position.slice(0, 0, 1);
                     ops::set_i32_scalar(ar_position, base_i + T, s);
+                    // The auto-regressive draft tokens past the first are speculative.
+                    set_kvarn_provisional(true);
                     for (int i = 1; i < static_cast<int>(mtp_proposal_extent_); ++i) {
                         Tensor prev_token = io_.mtp->draft_tokens.slice(0, i - 1, 1);
                         Tensor next_token = io_.mtp->draft_tokens.slice(0, i, 1);

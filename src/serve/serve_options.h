@@ -66,6 +66,8 @@ struct ServeOptions {
     // Layers per stage, one count per entry of `devices`. Empty lets the engine choose.
     std::vector<std::uint32_t> stage_layers;
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
+    // KVarN code width; meaningful only when kv_cache is KvarnGroup128.
+    KvarnBits kvarn_bits                   = KvarnBits::Bits4;
     std::int32_t kv_tail_tokens            = 0;
     KvTailType kv_tail_type                = KvTailType::Float16;
     SpeculativeOptions speculative;

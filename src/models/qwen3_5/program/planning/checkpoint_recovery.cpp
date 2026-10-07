@@ -644,7 +644,7 @@ std::optional<qwen3_5::detail::PressureDecision> ProgramImpl::inspect_checkpoint
             KVAddressSpaceHandle address, std::uint32_t retained_frontier,
             std::uint32_t& removed_pages) -> bool {
         if (!addresses.can_truncate_inactive_prefix(address, retained_frontier)) { return false; }
-        const std::uint32_t retained_pages = kv_pages_for_frontier(retained_frontier);
+        const std::uint32_t retained_pages = kv_pages_for_frontier(retained_frontier, kv_storage);
         const std::uint32_t mapped         = addresses.mapped_pages(address);
         const std::size_t stride =
             plan_host_kv_page_layout(pages.physical_pool().geometry()).page_stride;

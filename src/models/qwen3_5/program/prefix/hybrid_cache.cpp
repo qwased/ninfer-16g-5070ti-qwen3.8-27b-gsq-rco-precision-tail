@@ -24,7 +24,6 @@ using runtime::prefix_cache::TapPlannerConfig;
 
 namespace {
 
-constexpr auto kFullPage = static_cast<std::uint32_t>(kPagedKVPageSize);
 // Largest single pinned allocation of the Host slab pool.
 constexpr std::size_t kHostChunkBytes = std::size_t{4} << 30U;
 
@@ -195,7 +194,8 @@ InsertResult HybridPrefixCache::insert_block(NodeRef parent, std::uint64_t looku
     const std::uint32_t id = allocate_block_id(pages);
     if (adopts) {
         try {
-            retain(pages, kFullPage, kFullPage);
+            const std::uint32_t full_page = text_pages_->physical_pool().geometry().page_tokens;
+            retain(pages, full_page, full_page);
         } catch (...) {
             free_block_id(id);
             throw;
@@ -498,7 +498,7 @@ void HybridPrefixCache::restore_block(NodeRef node, HybridBlockPages destination
     if (view.device != CopyState::Absent || view.host != CopyState::Resident) {
         throw std::logic_error("hybrid restore source block is not host-only");
     }
-    adopt_destination(destination, kFullPage);
+    adopt_destination(destination, text_pages_->physical_pool().geometry().page_tokens);
     const std::uint32_t id = allocate_block_id(destination);
     try {
         index_->begin_device_fill(node, id);

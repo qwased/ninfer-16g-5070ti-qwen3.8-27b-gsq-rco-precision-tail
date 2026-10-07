@@ -475,10 +475,10 @@ ProgramImpl::materialization_source_protection(const ResourceCandidateState& adm
     if (kv == nullptr) { return protection; }
 
     protection.text       = kv->text;
-    protection.text_pages = kv_pages_for_frontier(admission.reuse_base);
+    protection.text_pages = kv_pages_for_frontier(admission.reuse_base, kv_storage);
     if (protection.consumed_private_source) {
         protection.text_transfer_pages =
-            admission.reuse_base / static_cast<std::uint32_t>(kPagedKVPageSize);
+            admission.reuse_base / device_kv_tokens_per_page();
     }
     if (!text_kv_addresses->valid(kv->text) ||
         protection.text_pages > text_kv_addresses->mapped_pages(kv->text)) {
@@ -490,10 +490,10 @@ ProgramImpl::materialization_source_protection(const ResourceCandidateState& adm
     }
     const std::uint32_t backend_frontier =
         backend_frontier_at(speculative_backend, admission.reuse_base);
-    protection.backend_pages = kv_pages_for_frontier(backend_frontier);
+    protection.backend_pages = kv_pages_for_frontier(backend_frontier, kv_storage);
     if (protection.consumed_private_source) {
         protection.backend_transfer_pages =
-            backend_frontier / static_cast<std::uint32_t>(kPagedKVPageSize);
+            backend_frontier / device_kv_tokens_per_page();
     }
     if (protection.backend_pages != 0) {
         if (!kv->backend || !backend_kv_addresses || !backend_kv_addresses->valid(*kv->backend) ||
@@ -2226,10 +2226,10 @@ bool ProgramImpl::compose_pressure_candidate(
         if (!details.has_source ||
             details.source_mode != runtime::PrivateSourceMode::ConsumeToActive || !planned_fork ||
             *projected_fork || frontier == 0 ||
-            frontier % static_cast<std::uint32_t>(kPagedKVPageSize) == 0) {
+            frontier % device_kv_tokens_per_page() == 0) {
             return false;
         }
-        const std::uint32_t required = kv_pages_for_frontier(frontier);
+        const std::uint32_t required = kv_pages_for_frontier(frontier, kv_storage);
         if (required == 0 || required > addresses.mapped_pages(address)) { return false; }
         const LogicalKVPageHandle tail = addresses.logical_page(address, required - 1U);
         const bool device_resident     = pages.device_resident(tail);

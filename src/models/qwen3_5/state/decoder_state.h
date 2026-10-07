@@ -3,6 +3,8 @@
 #include "core/layout.h"
 #include "core/paged_kv_cache.h"
 
+#include "ninfer/ops/kvarn.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -21,6 +23,8 @@ struct DecoderStateSpec {
     std::int32_t kv_heads                   = 0;
     std::int32_t attention_head_dim         = 0;
     KvCacheStorage kv_storage                = KvCacheStorage::BFloat16;
+    // KVarN's packed width (K == V). Only read when `kv_storage == KvarnGroup128`.
+    KvarnBits kvarn_bits                     = KvarnBits::Bits4;
     bool enable_mtp                         = false;
     std::int32_t kv_table_rows              = 1;
     std::uint32_t text_physical_page_groups = 0;
@@ -43,13 +47,25 @@ struct PagedKVCacheLayout {
     DeviceKVPagePoolLayout pages;
     // One copy of the block tables per rank that runs attention layers of this cache.
     std::vector<KVExecutionTableLayout> execution_tables;
+    // KVarN's rotated sink/tail state, bound only for a KVarN body. `kvarn_tail_k`/`kvarn_tail_v`
+    // each hold one BF16 `{head_dim, kKvarnGroup, table_rows*kv_heads*kKvarnTailSlots, layers}`
+    // slab; `kvarn_tail_logical_pages` holds one `{kKvarnTailSlots, table_rows, layers}` int32
+    // marker block naming the committed logical page of every slot (0xffffffff = empty).
+    TensorRegion kvarn_tail_k;
+    TensorRegion kvarn_tail_v;
+    TensorRegion kvarn_tail_logical_pages;
     std::uint32_t layers      = 0;
     std::uint32_t max_context = 0;
     std::int32_t kv_heads     = 0;
     std::int32_t head_dim     = 0;
     KvCacheStorage storage    = KvCacheStorage::BFloat16;
+    // KVarN's packed width (K == V); every layer view carries it to the ops layer.
+    KvarnBits kvarn_bits      = KvarnBits::Bits4;
 
-    [[nodiscard]] std::size_t payload_bytes() const noexcept { return pages.payload_bytes(); }
+    [[nodiscard]] std::size_t payload_bytes() const noexcept {
+        return pages.payload_bytes() + kvarn_tail_k.region.bytes + kvarn_tail_v.region.bytes +
+               kvarn_tail_logical_pages.region.bytes;
+    }
 };
 
 class PagedKVCache;
@@ -62,6 +78,8 @@ public:
 
     [[nodiscard]] std::uint32_t max_context() const noexcept;
     [[nodiscard]] PagedKVLayerView layer_view(std::uint32_t layer) const;
+    // The KVarN body of this row's layer. Only a KVarN cache has one.
+    [[nodiscard]] ops::KvarnPagedLayerView kvarn_layer_view(std::uint32_t layer) const;
 
 private:
     friend class PagedKVCache;
@@ -88,6 +106,10 @@ public:
 
     [[nodiscard]] std::uint32_t layers() const noexcept { return layers_; }
 
+    [[nodiscard]] KvCacheStorage storage() const noexcept { return storage_; }
+
+    [[nodiscard]] std::int32_t kv_heads() const noexcept { return kv_heads_; }
+
     [[nodiscard]] DeviceKVPagePool& page_pool() noexcept { return pages_; }
 
     [[nodiscard]] const DeviceKVPagePool& page_pool() const noexcept { return pages_; }
@@ -106,6 +128,10 @@ public:
                            std::uint32_t ring_pages) noexcept;
 
     [[nodiscard]] PagedKVBatchLayerView batch_layer_view(std::uint32_t layer) const;
+    // The KVarN body of every row of `layer`, for batched decode/verify.
+    [[nodiscard]] ops::KvarnPagedBatchLayerView kvarn_batch_layer_view(std::uint32_t layer) const;
+    // Rewrites the slot markers of `table_row` back to empty. No-op on a non-KVarN cache.
+    void reset_kvarn_tail_row(std::int32_t table_row, cudaStream_t stream = nullptr) const;
     // The rank holding this layer's KV planes, which is also the rank whose block table it reads.
     [[nodiscard]] std::size_t layer_rank(std::uint32_t layer) const;
 
@@ -113,6 +139,8 @@ private:
     friend class PagedKVCacheView;
     [[nodiscard]] PagedKVLayerView layer_view(std::uint32_t layer,
                                               const KVExecutionRowHandle* row) const;
+    [[nodiscard]] ops::KvarnPagedLayerView kvarn_layer_view(std::uint32_t layer,
+                                                            const KVExecutionRowHandle* row) const;
 
     DeviceKVPagePool pages_;
     KVExecutionTablePool execution_tables_;
@@ -121,6 +149,10 @@ private:
     std::int32_t kv_heads_     = 0;
     std::int32_t head_dim_     = 0;
     KvCacheStorage storage_    = KvCacheStorage::BFloat16;
+    KvarnBits kvarn_bits_      = KvarnBits::Bits4;
+    Tensor kvarn_tail_k_;
+    Tensor kvarn_tail_v_;
+    Tensor kvarn_tail_logical_pages_;
     const DeviceKVPagePool* exact_tail_ = nullptr;
     std::int32_t tail_retention_        = 0;
     std::uint32_t tail_ring_pages_      = 0;

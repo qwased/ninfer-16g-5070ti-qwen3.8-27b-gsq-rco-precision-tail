@@ -113,6 +113,8 @@ struct SequencePlanningInputs {
     std::uint32_t ngram_min_match           = 12;
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
+    // KVarN's packed width (K == V); only read when `kv_storage == KvarnGroup128`.
+    KvarnBits kvarn_bits                    = KvarnBits::Bits4;
     // Exact KV tail retention in tokens; zero disables the tail.
     std::int32_t kv_tail_tokens             = 0;
     // Element type of the exact tail's unquantized ring.
@@ -155,6 +157,7 @@ struct SequencePlanImpl {
     std::uint32_t ngram_min_match           = 12;
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
+    KvarnBits kvarn_bits                    = KvarnBits::Bits4;
     std::int32_t kv_tail_tokens             = 0;
     KvTailType kv_tail_type                 = KvTailType::Float16;
     ProposalHead proposal_head              = ProposalHead::Full;
@@ -230,6 +233,7 @@ finalize_sequence_plan_impl(std::unique_ptr<qwen3_5::detail::SequencePlannerImpl
 // page group, and the capacities are the already-normalized private/shared continuation catalogs.
 void resolve_host_cache_budget(ContextCacheOptions& cache, std::uint32_t private_capacity,
                                std::uint32_t shared_capacity, std::uint32_t capacity,
-                               std::uint64_t state_image_bytes, std::uint64_t host_kv_group_bytes);
+                               std::uint64_t state_image_bytes, std::uint64_t host_kv_group_bytes,
+                               KvCacheStorage storage);
 
 } // namespace ninfer::models::qwen3_5::detail

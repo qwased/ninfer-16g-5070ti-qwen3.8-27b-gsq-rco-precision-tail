@@ -18,6 +18,21 @@ namespace ninfer {
 
 inline constexpr std::int32_t kPagedKVPageSize = 64;
 
+// Tokens one physical page holds for a given `storage`. Every pre-existing format keeps 64; KVarN's
+// record spans a 128-token group, so its body pages hold 128 tokens. Address arithmetic that indexes
+// pages must derive its page stride from these rather than from `kPagedKVPageSize` whenever the
+// storage may be KVarN, or a 128-token body read through a 64-token helper silently addresses the
+// wrong page.
+inline constexpr std::int32_t kKvarnPageTokens = 128;
+
+[[nodiscard]] constexpr std::int32_t kv_page_tokens(KvCacheStorage storage) noexcept {
+    return storage == KvCacheStorage::KvarnGroup128 ? kKvarnPageTokens : kPagedKVPageSize;
+}
+
+[[nodiscard]] constexpr int kv_page_shift(KvCacheStorage storage) noexcept {
+    return storage == KvCacheStorage::KvarnGroup128 ? 7 : 6;
+}
+
 /** Optional exact (unquantized) KV tail shared by both page views.
  *
  * The tail is a ring of `page_count` pages holding the newest `retention` tokens of a sequence in

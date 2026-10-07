@@ -70,6 +70,21 @@ enum class KvCacheStorage : std::uint8_t {
     // a residual axis (two bytes per block) over a group-64 scale, paired with the rk8v4 packed
     // int4 value plane. Opt-in through --kv-dtype rk2v4-e8.
     RotatedE8RootKeyInt4Value,
+    // KVarN (this fork only): keys and values packed at one shared code width into 128-token
+    // records in the rotation-then-Hadamard domain, each record carrying its own sink and tail
+    // slots. The width is the separate `KvarnBits` profile field, so this single value covers
+    // k4v4/k5v5/k6v6. Opt-in through --kv-dtype kvarn:k4v4|k5v5|k6v6. Appended last so the
+    // existing values keep their numbering.
+    KvarnGroup128,
+};
+
+// Code width of one KVarN record, shared by keys and values (K=V). Selected with the storage as
+// part of the --kv-dtype value: kvarn:k4v4, kvarn:k5v5 or kvarn:k6v6. Meaningful only when the
+// KV storage is KvCacheStorage::KvarnGroup128.
+enum class KvarnBits : std::uint8_t {
+    Bits4 = 4,
+    Bits5 = 5,
+    Bits6 = 6,
 };
 
 // Element type of the exact KV tail's unquantized ring. Both are 16-bit, so the tail's page
@@ -461,6 +476,9 @@ struct EngineOptions {
     // selection passes over the vocabulary per scored column. It is a CausalScoring-only option.
     int score_topk                     = 0;
     KvCacheStorage kv_cache            = KvCacheStorage::BFloat16;
+    // KVarN code width, meaningful only when kv_cache is KvCacheStorage::KvarnGroup128. Defaults
+    // to k4v4, the level `--kv-dtype kvarn` selects.
+    KvarnBits kvarn_bits               = KvarnBits::Bits4;
     // Exact KV tail: the newest N tokens per sequence are kept unquantized in a second page pool
     // so attention can merge a quantized body partial with an exact tail partial. Zero disables
     // the tail and leaves behavior and memory as they are without it.

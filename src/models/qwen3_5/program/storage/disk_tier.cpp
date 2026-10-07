@@ -15,7 +15,6 @@
 namespace ninfer::models::qwen3_5::detail {
 namespace {
 
-constexpr auto kPageTokens = static_cast<std::uint32_t>(kPagedKVPageSize);
 // Pages staged per disk transfer, for each KV family.
 constexpr std::uint32_t kDiskStagingPages = 32;
 // The rewrite seam and at most this many of the earliest long anchors are written with an owner:
@@ -124,11 +123,11 @@ ProgramImpl::DiskOwnerSpill ProgramImpl::plan_owner_spill(const SequenceState& s
     const auto add_chain = [&](DiskKVKind kind, const KVAddressSpaceStore& addresses,
                                KVAddressSpaceHandle address, std::uint32_t chain_frontier) {
         const std::uint32_t pages =
-            std::min(kv_pages_for_frontier(chain_frontier), addresses.mapped_pages(address));
+            std::min(kv_pages_for_frontier(chain_frontier, kv_storage), addresses.mapped_pages(address));
         for (std::uint32_t page = 0; page < pages; ++page) {
             spill.items.push_back(DiskSpillItem{
                 .kind     = kind,
-                .frontier = std::min((page + 1U) * kPageTokens, chain_frontier),
+                .frontier = std::min((page + 1U) * device_kv_tokens_per_page(), chain_frontier),
                 .page     = page,
             });
         }
@@ -167,17 +166,17 @@ ProgramImpl::DiskOwnerSpill ProgramImpl::plan_owner_spill(const SequenceState& s
     for (const auto& [checkpoint, state] : checkpoints) {
         // The chain keys a page by its end, so a boundary inside a page needs that page again
         // under its own frontier.
-        if (checkpoint % kPageTokens != 0) {
+        if (checkpoint % device_kv_tokens_per_page() != 0) {
             spill.items.push_back(DiskSpillItem{.kind     = DiskKVKind::MainKV,
                                                 .frontier = checkpoint,
-                                                .page     = checkpoint / kPageTokens});
+                                                .page     = checkpoint / device_kv_tokens_per_page()});
         }
         const std::uint32_t backend_checkpoint =
             backend_frontier_at(speculative_backend, checkpoint);
-        if (backend && backend_checkpoint % kPageTokens != 0) {
+        if (backend && backend_checkpoint % device_kv_tokens_per_page() != 0) {
             spill.items.push_back(DiskSpillItem{.kind     = DiskKVKind::BackendKV,
                                                 .frontier = backend_checkpoint,
-                                                .page     = backend_checkpoint / kPageTokens});
+                                                .page     = backend_checkpoint / device_kv_tokens_per_page()});
         }
         spill.items.push_back(
             DiskSpillItem{.kind = DiskKVKind::StateImage, .frontier = checkpoint, .state = state});
@@ -276,7 +275,7 @@ bool ProgramImpl::progress_owner_spill(const SequenceState& sequence, DiskOwnerS
                     break;
                 }
                 const LogicalKVPageHandle logical = addresses.logical_page(address, item.page);
-                if (pages.committed_columns(logical) < item.frontier - item.page * kPageTokens) {
+                if (pages.committed_columns(logical) < item.frontier - item.page * device_kv_tokens_per_page()) {
                     spill.stopped = true;
                     break;
                 }
@@ -360,10 +359,10 @@ ProgramImpl::disk_restorable_frontier(const RequestBasePlanImpl& base,
     frontiers.erase(std::unique(frontiers.begin(), frontiers.end()), frontiers.end());
     const bool backend       = backend_kv_pages != nullptr;
     const auto chain_present = [&](DiskKVKind kind, std::uint32_t frontier) {
-        for (std::uint32_t end = kPageTokens; end <= frontier; end += kPageTokens) {
+        for (std::uint32_t end = device_kv_tokens_per_page(); end <= frontier; end += device_kv_tokens_per_page()) {
             if (!disk_kv->contains(disk_identity(base.prefix_digests, end), kind)) { return false; }
         }
-        return frontier % kPageTokens == 0 ||
+        return frontier % device_kv_tokens_per_page() == 0 ||
                disk_kv->contains(disk_identity(base.prefix_digests, frontier), kind);
     };
     for (const std::uint32_t frontier : frontiers) {
@@ -397,7 +396,7 @@ bool ProgramImpl::restore_prefix_from_disk(SequenceState& sequence, RequestContr
                                    const KVAddressSpaceStore& addresses,
                                    KVAddressSpaceHandle address, HostKVAllocation& allocation,
                                    std::uint32_t chain_frontier) {
-        const std::uint32_t page_count = kv_pages_for_frontier(chain_frontier);
+        const std::uint32_t page_count = kv_pages_for_frontier(chain_frontier, kv_storage);
         if (page_count > addresses.mapped_pages(address)) { return false; }
         const HostKVAllocationView staging = disk_staging_arena->writable_view(allocation);
         const std::size_t stride           = staging.layout().page_stride;
@@ -410,7 +409,7 @@ bool ProgramImpl::restore_prefix_from_disk(SequenceState& sequence, RequestContr
             destinations.clear();
             for (std::uint32_t page = begin; page < begin + count; ++page) {
                 ids.push_back(disk_identity(sequence.prefix_digests,
-                                            std::min((page + 1U) * kPageTokens, chain_frontier)));
+                                            std::min((page + 1U) * device_kv_tokens_per_page(), chain_frontier)));
                 destinations.push_back(pages.physical(addresses.logical_page(address, page)));
             }
             if (!disk_kv->restore_pages(ids, kind,

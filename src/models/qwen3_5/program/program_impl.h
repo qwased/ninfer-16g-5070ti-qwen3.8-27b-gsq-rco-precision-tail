@@ -54,12 +54,18 @@ using RewriteCheckpointSpec = qwen3_5::RewriteCheckpointSpec;
 // cannot spare one.
 inline constexpr std::uint32_t kKVLeaseGrowthMarginTokens = 4096;
 
-[[nodiscard]] constexpr std::uint32_t kv_pages_for_tokens(std::uint32_t tokens) noexcept {
-    return tokens == 0 ? 0U : 1U + (tokens - 1U) / static_cast<std::uint32_t>(kPagedKVPageSize);
+// Page/token conversions for the Main or Backend KV pool. The page size follows `storage` (KVarN
+// records span a 128-token group); every pre-existing format keeps 64.
+[[nodiscard]] constexpr std::uint32_t kv_pages_for_tokens(std::uint32_t tokens,
+                                                          KvCacheStorage storage) noexcept {
+    return tokens == 0 ? 0U
+                       : 1U + (tokens - 1U) / static_cast<std::uint32_t>(kv_page_tokens(storage));
 }
 
-[[nodiscard]] constexpr std::uint32_t kv_tokens_for_pages(std::uint32_t pages) noexcept {
-    return pages == 0 ? 0U : (pages - 1U) * static_cast<std::uint32_t>(kPagedKVPageSize) + 1U;
+[[nodiscard]] constexpr std::uint32_t kv_tokens_for_pages(std::uint32_t pages,
+                                                          KvCacheStorage storage) noexcept {
+    return pages == 0 ? 0U
+                      : (pages - 1U) * static_cast<std::uint32_t>(kv_page_tokens(storage)) + 1U;
 }
 
 using ReusePath = ninfer::PrefixReusePath;
@@ -1610,11 +1616,17 @@ private:
         return std::max(prefill_chunk, kKVLeaseGrowthMarginTokens);
     }
 
+    // Tokens one physical Main/Backend KV page holds for this Program's storage (64, or 128 for
+    // KVarN's group-sized records).
+    [[nodiscard]] std::uint32_t device_kv_tokens_per_page() const noexcept {
+        return static_cast<std::uint32_t>(kv_page_tokens(kv_storage));
+    }
+
     [[nodiscard]] std::uint32_t kv_lease_cushion_pages() const noexcept {
         // One round's Backend requirement can sit a verified extent plus a draft window above the
         // frontier the previous round checked, so the cushion has to absorb that jump before the
         // lease is extended again. A copy round can verify wider than the neural draft window.
-        const auto page  = static_cast<std::uint32_t>(kPagedKVPageSize);
+        const auto page  = device_kv_tokens_per_page();
         const auto slack = widest_verify_window() + draft_window + 2U;
         return (slack + page - 1U) / page + 1U;
     }
@@ -1628,13 +1640,19 @@ private:
 
     // Page groups an entitlement needs to cover `tokens` and still hold a full cushion.
     [[nodiscard]] std::uint32_t kv_lease_pages_for_tokens(std::uint32_t tokens) const noexcept {
-        return kv_pages_for_tokens(tokens) + kv_lease_cushion_pages();
+        return kv_pages_for_tokens(tokens, kv_storage) + kv_lease_cushion_pages();
     }
 
     void ensure_sequence_kv_lease(SequenceState& sequence, std::uint32_t main_tokens,
                                   std::uint32_t backend_tokens);
     void trim_sequence_kv(SequenceState& sequence, std::uint32_t main_tokens,
                           std::uint32_t backend_tokens = 0);
+    // KVarN keeps its sink/tail outside the paged records, so continuation needs its own
+    // restore-after-trim, capture-into-a-StateImage and activate-from-a-StateImage steps.
+    void restore_sequence_kvarn_tail(SequenceState& sequence, std::uint32_t main_tokens,
+                                     std::uint32_t backend_tokens);
+    void capture_sequence_kvarn_tail(const SequenceState& sequence, StateImageHandle image);
+    void activate_sequence_kvarn_tail(const SequenceState& sequence);
     void release_sequence_growth_entitlement(SequenceState& sequence) noexcept;
     void release_active_sequence_kv_strict(SequenceState& sequence) noexcept;
     void release_sequence_kv_strict(SequenceState& sequence,

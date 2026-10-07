@@ -28,8 +28,10 @@ std::int32_t checked_i32(std::uint32_t value, const char* label) {
     return static_cast<std::int32_t>(value);
 }
 
-std::uint32_t kv_pages_for_frontier(std::uint32_t frontier) noexcept {
-    return frontier == 0 ? 0U : 1U + (frontier - 1U) / static_cast<std::uint32_t>(kPagedKVPageSize);
+std::uint32_t kv_pages_for_frontier(std::uint32_t frontier, KvCacheStorage storage) noexcept {
+    return frontier == 0
+               ? 0U
+               : 1U + (frontier - 1U) / static_cast<std::uint32_t>(kv_page_tokens(storage));
 }
 
 std::size_t context_resource_index(runtime::ContextResourceClass resource) {

@@ -1,6 +1,7 @@
 #include "models/qwen3_5/program/program_impl.h"
 #include "models/qwen3_5/program/context_work.h"
 #include "core/device.h"
+#include "ninfer/ops/kvarn_attention.h"
 
 #include <algorithm>
 #include <array>
@@ -461,7 +462,7 @@ ProgramImpl::active_snapshot_shared_resources(const SequenceState& sequence) con
     const auto add_kv = [&](const KVAddressSpaceStore& addresses, const LogicalKVPageStore& pages,
                             KVAddressSpaceHandle address, std::uint32_t frontier,
                             std::uint32_t& device_pages) {
-        const std::uint32_t full_pages = frontier / static_cast<std::uint32_t>(kPagedKVPageSize);
+        const std::uint32_t full_pages = frontier / device_kv_tokens_per_page();
         if (full_pages > addresses.mapped_pages(address)) {
             throw std::logic_error("active snapshot frontier exceeds its mapped KV pages");
         }
@@ -683,7 +684,7 @@ bool ProgramImpl::can_retain_rewrite_checkpoint(const PreparedPromptData& prompt
 std::uint32_t ProgramImpl::device_kv_prefix_pages(const KVAddressSpaceStore& addresses,
                                                   KVAddressSpaceHandle address,
                                                   std::uint32_t frontier) const {
-    const std::uint32_t required = kv_pages_for_frontier(frontier);
+    const std::uint32_t required = kv_pages_for_frontier(frontier, kv_storage);
     if (required > addresses.mapped_pages(address)) {
         throw std::logic_error("checkpoint KV requirement exceeds address membership");
     }
@@ -699,7 +700,7 @@ std::uint32_t ProgramImpl::device_kv_prefix_pages(const KVAddressSpaceStore& add
 std::uint32_t ProgramImpl::shared_kv_prefix_pages(const KVAddressSpaceStore& addresses,
                                                   KVAddressSpaceHandle address,
                                                   std::uint32_t frontier) const {
-    const std::uint32_t required = kv_pages_for_frontier(frontier);
+    const std::uint32_t required = kv_pages_for_frontier(frontier, kv_storage);
     if (required > addresses.mapped_pages(address)) {
         throw std::logic_error("checkpoint KV requirement exceeds address membership");
     }
@@ -708,7 +709,7 @@ std::uint32_t ProgramImpl::shared_kv_prefix_pages(const KVAddressSpaceStore& add
     std::uint32_t shared = 0;
     for (std::uint32_t page = 0; page < required; ++page) {
         if (pages.address_references(addresses.logical_page(address, page)) <= 1) { continue; }
-        if (page + 1U == required && frontier % static_cast<std::uint32_t>(kPagedKVPageSize) != 0) {
+        if (page + 1U == required && frontier % device_kv_tokens_per_page() != 0) {
             continue;
         }
         ++shared;
@@ -719,7 +720,7 @@ std::uint32_t ProgramImpl::shared_kv_prefix_pages(const KVAddressSpaceStore& add
 std::uint32_t ProgramImpl::shared_device_kv_prefix_pages(const KVAddressSpaceStore& addresses,
                                                          KVAddressSpaceHandle address,
                                                          std::uint32_t frontier) const {
-    const std::uint32_t required = kv_pages_for_frontier(frontier);
+    const std::uint32_t required = kv_pages_for_frontier(frontier, kv_storage);
     if (required > addresses.mapped_pages(address)) {
         throw std::logic_error("checkpoint KV requirement exceeds address membership");
     }
@@ -736,10 +737,10 @@ std::uint32_t ProgramImpl::shared_device_kv_prefix_pages(const KVAddressSpaceSto
 bool ProgramImpl::partial_tail_cow_required(const KVAddressSpaceStore& addresses,
                                             KVAddressSpaceHandle address,
                                             std::uint32_t frontier) const {
-    if (frontier == 0 || frontier % static_cast<std::uint32_t>(kPagedKVPageSize) == 0) {
+    if (frontier == 0 || frontier % device_kv_tokens_per_page() == 0) {
         return false;
     }
-    const std::uint32_t required = kv_pages_for_frontier(frontier);
+    const std::uint32_t required = kv_pages_for_frontier(frontier, kv_storage);
     if (required > addresses.mapped_pages(address)) {
         throw std::logic_error("checkpoint KV requirement exceeds address membership");
     }
@@ -753,7 +754,7 @@ std::uint32_t
 ProgramImpl::missing_shared_device_kv_prefix_pages(const KVAddressSpaceStore& addresses,
                                                    KVAddressSpaceHandle address,
                                                    std::uint32_t frontier) const {
-    const std::uint32_t required = kv_pages_for_frontier(frontier);
+    const std::uint32_t required = kv_pages_for_frontier(frontier, kv_storage);
     if (required > addresses.mapped_pages(address)) {
         throw std::logic_error("checkpoint KV requirement exceeds address membership");
     }
@@ -774,7 +775,7 @@ std::size_t ProgramImpl::host_kv_prefix_bytes(const KVAddressSpaceStore& address
     try {
         const LogicalKVPageStore& pages =
             (&addresses == text_kv_addresses.get()) ? *text_kv_pages : *backend_kv_pages;
-        const std::uint32_t required_pages = kv_pages_for_frontier(frontier);
+        const std::uint32_t required_pages = kv_pages_for_frontier(frontier, kv_storage);
         if (required_pages > addresses.mapped_pages(address)) { return 0; }
         std::size_t bytes = 0;
         for (std::uint32_t page = 0; page < required_pages; ++page) {
@@ -782,13 +783,13 @@ std::size_t ProgramImpl::host_kv_prefix_bytes(const KVAddressSpaceStore& address
             if (pages.address_references(logical) > 1) { continue; }
             if (!pages.host_resident(logical)) { continue; }
             if (page + 1U == required_pages &&
-                frontier % static_cast<std::uint32_t>(kPagedKVPageSize) != 0 &&
+                frontier % device_kv_tokens_per_page() != 0 &&
                 partial_tail_cow_required(addresses, address, frontier)) {
                 continue;
             }
-            const std::uint32_t begin = page * static_cast<std::uint32_t>(kPagedKVPageSize);
+            const std::uint32_t begin = page * device_kv_tokens_per_page();
             const std::uint32_t selected_columns =
-                std::min(static_cast<std::uint32_t>(kPagedKVPageSize), frontier - begin);
+                std::min(device_kv_tokens_per_page(), frontier - begin);
             if (selected_columns != pages.committed_columns(logical)) {
                 // A destructive private rewrite changes this tail page's content epoch, so its
                 // old Host replica cannot remain part of the active entitlement.
@@ -841,8 +842,8 @@ ProgramImpl::checkpoint_summary(const SequenceState& sequence, runtime::Checkpoi
             {
                 .main_frontier    = checkpoint.frontier,
                 .backend_frontier = backend_frontier,
-                .main_pages       = kv_pages_for_frontier(checkpoint.frontier),
-                .backend_pages    = kv_pages_for_frontier(backend_frontier),
+                .main_pages       = kv_pages_for_frontier(checkpoint.frontier, kv_storage),
+                .backend_pages    = kv_pages_for_frontier(backend_frontier, kv_storage),
             },
         .rebuild_work = validated_rebuild_work(rebuild_work, checkpoint.frontier),
     };
@@ -937,8 +938,8 @@ ProgramImpl::shared_prefix_summary(const SharedPrefixState& shared) const {
                     {
                         .main_frontier    = shared.frontier,
                         .backend_frontier = shared.backend_frontier,
-                        .main_pages       = kv_pages_for_frontier(shared.frontier),
-                        .backend_pages    = kv_pages_for_frontier(shared.backend_frontier),
+                        .main_pages       = kv_pages_for_frontier(shared.frontier, kv_storage),
+                        .backend_pages    = kv_pages_for_frontier(shared.backend_frontier, kv_storage),
                     },
                 .rebuild_work = validated_rebuild_work(shared.rebuild_work, shared.frontier),
             },
@@ -1521,12 +1522,12 @@ void ProgramImpl::ensure_sequence_kv_lease(SequenceState& sequence, std::uint32_
     // full pool near the ceiling is not mistaken for a shortfall that ends the answer early.
     const std::uint32_t backend_ceiling =
         std::min(capacity, request.lease_ceiling + kv_lease_backend_allowance_tokens());
-    const std::uint32_t reach = kv_pages_for_tokens(backend_ceiling);
+    const std::uint32_t reach = kv_pages_for_tokens(backend_ceiling, kv_storage);
     const bool main_thin =
-        text_pages < reach && kv_pages_for_tokens(main_tokens) + cushion > text_pages;
+        text_pages < reach && kv_pages_for_tokens(main_tokens, kv_storage) + cushion > text_pages;
     const bool backend_thin = sequence.kv->backend.has_value() && backend_tokens != 0 &&
                               backend_pages < reach &&
-                              kv_pages_for_tokens(backend_tokens) + cushion > backend_pages;
+                              kv_pages_for_tokens(backend_tokens, kv_storage) + cushion > backend_pages;
     if (!main_thin && !backend_thin) { return; }
 
     // A full window first; when the pool cannot spare one, a step-sized extension still leaves
@@ -1567,7 +1568,7 @@ void ProgramImpl::ensure_sequence_kv_lease(SequenceState& sequence, std::uint32_
         request.active_resources.device.backend_kv_pages += wanted.backend - backend_pages;
         return true;
     };
-    const std::uint32_t page = static_cast<std::uint32_t>(kPagedKVPageSize);
+    const std::uint32_t page = device_kv_tokens_per_page();
     bool space_limited       = false;
     for (const std::uint32_t extra_tokens : {kv_lease_growth_margin_tokens(), 2U * page, page}) {
         try {
@@ -1600,9 +1601,9 @@ ProgramImpl::device_kv_lease_settlement_tokens(SequenceHandle sequence,
     const std::uint32_t step = std::max(widest_verify_window() + 1U, forced_span_tokens);
     const std::uint32_t covered =
         std::min(state.kv->backend
-                     ? kv_tokens_for_pages(backend_kv_addresses->entitlement(*state.kv->backend))
+                     ? kv_tokens_for_pages(backend_kv_addresses->entitlement(*state.kv->backend), kv_storage)
                      : std::numeric_limits<std::uint32_t>::max(),
-                 kv_tokens_for_pages(text_kv_addresses->entitlement(state.kv->text)));
+                 kv_tokens_for_pages(text_kv_addresses->entitlement(state.kv->text), kv_storage));
     const std::uint32_t frontier = state.execution_frontier;
     const std::uint32_t slack    = covered > frontier + step ? covered - frontier - step : 0U;
     const std::uint32_t forced   = forced_span_tokens == 0 ? 0U : forced_span_tokens + 1U;
@@ -1709,6 +1710,124 @@ void ProgramImpl::trim_sequence_kv(SequenceState& sequence, std::uint32_t main_t
     text_kv_addresses->destructive_truncate(sequence.kv->text, main_tokens);
     if (sequence.kv->backend) {
         backend_kv_addresses->destructive_truncate(*sequence.kv->backend, backend_tokens);
+    }
+    restore_sequence_kvarn_tail(sequence, main_tokens, backend_tokens);
+}
+
+namespace {
+
+std::int32_t kvarn_frontier_i32(std::uint32_t frontier) {
+    if (frontier > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
+        throw std::overflow_error("KVarN tail frontier exceeds int32");
+    }
+    return static_cast<std::int32_t>(frontier);
+}
+
+} // namespace
+
+void ProgramImpl::restore_sequence_kvarn_tail(SequenceState& sequence, std::uint32_t main_tokens,
+                                              std::uint32_t backend_tokens) {
+    if (!sequence.kv) { return; }
+    const auto restore = [&](PagedKVCache& cache, KVAddressSpaceStore& addresses,
+                             KVAddressSpaceHandle address, std::uint32_t frontier) {
+        if (cache.storage() != KvCacheStorage::KvarnGroup128) { return; }
+        if (!addresses.active(address)) {
+            throw std::logic_error("KVarN tail restore requires an active KV address space");
+        }
+        const PagedKVCacheView view = cache.execution_view(addresses.execution_row(address));
+        // The closed restore Op accepts at most sixteen layers per call.
+        std::array<ops::KvarnPagedLayerView, 16> layers;
+        for (std::uint32_t begin = 0; begin < cache.layers(); begin += layers.size()) {
+            const auto count = std::min<std::uint32_t>(layers.size(), cache.layers() - begin);
+            for (std::uint32_t layer = 0; layer < count; ++layer) {
+                layers[layer] = view.kvarn_layer_view(begin + layer);
+            }
+            ops::kvarn_restore_tail(kvarn_frontier_i32(frontier),
+                                    std::span(layers).first(count), compute_streams[0]);
+        }
+    };
+    restore(decoder->text_kv, *text_kv_addresses, sequence.kv->text, main_tokens);
+    if (sequence.kv->backend && decoder->mtp_cache() != nullptr) {
+        restore(*decoder->mtp_cache(), *backend_kv_addresses, *sequence.kv->backend,
+                backend_tokens);
+    }
+}
+
+void ProgramImpl::capture_sequence_kvarn_tail(const SequenceState& sequence,
+                                              StateImageHandle image) {
+    if (!sequence.kv || decoder->text_kv.storage() != KvCacheStorage::KvarnGroup128) { return; }
+    if (!state_images->has_kvarn()) {
+        throw std::logic_error("KVarN continuation StateImage storage is unavailable");
+    }
+    const std::int32_t slot = state_store->physical_slot(image);
+    const auto capture      = [&](PagedKVCache& cache, KVAddressSpaceStore& addresses,
+                             KVAddressSpaceHandle address, bool mtp) {
+        if (!addresses.active(address)) {
+            throw std::logic_error("KVarN continuation capture requires active KV storage");
+        }
+        const PagedKVCacheView execution = cache.execution_view(addresses.execution_row(address));
+        const std::uint32_t image_layers =
+            mtp ? state_images->kvarn_mtp_layers() : state_images->kvarn_text_layers();
+        if (image_layers != cache.layers()) {
+            throw std::logic_error("KVarN continuation StateImage layer count is invalid");
+        }
+        for (std::uint32_t layer = 0; layer < cache.layers(); ++layer) {
+            const ops::KvarnPagedLayerView source = execution.kvarn_layer_view(layer);
+            const ops::KvarnTailStateView destination =
+                mtp ? state_images->kvarn_mtp_tail(layer, slot)
+                    : state_images->kvarn_text_tail(layer, slot);
+            CUDA_CHECK(cudaMemcpyAsync(destination.k.data, source.tail_k.data,
+                                       destination.k.bytes(), cudaMemcpyDeviceToDevice,
+                                       compute_streams[0]));
+            CUDA_CHECK(cudaMemcpyAsync(destination.v.data, source.tail_v.data,
+                                       destination.v.bytes(), cudaMemcpyDeviceToDevice,
+                                       compute_streams[0]));
+            CUDA_CHECK(cudaMemcpyAsync(
+                destination.logical_pages.data, source.tail_logical_pages.data,
+                destination.logical_pages.bytes(), cudaMemcpyDeviceToDevice, compute_streams[0]));
+        }
+    };
+    capture(decoder->text_kv, *text_kv_addresses, sequence.kv->text, false);
+    if (sequence.kv->backend && decoder->mtp_cache() != nullptr) {
+        capture(*decoder->mtp_cache(), *backend_kv_addresses, *sequence.kv->backend, true);
+    }
+}
+
+void ProgramImpl::activate_sequence_kvarn_tail(const SequenceState& sequence) {
+    if (!sequence.kv || decoder->text_kv.storage() != KvCacheStorage::KvarnGroup128) { return; }
+    if (!state_images->has_kvarn()) {
+        throw std::logic_error("KVarN continuation StateImage storage is unavailable");
+    }
+    const StateImageHandle image =
+        sequence.state.fork_pending ? sequence.state.read : sequence.state.write;
+    const std::int32_t slot = state_store->physical_slot(image);
+    const auto activate     = [&](PagedKVCache& cache, KVAddressSpaceStore& addresses,
+                              KVAddressSpaceHandle address, bool mtp) {
+        if (!addresses.active(address)) {
+            throw std::logic_error("KVarN continuation activation requires active KV storage");
+        }
+        const PagedKVCacheView execution = cache.execution_view(addresses.execution_row(address));
+        const std::uint32_t image_layers =
+            mtp ? state_images->kvarn_mtp_layers() : state_images->kvarn_text_layers();
+        if (image_layers != cache.layers()) {
+            throw std::logic_error("KVarN continuation StateImage layer count is invalid");
+        }
+        for (std::uint32_t layer = 0; layer < cache.layers(); ++layer) {
+            const ops::KvarnTailStateView source = mtp ? state_images->kvarn_mtp_tail(layer, slot)
+                                                       : state_images->kvarn_text_tail(layer, slot);
+            const ops::KvarnPagedLayerView destination = execution.kvarn_layer_view(layer);
+            CUDA_CHECK(cudaMemcpyAsync(destination.tail_k.data, source.k.data, source.k.bytes(),
+                                       cudaMemcpyDeviceToDevice, compute_streams[0]));
+            CUDA_CHECK(cudaMemcpyAsync(destination.tail_v.data, source.v.data, source.v.bytes(),
+                                       cudaMemcpyDeviceToDevice, compute_streams[0]));
+            CUDA_CHECK(cudaMemcpyAsync(destination.tail_logical_pages.data,
+                                       source.logical_pages.data, source.logical_pages.bytes(),
+                                       cudaMemcpyDeviceToDevice, compute_streams[0]));
+        }
+    };
+    activate(decoder->text_kv, *text_kv_addresses, sequence.kv->text, false);
+    if (sequence.kv->backend && decoder->mtp_cache() != nullptr) {
+        activate(*decoder->mtp_cache(), *backend_kv_addresses, *sequence.kv->backend, true);
     }
 }
 
