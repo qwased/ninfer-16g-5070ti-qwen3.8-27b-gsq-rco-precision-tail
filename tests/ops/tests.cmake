@@ -207,6 +207,10 @@ include("${CMAKE_CURRENT_LIST_DIR}/linear_add/tests.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/linear_pair/tests.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/linear_swiglu/tests.cmake")
 
+ninfer_add_op_test(ninfer_kvarn_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_kvarn.cpp"
+  LIBRARIES ninfer_ops)
+
 add_test(NAME ninfer_softmax_attention_wide_test
   COMMAND ninfer_tests ninfer_softmax_attention_test --wide-only)
 set_tests_properties(ninfer_softmax_attention_wide_test

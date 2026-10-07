@@ -184,3 +184,8 @@ ninfer_add_test(ninfer_qwen3_5_structured_round_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_structured_round.cpp"
   LIBRARIES ninfer_model_runtime ninfer_core)
 set_tests_properties(ninfer_qwen3_5_structured_round_test PROPERTIES SKIP_RETURN_CODE 77)
+
+ninfer_add_test(ninfer_qwen3_5_mtp_greedy_parity_real_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_mtp_greedy_parity_real.cpp"
+  LIBRARIES ninfer_engine)
+set_tests_properties(ninfer_qwen3_5_mtp_greedy_parity_real_test PROPERTIES SKIP_RETURN_CODE 77)

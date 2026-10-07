@@ -44,7 +44,7 @@ ninfer::ContextCacheOptions budgeted(std::size_t budget_mib, std::uint32_t priva
 void resolve(ninfer::ContextCacheOptions& cache, std::uint32_t capacity) {
     ninfer::models::qwen3_5::detail::resolve_host_cache_budget(
         cache, *cache.max_private_continuations, *cache.max_shared_prefixes, capacity, kImageBytes,
-        kGroupBytes);
+        kGroupBytes, ninfer::KvCacheStorage::BFloat16);
 }
 
 int check_split(const ninfer::ContextCacheOptions& cache, std::uint32_t anchors,
@@ -271,7 +271,7 @@ int main() {
         cache.automatic_long_anchors            = true;
         ninfer::models::qwen3_5::detail::resolve_host_cache_budget(
             cache, *cache.max_private_continuations, *cache.max_shared_prefixes, 240000,
-            195897344ULL, 2162688ULL);
+            195897344ULL, 2162688ULL, ninfer::KvCacheStorage::BFloat16);
         failures += check(
             *cache.max_long_anchors_per_continuation == 31 && cache.host_state_slots == 139 &&
                 cache.host_kv_capacity_bytes == 27296221184ULL,
