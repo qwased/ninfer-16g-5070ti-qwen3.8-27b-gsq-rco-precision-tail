@@ -291,9 +291,17 @@ This repository is indexed as graph project `D-ninfer-ninfer-precision-tail`; th
 - **Structural, negative and exhaustive claims must come from the graph**, not grep alone: "who
   calls X", "X is unused", "no other caller", "nothing else reads this field", "the only place".
   Use `trace_path` inbound (plus coverage); a grep-only result is labelled as grep-only.
+  **`trace_path` resolves callables only**: an inbound trace on a *field* qualified name returns
+  `callers_total: 0` even when readers exist. Field consumers need `query_graph` Cypher over the
+  `USAGE`/`WRITES` edge types, and those edges are **name-resolved** — they conflate same-named
+  fields across classes (a `kvarn_bits` read comes back against whichever declaring class the
+  resolver picked) and carry no access-site line, only the enclosing symbol. Treat a field-level
+  negative claim as *indicative* and reconcile it with grep before recording it.
 - **Changing a shared type is a graph task.** Before editing a struct or enum in
-  `include/ninfer/types.h` or another shared header, enumerate its consumers — the graph finds
-  readers that grep misses through visitors, serialisers and macros.
+  `include/ninfer/types.h` or another shared header, enumerate its consumers. The graph *can* find
+  readers grep misses (visitors, serialisers, macros), but on the one measured C++ field case
+  (`KvarnBits`, 2026-10-08) its consumer set was exactly grep's — so use it to *check* the sweep,
+  not to replace it.
 - Literal lookups (one flag, one string, one config value) stay with `grep`.
 
 ### Build, run and resources
