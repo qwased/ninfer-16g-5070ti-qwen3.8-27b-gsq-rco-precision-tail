@@ -777,6 +777,10 @@ public:
     }
     const SpeculativeBackend speculative_backend;
     const KvCacheStorage kv_storage;
+    // KVarN's packed width; only meaningful when kv_storage == KvCacheStorage::KvarnGroup128.
+    // Not part of capture_identity_tag(): the three levels never meet in one process, and the
+    // disk tier's profile directory already separates them by the bits-dependent main stride.
+    const KvarnBits kvarn_bits;
     const ProposalHead proposal_head;
     const ops::RopeYarn rope_yarn;
     const std::uint32_t mtp_attention_window;

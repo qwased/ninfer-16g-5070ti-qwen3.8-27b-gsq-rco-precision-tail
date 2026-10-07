@@ -131,7 +131,7 @@ requested_reasoning_effort_text(const std::optional<RequestedReasoningEffort>& r
     return requested ? std::string(requested_reasoning_effort_name(*requested)) : "default";
 }
 
-const char* kv_cache_name(ninfer::KvCacheStorage storage) {
+const char* kv_cache_name(ninfer::KvCacheStorage storage, ninfer::KvarnBits kvarn_bits) {
     switch (storage) {
     case ninfer::KvCacheStorage::BFloat16:
         return "bf16";
@@ -152,6 +152,14 @@ const char* kv_cache_name(ninfer::KvCacheStorage storage) {
     case ninfer::KvCacheStorage::Fp8KeyNvfp4Value:
         return "k8v4";
     case ninfer::KvCacheStorage::KvarnGroup128:
+        switch (kvarn_bits) {
+        case ninfer::KvarnBits::Bits4:
+            return "kvarn:k4v4";
+        case ninfer::KvarnBits::Bits5:
+            return "kvarn:k5v5";
+        case ninfer::KvarnBits::Bits6:
+            return "kvarn:k6v6";
+        }
         return "kvarn";
     }
     return "unknown";
@@ -754,7 +762,7 @@ std::string format_server_start_json(
         {"prefill_chunk", engine_options.prefill_chunk},
         {"fast_prefill_kernel", engine_options.fast_prefill_kernel},
         {"log_stats_interval_ms", options.log_stats_interval_ms},
-        {"kv_cache", kv_cache_name(engine_options.kv_cache)},
+        {"kv_cache", kv_cache_name(engine_options.kv_cache, engine_options.kvarn_bits)},
         {"vision", engine_options.enable_vision},
         {"cuda_graph", engine_options.use_cuda_graph},
         {"lm_head_q4", engine_options.lm_head_q4},

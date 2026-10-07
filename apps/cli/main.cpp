@@ -80,7 +80,7 @@ std::string format_finish(ninfer::FinishReason reason) {
     return "unknown";
 }
 
-std::string format_kv_cache(ninfer::KvCacheStorage storage) {
+std::string format_kv_cache(ninfer::KvCacheStorage storage, ninfer::KvarnBits kvarn_bits) {
     switch (storage) {
     case ninfer::KvCacheStorage::BFloat16:
         return "bf16";
@@ -101,6 +101,14 @@ std::string format_kv_cache(ninfer::KvCacheStorage storage) {
     case ninfer::KvCacheStorage::Fp8KeyNvfp4Value:
         return "k8v4";
     case ninfer::KvCacheStorage::KvarnGroup128:
+        switch (kvarn_bits) {
+        case ninfer::KvarnBits::Bits4:
+            return "kvarn:k4v4";
+        case ninfer::KvarnBits::Bits5:
+            return "kvarn:k5v5";
+        case ninfer::KvarnBits::Bits6:
+            return "kvarn:k6v6";
+        }
         return "kvarn";
     }
     return "unknown";
@@ -226,7 +234,7 @@ void print_generation_summary(const ninfer::GenerationResult& result,
                                        std::to_string(memory.kv_capacity_max_page_groups));
     print_metric("gpu weights used", format_arena_used(memory.weights));
     print_metric("gpu sequence used", format_arena_used(memory.sequence));
-    print_metric("kv cache dtype", format_kv_cache(memory.kv_cache));
+    print_metric("kv cache dtype", format_kv_cache(memory.kv_cache, memory.kvarn_bits));
     print_metric("kv cache payload", format_bytes(memory.kv_payload_bytes));
     print_metric("gpu workspace peak", format_arena_peak(memory.workspace));
     print_metric("runtime reservation", format_bytes(memory.runtime_reservation_bytes));

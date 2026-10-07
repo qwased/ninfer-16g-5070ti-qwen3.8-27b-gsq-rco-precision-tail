@@ -296,7 +296,7 @@ Options parse_options(int argc, char** argv) {
     return out;
 }
 
-std::string kv_name(ninfer::KvCacheStorage value) {
+std::string kv_name(ninfer::KvCacheStorage value, ninfer::KvarnBits kvarn_bits) {
     switch (value) {
     case ninfer::KvCacheStorage::BFloat16:
         return "bf16";
@@ -317,6 +317,14 @@ std::string kv_name(ninfer::KvCacheStorage value) {
     case ninfer::KvCacheStorage::Fp8KeyNvfp4Value:
         return "k8v4";
     case ninfer::KvCacheStorage::KvarnGroup128:
+        switch (kvarn_bits) {
+        case ninfer::KvarnBits::Bits4:
+            return "kvarn:k4v4";
+        case ninfer::KvarnBits::Bits5:
+            return "kvarn:k5v5";
+        case ninfer::KvarnBits::Bits6:
+            return "kvarn:k6v6";
+        }
         return "kvarn";
     }
     throw std::logic_error("unknown KV dtype");
@@ -356,7 +364,8 @@ std::filesystem::path prepare_output_directory(const Options& options,
                                                const CorpusSelection& corpus) {
     std::filesystem::path output = options.output.value_or(
         std::filesystem::path("profiles/perplexity") / safe_component(load.model_name) /
-        safe_component(load.prefill_signature) / kv_name(options.kv) /
+        safe_component(load.prefill_signature) /
+        safe_component(kv_name(options.kv, options.kvarn_bits)) /
         safe_component(corpus.corpus_id) / safe_component(corpus.mode) / timestamp());
     if (std::filesystem::exists(output)) {
         if (!std::filesystem::is_directory(output) ||
@@ -465,7 +474,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     const TopKReferenceProtocol reference_protocol{
         .corpus_id        = corpus.corpus_id,
         .model_name       = load.model_name,
-        .kv_dtype         = kv_name(options.kv),
+        .kv_dtype         = kv_name(options.kv, options.kvarn_bits),
         .context          = options.context,
         .stride           = options.disjoint ? options.context : options.stride,
         .score_width      = effective_score_width,
@@ -700,7 +709,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
           {"score_tile_tokens", 1024},
           {"score_width_tokens", options.score_width == 0 ? 1024 : options.score_width},
           {"score_topk_tokens", options.score_topk},
-          {"kv_dtype", kv_name(options.kv)},
+          {"kv_dtype", kv_name(options.kv, options.kvarn_bits)},
           {"kv_tail_tokens", options.kv_tail_tokens},
           {"kv_tail_type", options.kv_tail_type == ninfer::KvTailType::BFloat16 ? "bf16" : "f16"}}},
         {"timing",
@@ -736,7 +745,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
 
     std::cout << "Perplexity result\n"
               << "artifact: " << load.model_name << '\n'
-              << "kv: " << kv_name(options.kv) << ", corpus: " << corpus.corpus_id << " / "
+              << "kv: " << kv_name(options.kv, options.kvarn_bits) << ", corpus: " << corpus.corpus_id << " / "
               << corpus.mode << ", context/stride: " << options.context << '/'
               << (options.disjoint ? options.context : options.stride)
               << (options.disjoint ? " (disjoint windows)" : "") << ", score-width: "

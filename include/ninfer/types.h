@@ -1364,6 +1364,9 @@ struct MemorySummary {
     std::uint32_t kv_capacity_page_groups     = 0;
     std::uint32_t kv_capacity_max_page_groups = 0;
     KvCacheStorage kv_cache                   = KvCacheStorage::BFloat16;
+    // KVarN's packed width (K == V). Only read when kv_cache == KvCacheStorage::KvarnGroup128;
+    // the three levels share one storage value, so the level must travel separately.
+    KvarnBits kvarn_bits                      = KvarnBits::Bits4;
     ArenaMemorySummary weights;
     ArenaMemorySummary sequence;
     ArenaMemorySummary workspace;

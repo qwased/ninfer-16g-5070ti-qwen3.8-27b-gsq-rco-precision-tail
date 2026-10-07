@@ -126,7 +126,7 @@ const char* protocol_name(std::string_view protocol) noexcept {
     return "http";
 }
 
-const char* kv_cache_name(ninfer::KvCacheStorage storage) noexcept {
+const char* kv_cache_name(ninfer::KvCacheStorage storage, ninfer::KvarnBits kvarn_bits) noexcept {
     switch (storage) {
     case ninfer::KvCacheStorage::BFloat16:
         return "bf16";
@@ -147,6 +147,14 @@ const char* kv_cache_name(ninfer::KvCacheStorage storage) noexcept {
     case ninfer::KvCacheStorage::Fp8KeyNvfp4Value:
         return "k8v4";
     case ninfer::KvCacheStorage::KvarnGroup128:
+        switch (kvarn_bits) {
+        case ninfer::KvarnBits::Bits4:
+            return "kvarn:k4v4";
+        case ninfer::KvarnBits::Bits5:
+            return "kvarn:k5v5";
+        case ninfer::KvarnBits::Bits6:
+            return "kvarn:k6v6";
+        }
         return "kvarn";
     }
     return "unknown";
@@ -498,7 +506,8 @@ void OperationalLog::engine_capacity(const GenerationService& service) const {
     const ninfer::ContextCostSummary context_cost = service.load_summary().context_cost;
 
     logger_->info("capacity | KV {} tokens, {}, {} | pages {}/{} | runtime {} | free {}",
-                  product::format_pretty_count(memory.kv_capacity), kv_cache_name(memory.kv_cache),
+                  product::format_pretty_count(memory.kv_capacity),
+                  kv_cache_name(memory.kv_cache, memory.kvarn_bits),
                   kv_capacity_mode_name(memory.kv_capacity_mode),
                   product::format_pretty_count(memory.kv_capacity_page_groups),
                   product::format_pretty_count(memory.kv_capacity_max_page_groups),

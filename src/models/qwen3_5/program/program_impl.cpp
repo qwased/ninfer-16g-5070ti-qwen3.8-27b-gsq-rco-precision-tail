@@ -153,6 +153,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
       draft_window(plan.draft_window), lookup_ngram(plan.lookup_ngram), mtp_policy(plan.mtp_policy),
       ngram_draft_window(plan.ngram_draft_window), ngram_min_match(plan.ngram_min_match),
       speculative_backend(plan.speculative_backend), kv_storage(plan.kv_storage),
+      kvarn_bits(plan.kvarn_bits),
       proposal_head(plan.proposal_head), rope_yarn(plan.rope_yarn),
       mtp_attention_window(plan.mtp_attention_window), vision_enabled(plan.features.vision),
       use_cuda_graph(plan.use_cuda_graph), causal_scoring(plan.causal_scoring),
@@ -844,6 +845,7 @@ MemorySummary ProgramImpl::memory_summary() const noexcept {
     out.max_context     = capacity;
     out.kv_capacity     = kv_capacity;
     out.kv_cache        = kv_storage;
+    out.kvarn_bits      = kvarn_bits;
     const auto& weights = parameters.model.storage_stats();
     out.weights = ArenaMemorySummary{weights.device_capacity_bytes, weights.device_capacity_bytes,
                                      weights.device_capacity_bytes};
