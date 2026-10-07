@@ -70,6 +70,10 @@ ninfer_add_test(ninfer_qwen3_5_kvarn_continuation_image_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_kvarn_continuation_image.cpp"
   LIBRARIES ninfer_engine ninfer_core)
 
+ninfer_add_test(ninfer_qwen3_5_kvarn_tail_row_reset_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_kvarn_tail_row_reset.cpp"
+  LIBRARIES ninfer_engine ninfer_core)
+
 ninfer_add_test(ninfer_qwen3_5_context_store_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_context_store.cpp"
   LIBRARIES ninfer_engine ninfer_core)

@@ -663,6 +663,10 @@ std::vector<ScoredTarget> ProgramImpl::causal_score(PreparedPromptData&& prompt,
         if (text_kv_addresses->bound_row(*address) != 0) {
             throw std::logic_error("causal score did not bind the unique Main KV row");
         }
+        // A fresh score reuses the Main row without restoring a KVarN tail image, and the tail's
+        // slot markers are only ever appended to at runtime, so the previous occupant's markers
+        // would otherwise be read as this sequence's. No-op on a non-KVarN cache.
+        decoder->text_kv.reset_kvarn_tail_row(0, compute_streams[0]);
         text_kv_addresses->ensure_mapped_to_tokens(*address, predictor_count, compute_streams);
 
         const std::int32_t state_slot = state_store->physical_slot(*state);

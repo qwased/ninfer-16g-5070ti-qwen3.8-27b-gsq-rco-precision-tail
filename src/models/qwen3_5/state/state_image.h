@@ -173,7 +173,8 @@ struct StateImageDeviceSlotView {
 };
 
 // A part of one StateImage a consumer can take on its own: one linear-attention layer's conv and
-// recurrent state, or everything else (the continuation hidden and any DFlash local state).
+// recurrent state, or everything else -- the continuation hidden, any DFlash local state, and a
+// KVarN body's full-attention sink/tail (the MTP pool's included).
 struct StateImagePart {
     enum class Kind : std::uint8_t {
         LinearLayer,
@@ -187,8 +188,9 @@ struct StateImagePart {
 /**
  * Caller-backed fixed storage for Qwen3.6 continuation state.
  *
- * Every absolute slot contains common GDN/hidden state and, for a DFlash Program, its local cyclic
- * K/V state. The pool owns neither slot roles nor logical checkpoint identity.
+ * Every absolute slot contains common GDN/hidden state, for a DFlash Program its local cyclic K/V
+ * state, and for a KVarN body each full-attention layer's sink/tail (the MTP pool's included). The
+ * pool owns neither slot roles nor logical checkpoint identity.
  */
 class StateImageDevicePool {
 public:

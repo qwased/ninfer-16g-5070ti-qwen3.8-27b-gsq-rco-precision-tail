@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <limits>
 #include <optional>
 #include <span>
@@ -671,6 +672,11 @@ bool ProgramImpl::publish_active_continuation(SequenceState& state, RequestContr
         }
         populate_continuation_summary(state, summary);
         summary.active_references = 0;
+    } catch (const std::logic_error& error) {
+        // The invariant guards here (e.g. a KVarN capture without a KVarN StateImage) are
+        // unreachable by planning, so if one fires the refusal must not be silent.
+        std::fprintf(stderr, "active continuation publish refused: %s\n", error.what());
+        return false;
     } catch (...) { return false; }
     release_active_shared_references(state);
     release_sequence_growth_entitlement(state);
