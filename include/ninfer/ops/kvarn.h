@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/paged_kv_cache.h"
 #include "core/tensor.h"
 
 #include <cuda_runtime_api.h>
@@ -170,6 +171,10 @@ struct KvarnPagedBatchLayerView {
     Tensor block_tables;       // I32 [Nlogical,C]
     std::int32_t num_kv_heads = 0;
     std::int32_t bits         = 4;
+    // WP6: the shared exact tail ring holding the newest rows unquantized, so attention merges the
+    // packed body with an exact tail over the same split axis. Disabled (`retention == 0`) leaves
+    // the body's own partition untouched.
+    PagedKVExactTailView tail;
 };
 
 // Inputs are Hadamard-rotated contiguous BF16 [D,G,N] tiles. The represented decode is:

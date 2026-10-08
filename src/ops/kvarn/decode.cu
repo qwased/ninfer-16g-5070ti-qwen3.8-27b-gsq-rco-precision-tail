@@ -4,6 +4,7 @@
 #include "ops/kvarn/config.cuh"
 #include "ops/kvarn/decode_kernel.cuh"
 #include "ops/kvarn/streaming_prefill.cuh"
+#include "ops/kvarn/tail_partial.h"
 #include "ops/softmax_attention/dense/causal_cache/launch.h"
 
 #include <cuda_bf16.h>
@@ -92,6 +93,10 @@ void launch_partial(const Tensor& query, const Tensor& positions, const Tensor& 
                     Tensor& output, cudaStream_t stream, CurrentKV current) {
     const dim3 grid(Geometry::KVHeads, splits,
                     query.ne[3] * div_up(width + 2 * (ColumnsPerBlock - 1), ColumnsPerBlock));
+    // The exact tail is the shared ring on the cache view. Both its partial and the body's reduce
+    // have to know the retention before they can agree on where the body stops.
+    const std::int32_t tail_tokens =
+        cache.tail.enabled() && cache.tail.page_count > 0 ? cache.tail.retention : 0;
     constexpr int query_groups    = ColumnsPerBlock >= 4 ? ColumnsPerBlock / 2 : ColumnsPerBlock;
     constexpr int warps_per_group = ColumnsPerBlock == 8 ? 4 : detail::kDecodeWarps;
     constexpr std::size_t query_smem =
@@ -110,18 +115,26 @@ void launch_partial(const Tensor& query, const Tensor& positions, const Tensor& 
             Masked ? static_cast<const std::int32_t*>(valid_columns.data) : nullptr,
             static_cast<const std::int32_t*>(table_rows.data), cache.block_tables.ne[0], width,
             query.ne[2], column_begin, static_cast<std::int32_t>(envelope.max_visible_keys),
-            cache.num_kv_heads, scale, static_cast<__nv_bfloat16*>(partial_acc.data),
+            tail_tokens, cache.num_kv_heads, scale, static_cast<float*>(partial_acc.data),
             static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data), current);
     CUDA_CHECK(cudaGetLastError());
+
+    // The tail owns splits [body_active, total_active) of this launch, so it reads the same
+    // `partial_*` buffers the body wrote and the reducer below merges. It must run after the body's
+    // append staged this step's rows (the ring holds them) and before the reduce reads both.
+    exact_tail_partial(query, positions, valid_columns, cache.tail.k_pages, cache.tail.v_pages,
+                       cache.tail.page_count, tail_tokens, splits, column_begin, width,
+                       static_cast<std::int32_t>(envelope.max_visible_keys), query.ne[3], scale,
+                       partial_acc, partial_m, partial_l, stream);
 
     const dim3 reduce_grid(Geometry::QHeads, 1, width * query.ne[3]);
     detail::reduce_output_hadamard_kernel<Geometry, MultiBatch, Masked>
         <<<reduce_grid, D, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(partial_acc.data),
+            static_cast<const float*>(partial_acc.data),
             static_cast<const float*>(partial_m.data), static_cast<const float*>(partial_l.data),
             static_cast<const std::int32_t*>(positions.data),
             Masked ? static_cast<const std::int32_t*>(valid_columns.data) : nullptr, width,
-            query.ne[2], column_begin, query.ne[3], splits,
+            query.ne[2], column_begin, query.ne[3], splits, tail_tokens,
             static_cast<__nv_bfloat16*>(output.data));
 }
 
@@ -176,7 +189,7 @@ void decode_attention_impl(const Tensor& query, const Tensor& positions, const T
             split_limit = DecodeMidSplits;
         }
         const int splits = std::min(split_capacity, split_limit);
-        Tensor acc = workspace.alloc(DType::BF16, {D, query.ne[1], width, splits * query.ne[3]});
+        Tensor acc = workspace.alloc(DType::FP32, {D, query.ne[1], width, splits * query.ne[3]});
         Tensor m   = workspace.alloc(DType::FP32, {query.ne[1], width, splits * query.ne[3]});
         Tensor l   = workspace.alloc(DType::FP32, {query.ne[1], width, splits * query.ne[3]});
         const bool multi    = query.ne[3] > 1;

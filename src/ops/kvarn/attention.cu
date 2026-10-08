@@ -9,6 +9,7 @@
 #include "ops/kvarn/decode.cuh"
 #include "ops/kvarn/hadamard.cuh"
 #include "ops/kvarn/store.cuh"
+#include "ops/kvarn/tail_partial.h"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -67,8 +68,26 @@ void require_view(const KvarnPagedBatchLayerView& view) {
     }
 }
 
-ViewPointers pointers(KvarnPagedBatchLayerView view) {
-    return {
+// WP6: an enabled exact tail must be usable for the rows this launch appends or attends, or the
+// kernel would read outside the ring. `retention == 0` means the feature is off and the ring is
+// absent, which is not an error.
+//
+// The ring is addressed flat (`paged_kv_element_offset`), so only the element count is load-bearing;
+// the plane's declared axis order is not consulted here.
+void require_exact_tail(const KvarnPagedBatchLayerView& view, std::int32_t batch_size) {
+    const auto& tail = view.tail;
+    if (tail.retention <= 0) { return; }
+    const std::int64_t needed = static_cast<std::int64_t>(kvarn::D) * kPagedKVPageSize *
+                                view.num_kv_heads * tail.page_count * batch_size;
+    if (tail.page_count <= 0 || tail.k_pages.data == nullptr || tail.v_pages.data == nullptr ||
+        (tail.k_pages.dtype != DType::BF16 && tail.k_pages.dtype != DType::FP16) ||
+        tail.v_pages.dtype != tail.k_pages.dtype || tail.k_pages.numel() < needed ||
+        tail.v_pages.numel() < needed) {
+        throw std::invalid_argument("KVarN attention: invalid exact-tail view");
+    }
+}
+
+ViewPointers pointers(KvarnPagedBatchLayerView view) {    return {
         static_cast<std::uint8_t*>(view.records.data),
         static_cast<__nv_bfloat16*>(view.tail_k.data),
         static_cast<__nv_bfloat16*>(view.tail_v.data),
@@ -468,6 +487,7 @@ void validate_inputs(const Tensor& query, const Tensor* key, const Tensor* value
                      const Tensor& positions, const Tensor& valid_columns, const Tensor& table_rows,
                      const KvarnPagedBatchLayerView& cache, const Tensor& output) {
     require_view(cache);
+    require_exact_tail(cache, query.ne[3]);
     if (query.dtype != DType::BF16 || query.ne[0] != kvarn::D || query.ne[2] <= 0 ||
         query.ne[3] <= 0 || query.ne[1] % cache.num_kv_heads != 0 || !query.is_contiguous() ||
         output.dtype != DType::BF16 || output.numel() != query.numel() || !output.is_contiguous() ||
@@ -563,8 +583,9 @@ std::size_t kvarn_attention_workspace_capacity_bytes(std::int32_t query_heads,
     if (query_heads == 24 && envelope.max_visible_keys > 8198) {
         const std::size_t split_rows = static_cast<std::size_t>(query_heads) * decode_width *
                                        batch_size * kvarn::DecodeLongSplits;
+        // `partial_acc` is FP32 (WP6.2): D floats of accumulator plus the two FP32 statistics.
         decode = std::max(
-            decode, split_rows * (kvarn::D * sizeof(std::uint16_t) + 2 * sizeof(float)) + 3 * 256);
+            decode, split_rows * (kvarn::D * sizeof(float) + 2 * sizeof(float)) + 3 * 256);
     }
     if (batch_size != 1 || max_width < 64) { return decode; }
     const std::size_t slab_tokens =
@@ -588,6 +609,11 @@ void kvarn_attention(Tensor query, Tensor key, Tensor value, const Tensor& posit
         throw std::invalid_argument("KVarN attention: empty execution envelope");
     }
     const bool rotate_on_stage = key.ne[2] <= kFusedStageMaxWidth;
+    // The exact ring holds this step's rows unquantized, and the KVarN append never calls
+    // ops::kv_cache_append (which writes one for the other storages), so the ring is written here --
+    // before rotate_kv overwrites k/v in place. The tail partial then reads rows this step appended.
+    kvarn::stage_exact_tail(key, value, positions, valid_columns, cache.num_kv_heads,
+                            cache.tail.k_pages, cache.tail.v_pages, cache.tail.page_count, stream);
     if (!rotate_on_stage) { rotate_kv(key, value, stream); }
     stage_kv(key, value, positions, valid_columns, kv_table_rows, cache, provisional,
              rotate_on_stage, stream);
@@ -622,7 +648,10 @@ void kvarn_kv_append(Tensor key, Tensor value, const Tensor& positions, const Te
                      const Tensor& kv_table_rows, KvarnPagedBatchLayerView cache, bool provisional,
                      cudaStream_t stream) {
     require_view(cache);
+    require_exact_tail(cache, key.ne[3]);
     const bool rotate_on_stage = key.ne[2] <= kFusedStageMaxWidth;
+    kvarn::stage_exact_tail(key, value, positions, valid_columns, cache.num_kv_heads,
+                            cache.tail.k_pages, cache.tail.v_pages, cache.tail.page_count, stream);
     if (!rotate_on_stage) { rotate_kv(key, value, stream); }
     stage_kv(key, value, positions, valid_columns, kv_table_rows, cache, provisional,
              rotate_on_stage, stream);

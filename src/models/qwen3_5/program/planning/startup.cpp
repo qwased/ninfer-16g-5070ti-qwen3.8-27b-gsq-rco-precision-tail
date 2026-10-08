@@ -1033,12 +1033,12 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
         throw std::invalid_argument("an MTP attention window requires the MTP backend");
     }
     if (options.kv_cache == KvCacheStorage::KvarnGroup128) {
-        // Both options rewrite how history rows are addressed, and neither is wired into the KVarN
-        // body yet. Reject them instead of silently ignoring the request.
-        if (options.kv_tail_tokens != 0) {
-            throw std::invalid_argument(
-                "KVarN does not support the exact KV tail yet; --kv-tail-tokens must be 0");
-        }
+        // `--kv-tail-tokens` is wired into the KVarN body (WP6): the op partitions the window into
+        // `body_window = window - N` and reads the newest N keys from the shared exact ring. Both
+        // `--kv-tail-type` values are supported -- the ring is addressed and converted by dtype, so
+        // neither is silently ignored. `--mtp-attention-window` rewrites how history rows are
+        // addressed and is still not wired into the KVarN body, so it stays rejected rather than
+        // silently ignored.
         if (options.speculative.mtp_attention_window != 0) {
             throw std::invalid_argument("KVarN does not support --mtp-attention-window yet");
         }

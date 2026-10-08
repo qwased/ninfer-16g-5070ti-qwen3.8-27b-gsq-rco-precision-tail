@@ -14,6 +14,51 @@
 #include <cstdint>
 
 namespace ninfer::ops::kvarn {
+
+namespace detail {
+template <typename Geometry>
+__device__ __forceinline__ int kvarn_decode_active_splits(int window, int launch_capacity);
+} // namespace detail
+
+// Exact-tail split partition (WP6). `tail_tokens` is the configured retention N: zero (or a
+// negative) leaves the partition the identity -- body_window == window, body_active ==
+// total_active, tail_active == 0 -- so a launch without a tail is unchanged bit for bit. Beyond
+// that the newest min(N, window) keys move from the body to the tail, and the splits the body no
+// longer uses become the tail's, at the same global indices the reducer merges.
+//
+// Same tier arithmetic as the small-T exact-tail partition (`causal_small_t_tail_partition`), driven
+// by the KVarN body's own active-split policy (`detail::kvarn_decode_active_splits`), which differs
+// from the small-T default above window 8198 at 24 query heads. It lives here rather than in
+// `tail_partial.cuh` because the body kernel, the tail partial and the reducer all share it.
+struct KvarnExactTailPartition {
+    int body_window; // the quantized body covers keys [0, body_window)
+    int body_active; // splits [0, body_active) belong to the body partial
+    int tail_active; // splits [body_active, body_active + tail_active) belong to the tail partial
+};
+
+template <typename Geometry>
+__device__ __forceinline__ KvarnExactTailPartition
+kvarn_exact_tail_partition(int window, int tail_tokens, int launch_capacity) {
+    const int total_active = detail::kvarn_decode_active_splits<Geometry>(window, launch_capacity);
+    const int tail_keys    = tail_tokens > 0 ? (tail_tokens < window ? tail_tokens : window) : 0;
+    const int body_window  = window - tail_keys;
+    int body_active        = 0;
+    if (body_window > 0) {
+        body_active = detail::kvarn_decode_active_splits<Geometry>(body_window, launch_capacity);
+    }
+    if (body_window > 0 || tail_keys > 0) {
+        // The reducer merges exactly the splits in [0, total_active); the body and the tail between
+        // them have to cover the whole window. Whenever the tail has keys the body stops one split
+        // short of the range so the newest keys never fall out of the softmax, and it keeps at least
+        // one split even when it is empty -- an empty body that asked for no split would leave the
+        // reducer reading a split nobody wrote.
+        const int body_limit = tail_keys > 0 ? total_active - 1 : total_active;
+        if (body_active > body_limit) { body_active = body_limit; }
+        if (body_active < 1) { body_active = 1; }
+    }
+    return KvarnExactTailPartition{body_window, body_active, total_active - body_active};
+}
+
 namespace detail {
 
 inline constexpr int kDecodeBc            = 32;
@@ -471,9 +516,9 @@ __launch_bounds__((ColumnsPerBlock >= 4 ? 16 : kDecodeWarps * ColumnsPerBlock) *
                                  const std::int32_t* valid_columns, const std::int32_t* table_rows,
                                  std::int32_t table_stride, std::int32_t tokens,
                                  std::int32_t full_width, std::int32_t column_begin,
-                                 std::int32_t logical_capacity, std::int32_t heads, float scale,
-                                 __nv_bfloat16* partial_acc, float* partial_m, float* partial_l,
-                                 CurrentKV current) {
+                                 std::int32_t logical_capacity, std::int32_t tail_tokens,
+                                 std::int32_t heads, float scale, float* partial_acc,
+                                 float* partial_m, float* partial_l, CurrentKV current) {
     static_assert(ColumnsPerBlock == 1 || ColumnsPerBlock == 4 || ColumnsPerBlock == 8);
     constexpr int ColumnsPerMma            = ColumnsPerBlock >= 4 ? 2 : 1;
     constexpr int WarpGroups               = ColumnsPerBlock / ColumnsPerMma;
@@ -575,7 +620,7 @@ __launch_bounds__((ColumnsPerBlock >= 4 ? 16 : kDecodeWarps * ColumnsPerBlock) *
                 const int d      = index % D;
                 const int q_head = kv_head * Geometry::GroupSize + row;
                 partial_acc[causal_partial_acc_index<Geometry>(q_head, d, output_column, split,
-                                                               tokens)] = __float2bfloat16(0.0f);
+                                                               tokens)] = 0.0f;
             }
         }
     };
@@ -597,15 +642,25 @@ __launch_bounds__((ColumnsPerBlock >= 4 ? 16 : kDecodeWarps * ColumnsPerBlock) *
         if (column < group_end) { write_neutral(); }
         return;
     }
-    const int window        = anchor_position + 1;
-    const int active_splits = kvarn_decode_active_splits<Geometry>(window, split_count);
+    const int window = tail_tokens > 0
+                           ? positions[batch_column_base + column_begin + (valid_tokens - 1)] + 1
+                           : anchor_position + 1;
+    // With an exact tail the whole launch shares one partition: the tail partial and the reducer each
+    // see a single launch-wide window, so a per-column-group partition here would leave the three
+    // sides disagreeing about where the body ends and the tail begins. Without a tail the partition
+    // is the identity and the per-group window is the one this kernel has always used, so a launch
+    // without a tail is unchanged bit for bit.
+    const KvarnExactTailPartition tail_partition =
+        kvarn_exact_tail_partition<Geometry>(window, tail_tokens, split_count);
+    const int active_splits = tail_partition.body_active;
+    const int body_window   = tail_partition.body_window;
     if (split >= active_splits) { return; }
-    const int logical_tiles = div_up(window, Bc);
+    const int logical_tiles = div_up(body_window, Bc);
     const bool tile_split   = logical_tiles >= active_splits;
     const int units_per_split =
-        tile_split ? div_up(logical_tiles, active_splits) : div_up(window, active_splits);
+        tile_split ? div_up(logical_tiles, active_splits) : div_up(body_window, active_splits);
     const int split_start = split * units_per_split * (tile_split ? Bc : 1);
-    const int split_end   = min(split_start + units_per_split * (tile_split ? Bc : 1), window);
+    const int split_end   = min(split_start + units_per_split * (tile_split ? Bc : 1), body_window);
     if (split_start >= split_end) {
         write_neutral();
         return;
@@ -988,58 +1043,50 @@ __launch_bounds__((ColumnsPerBlock >= 4 ? 16 : kDecodeWarps * ColumnsPerBlock) *
             partial_l[causal_partial_stat_index<Geometry>(q_head, column1, split, tokens)] = l1;
         }
     }
-    if (local_warp >= FirstPVWarp) {
-        const int consumer_warp = local_warp - FirstPVWarp;
-#pragma unroll
-        for (int n = 0; n < PVNtPerWarp; ++n) {
-            const int global_n = consumer_warp * PVNtPerWarp + n;
-            if (global_n >= PVNt) { continue; }
-            const int d0   = global_n * 8 + 2 * lid;
-            const int d1   = d0 + 1;
-            const int row0 = gid;
-            const int row1 = row0 + 8;
-            if (row0 < row_count) {
-                qkv_s[(group_lane * Br + row0) * D + d0] =
-                    __float2bfloat16(warp_state.accumulator[n][0]);
-                qkv_s[(group_lane * Br + row0) * D + d1] =
-                    __float2bfloat16(warp_state.accumulator[n][1]);
-            }
-            const int row1_head = ColumnsPerMma == 2 ? row0 : row1;
-            if (row1_head < row_count) {
-                qkv_s[(group_lane * Br + row1) * D + d0] =
-                    __float2bfloat16(warp_state.accumulator[n][2]);
-                qkv_s[(group_lane * Br + row1) * D + d1] =
-                    __float2bfloat16(warp_state.accumulator[n][3]);
-            }
-        }
-    }
     __syncthreads();
     if (column >= group_end) { return; }
-    for (int chunk = local_tid; chunk < ColumnsPerMma * row_count * (D / 8);
-         chunk += WarpsPerColumn * 32) {
-        const int packed_column = chunk / (row_count * (D / 8));
-        const int local_chunk   = chunk - packed_column * row_count * (D / 8);
-        const int row           = local_chunk / (D / 8);
-        const int d             = (local_chunk % (D / 8)) * 8;
-        const int output_column = column + packed_column;
-        if (output_column >= group_end) { continue; }
-        const int source_row = row + (ColumnsPerMma == 2 ? packed_column * 8 : 0);
-        const int q_head     = kv_head * Geometry::GroupSize + row;
-        const std::int64_t destination =
-            causal_partial_acc_index<Geometry>(q_head, d, output_column, split, tokens);
-        store_vec(partial_acc + destination,
-                  load_vec<int4>(qkv_s + (group_lane * Br + source_row) * D + d));
+    // `partial_acc` is FP32 (WP6.2), so each lane's pair of adjacent accumulator columns goes
+    // straight out. This replaces a BF16 tile staging whose only purpose was to widen the store to
+    // 16 bytes; staging FP32 would have doubled the tile buffer's footprint instead.
+    if (local_warp >= FirstPVWarp) {
+        const int consumer_warp = local_warp - FirstPVWarp;
+        const int output_tile   = consumer_warp * PVNtPerWarp;
+        const bool head_valid   = gid < row_count;
+        const int q_head        = kv_head * Geometry::GroupSize + gid;
+#pragma unroll
+        for (int n = 0; n < PVNtPerWarp; ++n) {
+            const int global_n = output_tile + n;
+            if (global_n >= PVNt) { continue; }
+            const int d = global_n * 8 + 2 * lid;
+            if (head_valid) {
+                store_vec(partial_acc +
+                              causal_partial_acc_index<Geometry>(q_head, d, column, split, tokens),
+                          make_float2(warp_state.accumulator[n][0],
+                                      warp_state.accumulator[n][1]));
+                // The packed route puts the second column in the mma's upper eight rows; a scalar
+                // route only ever has the one column. Both halves share the row guard: the upper
+                // rows exist only where `head_valid` does.
+                if constexpr (ColumnsPerMma == 2) {
+                    if (column + 1 < group_end) {
+                        store_vec(partial_acc + causal_partial_acc_index<Geometry>(
+                                                    q_head, d, column + 1, split, tokens),
+                                  make_float2(warp_state.accumulator[n][2],
+                                              warp_state.accumulator[n][3]));
+                    }
+                }
+            }
+        }
     }
 }
 
 template <typename Geometry, bool MultiBatch, bool Masked>
 __launch_bounds__(D) __global__
-    void reduce_output_hadamard_kernel(const __nv_bfloat16* partial_acc, const float* partial_m,
+    void reduce_output_hadamard_kernel(const float* partial_acc, const float* partial_m,
                                        const float* partial_l, const std::int32_t* positions,
                                        const std::int32_t* valid_columns, std::int32_t tokens,
                                        std::int32_t full_width, std::int32_t column_begin,
                                        std::int32_t batch_size, std::int32_t split_count,
-                                       __nv_bfloat16* output) {
+                                       std::int32_t tail_tokens, __nv_bfloat16* output) {
     const int q_head      = static_cast<int>(blockIdx.x);
     const int flat_column = static_cast<int>(blockIdx.z);
     int batch             = 0;
@@ -1070,7 +1117,12 @@ __launch_bounds__(D) __global__
         partial_m += stat_offset;
         partial_l += stat_offset;
     }
-    const int active_splits = kvarn_decode_active_splits<Geometry>(query_position + 1, split_count);
+    // A tailed launch partitions and merges the launch-wide window the body and the tail used; with
+    // no tail this is the row's own window, exactly as before. The two agree whenever no tail is
+    // configured, because then the partition is the identity.
+    const int window =
+        tail_tokens > 0 ? positions[tokens - 1] + 1 : query_position + 1;
+    const int active_splits = kvarn_decode_active_splits<Geometry>(window, split_count);
 
     __shared__ float stage[2][D];
     __shared__ float split_weights[D];
@@ -1087,6 +1139,8 @@ __launch_bounds__(D) __global__
         __syncthreads();
     }
     const float head_m = stage[0][0];
+    // stage[0] is reused as the l scratch below, so every thread must have read head_m first.
+    __syncthreads();
 
     float local_l = 0.0F;
     if (head_m > -CUDART_INF_F) {
@@ -1108,6 +1162,8 @@ __launch_bounds__(D) __global__
         __syncthreads();
     }
     const float head_l = stage[0][0];
+    // stage[0] is reused as the Hadamard scratch below, so every thread must have read head_l.
+    __syncthreads();
 
     float numerator = 0.0F;
     if (head_l > 0.0F) {
@@ -1118,7 +1174,7 @@ __launch_bounds__(D) __global__
             const float weight       = split_weights[split];
             const std::int64_t index = partial_acc_offset + causal_partial_acc_index<Geometry>(
                                                                 q_head, tid, token, split, tokens);
-            numerator += __bfloat162float(partial_acc[index]) * weight;
+            numerator += partial_acc[index] * weight;
         }
     }
     bool valid = true;
@@ -1152,4 +1208,5 @@ __launch_bounds__(D) __global__
 }
 
 } // namespace detail
+
 } // namespace ninfer::ops::kvarn

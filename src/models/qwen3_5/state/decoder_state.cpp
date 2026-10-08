@@ -343,6 +343,16 @@ ops::KvarnPagedBatchLayerView PagedKVCache::kvarn_batch_layer_view(std::uint32_t
     const std::int32_t rows      = kvarn_tail_logical_pages_.ne[1];
     const std::int32_t row_heads = kv_heads_ * ops::kKvarnTailSlots;
     const std::int32_t layer_i   = static_cast<std::int32_t>(layer);
+    // WP6: the same per-layer exact ring `layer_view` exposes for the other storages. The KVarN
+    // route reads it directly instead of going through a block table.
+    PagedKVExactTailView tail;
+    if (exact_tail_ != nullptr && tail_retention_ > 0) {
+        const std::size_t tail_base = static_cast<std::size_t>(layer) * 2;
+        tail.k_pages    = exact_tail_->plane(tail_base);
+        tail.v_pages    = exact_tail_->plane(tail_base + 1);
+        tail.page_count = static_cast<std::int32_t>(tail_ring_pages_);
+        tail.retention  = tail_retention_;
+    }
     return {
         .records = pages_.plane(layer),
         .tail_k  = kvarn_tail_k_.slice(3, layer_i, 1).view(
@@ -354,6 +364,7 @@ ops::KvarnPagedBatchLayerView PagedKVCache::kvarn_batch_layer_view(std::uint32_t
         .block_tables = execution_tables_.matrix(layer_rank(layer)),
         .num_kv_heads = kv_heads_,
         .bits         = static_cast<std::int32_t>(kvarn_bits_),
+        .tail         = tail,
     };
 }
 
