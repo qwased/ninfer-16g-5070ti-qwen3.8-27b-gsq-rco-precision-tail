@@ -279,7 +279,8 @@ This repository is indexed as graph project `D-ninfer-ninfer-precision-tail`; th
   Use `trace_path` inbound for callables (plus coverage). **`trace_path` resolves callables only** —
   a *field* needs `query_graph` Cypher over `USAGE`/`WRITES`, whose edges are **name-resolved** (they
   conflate same-named fields across classes and carry no access-site line), so treat a field-level
-  negative claim as *indicative* and reconcile it with `grep` before recording it.
+  negative claim as *indicative* and reconcile it with `grep` before recording it. **State the query
+  that was run** whenever the claim is negative or exhaustive.
 - **Changing a shared type is a graph task.** Before editing a struct or enum in
   `include/ninfer/types.h` or another shared header, enumerate its consumers, and use the result to
   *check* a `grep` sweep rather than to replace it.
