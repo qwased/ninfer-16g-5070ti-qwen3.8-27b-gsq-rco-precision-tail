@@ -3,6 +3,8 @@
 #include "ops/op_tester.h"
 #include "ops/kvarn/config.cuh"
 #include "ops/kvarn/decode.cuh"
+#include "ops/kvarn/tail_partial.h"
+#include "ops/softmax_attention/dense/causal_cache/geometry.cuh"
 
 #include <algorithm>
 #include <array>
@@ -11,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <iterator>
 #include <limits>
@@ -1828,6 +1831,813 @@ int run_append_attention_oracle(int first, int width, bool final_query) {
     return failures;
 }
 
+// ---------------------------------------------------------------------------
+// WP6.1 exact tail partial (route (a)): the KVarN body's rotated-domain tail partial reads the
+// shared exact ring and produces (acc, m, l) at the split indices the quantized body leaves free,
+// applying W to its FP32 accumulator exactly once. Qualified against an independent FP64 oracle
+// over the same BF16 rows.
+// ---------------------------------------------------------------------------
+
+// Host mirror of small_t.cuh's default split tier, which is what the KVarN body's
+// `kvarn_decode_active_splits` falls back to below window 8198. Independent of the device code.
+int host_small_t_default_splits(int window, int split_scale) {
+    int target = 480 / split_scale;
+    if (window <= 4096) {
+        target = 64 / split_scale;
+    } else if (window <= 8198) {
+        target = 128 / split_scale;
+    } else if (window <= 16390) {
+        target = 256 / split_scale;
+    }
+    const int minimum = 4 * split_scale;
+    int splits        = (window + target - 1) / target;
+    if (splits < minimum) { splits = minimum; }
+    const int maximum = 85 * split_scale;
+    return splits < maximum ? splits : maximum;
+}
+
+struct HostTailPartition {
+    int body_window;
+    int body_active;
+    int tail_active;
+};
+
+HostTailPartition host_tail_partition(int window, int tail_tokens, int launch_capacity,
+                                      int split_scale) {
+    const auto active = [&](int w) {
+        if (w <= 0) { return launch_capacity; }
+        const int splits = host_small_t_default_splits(w, split_scale);
+        return splits < launch_capacity ? splits : launch_capacity;
+    };
+    const int total      = active(window);
+    const int tail_keys  = tail_tokens > 0 ? std::min(tail_tokens, window) : 0;
+    const int body_window = window - tail_keys;
+    int body_active       = body_window > 0 ? active(body_window) : 0;
+    if (body_window > 0 || tail_keys > 0) {
+        const int limit = tail_keys > 0 ? total - 1 : total;
+        if (body_active > limit) { body_active = limit; }
+        if (body_active < 1) { body_active = 1; }
+    }
+    return HostTailPartition{body_window, body_active, total - body_active};
+}
+
+// f16 bits -> float, so the F16-ring oracle reads exactly the values the kernel's `__half` reads.
+inline float f16_bits_to_f32(std::uint16_t h) {
+    const std::uint32_t sign = static_cast<std::uint32_t>(h & 0x8000U) << 16;
+    std::uint32_t exponent   = (h >> 10) & 0x1FU;
+    std::uint32_t mantissa   = h & 0x3FFU;
+    std::uint32_t bits       = 0;
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            bits = sign;
+        } else {
+            int e = 127 - 15 + 1;
+            while ((mantissa & 0x400U) == 0) {
+                mantissa <<= 1;
+                --e;
+            }
+            bits = sign | (static_cast<std::uint32_t>(e) << 23) | ((mantissa & 0x3FFU) << 13);
+        }
+    } else if (exponent == 0x1FU) {
+        bits = sign | 0x7F800000U | (mantissa << 13);
+    } else {
+        bits = sign | ((exponent - 15 + 127) << 23) | (mantissa << 13);
+    }
+    float value = 0.0F;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+void round_to_f16(std::vector<float>& value) {
+    for (float& x : value) { x = f16_bits_to_f32(f32_to_f16(x)); }
+}
+
+// The D256 Sylvester-Hadamard exactly as ops::kvarn::detail::hadamard_warp applies it (same
+// butterfly, same 2^-4 scale), in double so the oracle is the independent exact evaluation.
+void host_hadamard_d256(std::vector<double>& value) {
+    std::vector<double> next(value.size(), 0.0);
+    for (int span = 1; span < kD; span <<= 1) {
+        for (int i = 0; i < kD; ++i) {
+            const int low  = i & ~span;
+            const int high = low + span;
+            if (i & span) {
+                next[i] = value[low] - value[high];
+            } else {
+                next[i] = value[low] + value[high];
+            }
+        }
+        value.swap(next);
+    }
+    for (double& v : value) { v *= 0.0625; }
+}
+
+// `kvarn_hadamard` as the Op applies it to a query: W over each contiguous D256 vector, written back
+// as BF16. The tail partial un-rotates whatever query it is handed, so a direct-kernel test has to
+// hand it the same rotated domain the Op does.
+std::vector<float> rotate_query_like_op(const std::vector<float>& host_query) {
+    std::vector<float> out = host_query;
+    for (std::size_t base = 0; base + kD <= out.size(); base += kD) {
+        std::vector<double> vector(out.begin() + static_cast<std::ptrdiff_t>(base),
+                                   out.begin() + static_cast<std::ptrdiff_t>(base + kD));
+        host_hadamard_d256(vector);
+        for (int d = 0; d < kD; ++d) { out[base + d] = static_cast<float>(vector[d]); }
+    }
+    round_to_bf16(out);
+    return out;
+}
+
+// The exact-tail kernel recovers its query by un-rotating (with `detail::hadamard_warp`) the bf16
+// rotated query the Op hands over. `hadamard_warp` is the same butterfly/scale `host_hadamard_d256`
+// models, so the oracle's query is that un-rotation of the very bf16 values the kernel reads -- the
+// residual is then only float (kernel) versus double (oracle) rounding, not the bf16 round-trip.
+std::vector<double> unrotate_query_like_kernel(const std::vector<float>& rotated_query) {
+    std::vector<double> out(rotated_query.begin(), rotated_query.end());
+    for (std::size_t base = 0; base + kD <= out.size(); base += kD) {
+        std::vector<double> vector(out.begin() + static_cast<std::ptrdiff_t>(base),
+                                   out.begin() + static_cast<std::ptrdiff_t>(base + kD));
+        host_hadamard_d256(vector);
+        for (int d = 0; d < kD; ++d) { out[base + d] = vector[d]; }
+    }
+    return out;
+}
+
+template <int QueryHeads, int KVHeads, int SplitScale>
+int run_exact_tail_partial_case(int window, int tail_tokens, int launch_capacity,
+                                const std::string& label, bool f16_tail = false) {
+    using Geometry = ops::CausalAttentionGeometry<QueryHeads, KVHeads, SplitScale>;
+    constexpr int kGroupSize = Geometry::GroupSize;
+    const int ring_pages     = (window + 63) / 64;
+
+    const HostTailPartition partition =
+        host_tail_partition(window, tail_tokens, launch_capacity, SplitScale);
+
+    // Exact ring: one sequence, positions [0, window) written at their ring slot. The rows are
+    // BF16 and are the ONLY source both the kernel and the oracle read, so input rounding cancels.
+    const std::size_t ring_values =
+        static_cast<std::size_t>(kD) * 64 * KVHeads * ring_pages;
+    std::vector<float> host_tail_k(ring_values, 0.0F), host_tail_v(ring_values, 0.0F);
+    auto ring_index = [&](int position, int kv_head, int d) {
+        const int page = (position / 64) % ring_pages;
+        const int off  = position % 64;
+        return static_cast<std::size_t>(kD) * (64 * (kv_head + KVHeads * page) + off) + d;
+    };
+    for (int position = 0; position < window; ++position) {
+        for (int kv_head = 0; kv_head < KVHeads; ++kv_head) {
+            for (int d = 0; d < kD; ++d) {
+                const float k = 0.5F * std::sin(0.017F * (position + 1) * (d + 1) + kv_head);
+                const float v = 0.5F * std::cos(0.013F * (position + 1) * (d + 3) - kv_head);
+                host_tail_k[ring_index(position, kv_head, d)] = k;
+                host_tail_v[ring_index(position, kv_head, d)] = v;
+            }
+        }
+    }
+    round_to_bf16(host_tail_k);
+    round_to_bf16(host_tail_v);
+    if (f16_tail) {
+        round_to_f16(host_tail_k);
+        round_to_f16(host_tail_v);
+    }
+
+    std::vector<float> host_query(static_cast<std::size_t>(kD) * QueryHeads, 0.0F);
+    for (int q_head = 0; q_head < QueryHeads; ++q_head) {
+        for (int d = 0; d < kD; ++d) {
+            host_query[static_cast<std::size_t>(q_head) * kD + d] =
+                0.5F * std::sin(0.011F * (q_head + 1) * (d + 5));
+        }
+    }
+    round_to_bf16(host_query);
+
+    // The Op rotates the query in place before the tail partial runs (the body reads the rotated
+    // query), so the kernel is handed a rotated query and un-rotates it. The oracle evaluates the
+    // same recovered query, so it is unchanged by the round-trip.
+    std::vector<float> pipeline_query = rotate_query_like_op(host_query);
+    const std::vector<double> oracle_query = unrotate_query_like_kernel(pipeline_query);
+    DeviceBuffer device_query = to_device_bf16(pipeline_query);
+    DeviceBuffer tail_k       = f16_tail
+                                    ? to_device(std::vector<std::uint16_t>(
+                                          [&] {
+                                              std::vector<std::uint16_t> bits(host_tail_k.size());
+                                              for (std::size_t i = 0; i < bits.size(); ++i) {
+                                                  bits[i] = f32_to_f16(host_tail_k[i]);
+                                              }
+                                              return bits;
+                                          }()))
+                                    : to_device_bf16(host_tail_k);
+    DeviceBuffer tail_v       = f16_tail
+                                    ? to_device(std::vector<std::uint16_t>(
+                                          [&] {
+                                              std::vector<std::uint16_t> bits(host_tail_v.size());
+                                              for (std::size_t i = 0; i < bits.size(); ++i) {
+                                                  bits[i] = f32_to_f16(host_tail_v[i]);
+                                              }
+                                              return bits;
+                                          }()))
+                                    : to_device_bf16(host_tail_v);
+    DeviceBuffer positions =
+        to_device(std::vector<std::int32_t>{static_cast<std::int32_t>(window - 1)});
+
+    const std::size_t acc_values = static_cast<std::size_t>(kD) * QueryHeads * launch_capacity;
+    const std::size_t stat_values = static_cast<std::size_t>(QueryHeads) * launch_capacity;
+    // Sentinels: an unwritten split must stay a neutral partial (m == -inf, l == 0, acc == 0) so the
+    // merge below can run over every split without special cases, and so the N == 0 case can prove
+    // the kernel wrote nothing.
+    const float kUnwritten = -12345.0F;
+    std::vector<float> host_acc(acc_values, kUnwritten);
+    std::vector<float> host_m(stat_values, kUnwritten);
+    std::vector<float> host_l(stat_values, kUnwritten);
+    DeviceBuffer device_acc  = to_device_f32(host_acc);
+    DeviceBuffer device_m    = to_device_f32(host_m);
+    DeviceBuffer device_l    = to_device_f32(host_l);
+
+    Tensor query_tensor(device_query.p, DType::BF16, {kD, QueryHeads, 1, 1});
+    Tensor position_tensor(positions.p, DType::I32, {1, 1});
+    Tensor acc_tensor(device_acc.p, DType::FP32, {kD, QueryHeads, 1, launch_capacity});
+    Tensor m_tensor(device_m.p, DType::FP32, {QueryHeads, 1, launch_capacity});
+    Tensor l_tensor(device_l.p, DType::FP32, {QueryHeads, 1, launch_capacity});
+    Tensor tail_k_tensor(tail_k.p, f16_tail ? DType::FP16 : DType::BF16, {kD, 64, KVHeads, ring_pages});
+    Tensor tail_v_tensor(tail_v.p, f16_tail ? DType::FP16 : DType::BF16, {kD, 64, KVHeads, ring_pages});
+
+    ops::kvarn::exact_tail_partial(query_tensor, position_tensor, Tensor{}, tail_k_tensor,
+                                   tail_v_tensor, ring_pages, tail_tokens, launch_capacity,
+                                   0 /*column_begin*/, 1 /*width*/, window /*logical_capacity*/,
+                                   1 /*batch_size*/, 0.0625F, acc_tensor, m_tensor, l_tensor,
+                                   nullptr);
+    cuda_synchronize();
+
+    int failures = 0;
+
+    if (tail_tokens <= 0) {
+        // N == 0 must not trigger the path at all: every byte stays the sentinel.
+        const std::vector<double> acc = from_device_f32(device_acc, acc_values);
+        const std::vector<double> ms  = from_device_f32(device_m, stat_values);
+        const bool untouched =
+            std::all_of(acc.begin(), acc.end(), [](double x) { return x == kUnwritten; }) &&
+            std::all_of(ms.begin(), ms.end(), [](double x) { return x == kUnwritten; });
+        std::cout << label
+                  << ": tail_tokens=0 leaves the partial untouched=" << (untouched ? "yes" : "NO")
+                  << "\n";
+        if (!untouched) { ++failures; }
+        return failures;
+    }
+
+    const std::vector<double> acc = from_device_f32(device_acc, acc_values);
+    const std::vector<double> m   = from_device_f32(device_m, stat_values);
+    const std::vector<double> l   = from_device_f32(device_l, stat_values);
+    // partial_stat_index(q_head, token=0, split) = q_head + QHeads * split
+    const auto stat_at = [&](int q_head, int split) {
+        return static_cast<std::size_t>(split) * QueryHeads + q_head;
+    };
+    // partial_acc_index(q_head, d, token=0, split) = d + D * (q_head + QHeads * split)
+    const auto acc_at = [&](int q_head, int d, int split) {
+        return (static_cast<std::size_t>(split) * QueryHeads + q_head) * kD + d;
+    };
+
+    // Merge the tail splits the kernel published, then un-rotate, and compare against the FP64
+    // oracle of the exact attention over the keys [body_window, window).
+    int neutral_splits_written = 0;
+    double worst_rel           = 0.0;
+    for (int q_head = 0; q_head < QueryHeads; ++q_head) {
+        const int kv_head = q_head / kGroupSize;
+        // The kernel must have written exactly the tail splits [body_active, total_active).
+        const int total_active = partition.body_active + partition.tail_active;
+        for (int split = 0; split < launch_capacity; ++split) {
+            const bool is_tail = split >= partition.body_active && split < total_active;
+            const float got_m  = m[stat_at(q_head, split)];
+            const bool written = got_m != kUnwritten;
+            if (written != is_tail) {
+                std::cout << label << ": split " << split << " head " << q_head
+                          << " written=" << written << " expected_tail=" << is_tail << "\n";
+                ++failures;
+            }
+            if (is_tail && got_m == -std::numeric_limits<float>::infinity()) {
+                ++neutral_splits_written;
+            }
+        }
+
+        // Merge (fp64) over the splits the kernel actually wrote.
+        double merged_m = -std::numeric_limits<double>::infinity();
+        for (int split = 0; split < launch_capacity; ++split) {
+            if (l[stat_at(q_head, split)] > 0.0F) {
+                merged_m = std::max(merged_m, static_cast<double>(m[stat_at(q_head, split)]));
+            }
+        }
+        std::vector<double> merged_acc(kD, 0.0);
+        double merged_l = 0.0;
+        for (int split = 0; split < launch_capacity; ++split) {
+            const double ls = l[stat_at(q_head, split)];
+            if (!(ls > 0.0) || m[stat_at(q_head, split)] == kUnwritten) { continue; }
+            const double w = std::exp(static_cast<double>(m[stat_at(q_head, split)]) - merged_m);
+            merged_l += ls * w;
+            for (int d = 0; d < kD; ++d) {
+                merged_acc[d] += static_cast<double>(acc[acc_at(q_head, d, split)]) * w;
+            }
+        }
+        std::vector<double> merged = merged_acc;
+        host_hadamard_d256(merged);
+        for (int d = 0; d < kD; ++d) { merged[d] /= merged_l; }
+
+        // Oracle: exact attention over the tail keys in the original domain. The engine's reduce
+        // un-rotates the merged accumulator once, so the observable output is A / l in the original
+        // domain -- no W on the oracle side.
+        std::vector<double> oracle_acc(kD, 0.0);
+        double oracle_m = -std::numeric_limits<double>::infinity();
+        std::vector<double> scores;
+        for (int key = partition.body_window; key < window; ++key) {
+            double dot = 0.0;
+            const std::size_t base = ring_index(key, kv_head, 0);
+            for (int d = 0; d < kD; ++d) {
+                dot += oracle_query[static_cast<std::size_t>(q_head) * kD + d] *
+                       static_cast<double>(host_tail_k[base + d]);
+            }
+            scores.push_back(dot * 0.0625);
+            oracle_m = std::max(oracle_m, scores.back());
+        }
+        double oracle_l = 0.0;
+        for (std::size_t i = 0; i < scores.size(); ++i) {
+            const double p = std::exp(scores[i] - oracle_m);
+            oracle_l += p;
+            const std::size_t base = ring_index(partition.body_window + static_cast<int>(i),
+                                                kv_head, 0);
+            for (int d = 0; d < kD; ++d) {
+                oracle_acc[d] += p * static_cast<double>(host_tail_v[base + d]);
+            }
+        }
+        std::vector<double> oracle = oracle_acc;
+        double oracle_scale = 0.0;
+        for (int d = 0; d < kD; ++d) {
+            oracle[d] /= oracle_l;
+            oracle_scale = std::max(oracle_scale, std::fabs(oracle[d]));
+        }
+
+        for (int d = 0; d < kD; ++d) {
+            const double rel = std::fabs(merged[d] - oracle[d]) / (oracle_scale + 1.0e-9);
+            worst_rel        = std::max(worst_rel, rel);
+        }
+    }
+
+    const double kTailTolerance = 2.0e-3;
+    std::cout << label << ": window=" << window << " tail=" << tail_tokens
+              << " body_active=" << partition.body_active
+              << " tail_active=" << partition.tail_active
+              << " neutral_tail_splits=" << neutral_splits_written
+              << " max_rel_vs_fp64=" << std::scientific << std::setprecision(3) << worst_rel
+              << (worst_rel <= kTailTolerance ? "  OK\n" : "  FAIL\n");
+    if (worst_rel > kTailTolerance) { ++failures; }
+    return failures;
+}
+
+// WP6.3: the KVarN append writes the shared exact ring itself (`stage_exact_tail`), because the
+// KVarN body owns its quantized write and never calls ops::kv_cache_append. The ring must hold
+// exactly the rows the addressing says -- this batch row's slot `(position / 64) % ring_pages` --
+// converted to the ring's element type, and must drop the rows a launch wider than the ring cannot
+// place without aliasing two positions onto one slot.
+int run_exact_tail_stage_case(int first, int width, int ring_pages, int batch, bool masked,
+                              bool f16_ring, const std::string& label) {
+    constexpr int KVHeads   = 4;
+    const int ring_capacity = 64 * ring_pages;
+    const auto kv_index     = [&](int d, int head, int token, int b) {
+        return static_cast<std::size_t>(d) +
+               static_cast<std::size_t>(kD) *
+                   (head + static_cast<std::size_t>(KVHeads) *
+                               (token + static_cast<std::size_t>(width) * b));
+    };
+    const auto ring_index = [&](int b, int position, int head, int d) {
+        const int ring = b * ring_pages + (position / 64) % ring_pages;
+        return static_cast<std::size_t>(d) +
+               static_cast<std::size_t>(kD) *
+                   (64 * (head + static_cast<std::size_t>(KVHeads) * ring) + position % 64);
+    };
+
+    std::vector<float> host_k(static_cast<std::size_t>(kD) * KVHeads * width * batch, 0.0F);
+    std::vector<float> host_v(host_k.size(), 0.0F);
+    std::vector<std::int32_t> host_positions(static_cast<std::size_t>(width) * batch, 0);
+    std::vector<std::int32_t> host_valid(batch, width);
+    for (int b = 0; b < batch; ++b) {
+        host_valid[b] = masked ? (width * (b + 1)) / (batch + 1) : width;
+        for (int token = 0; token < width; ++token) {
+            host_positions[static_cast<std::size_t>(token) + static_cast<std::size_t>(width) * b] =
+                first + token;
+            for (int head = 0; head < KVHeads; ++head) {
+                for (int d = 0; d < kD; ++d) {
+                    host_k[kv_index(d, head, token, b)] =
+                        0.25F * std::sin(0.011F * (d + 1) * (token + 3) + 0.5F * (head + b));
+                    host_v[kv_index(d, head, token, b)] =
+                        0.25F * std::cos(0.009F * (d + 2) * (token + 5) - 0.5F * (head + b));
+                }
+            }
+        }
+    }
+    round_to_bf16(host_k);
+    round_to_bf16(host_v);
+
+    const std::size_t ring_values =
+        static_cast<std::size_t>(kD) * 64 * KVHeads * ring_pages * batch;
+    std::vector<std::uint16_t> expected_k(ring_values, 0);
+    std::vector<std::uint16_t> expected_v(ring_values, 0);
+    for (int b = 0; b < batch; ++b) {
+        const int newest = first + host_valid[b] - 1;
+        for (int token = 0; token < host_valid[b]; ++token) {
+            const int position = first + token;
+            if (newest - position >= ring_capacity) { continue; }
+            for (int head = 0; head < KVHeads; ++head) {
+                for (int d = 0; d < kD; ++d) {
+                    const std::size_t slot = ring_index(b, position, head, d);
+                    const float k          = host_k[kv_index(d, head, token, b)];
+                    const float v          = host_v[kv_index(d, head, token, b)];
+                    expected_k[slot]        = f16_ring ? f32_to_f16(k) : f32_to_bf16(k);
+                    expected_v[slot]        = f16_ring ? f32_to_f16(v) : f32_to_bf16(v);
+                }
+            }
+        }
+    }
+
+    DeviceBuffer device_k  = to_device_bf16(host_k);
+    DeviceBuffer device_v  = to_device_bf16(host_v);
+    DeviceBuffer positions = to_device(host_positions);
+    DeviceBuffer valid     = to_device(host_valid);
+    DeviceBuffer ring_k    = to_device(std::vector<std::uint16_t>(ring_values, 0));
+    DeviceBuffer ring_v    = to_device(std::vector<std::uint16_t>(ring_values, 0));
+
+    const DType ring_dtype = f16_ring ? DType::FP16 : DType::BF16;
+    Tensor key_tensor(device_k.p, DType::BF16, {kD, KVHeads, width, batch});
+    Tensor value_tensor(device_v.p, DType::BF16, {kD, KVHeads, width, batch});
+    Tensor position_tensor(positions.p, DType::I32, {width, batch});
+    Tensor ring_k_tensor(ring_k.p, ring_dtype, {kD, 64, KVHeads, ring_pages * batch});
+    Tensor ring_v_tensor(ring_v.p, ring_dtype, {kD, 64, KVHeads, ring_pages * batch});
+    Tensor valid_tensor;
+    if (masked) { valid_tensor = Tensor(valid.p, DType::I32, {batch}); }
+
+    ops::kvarn::stage_exact_tail(key_tensor, value_tensor, position_tensor, valid_tensor, KVHeads,
+                                 ring_k_tensor, ring_v_tensor, ring_pages, nullptr);
+    cuda_synchronize();
+
+    const auto got_k        = from_device<std::uint16_t>(ring_k, ring_values);
+    const auto got_v        = from_device<std::uint16_t>(ring_v, ring_values);
+    std::size_t first_bad_k = ring_values;
+    std::size_t first_bad_v = ring_values;
+    for (std::size_t i = 0; i < ring_values; ++i) {
+        if (got_k[i] != expected_k[i] && first_bad_k == ring_values) { first_bad_k = i; }
+        if (got_v[i] != expected_v[i] && first_bad_v == ring_values) { first_bad_v = i; }
+    }
+    int failures = 0;
+    if (first_bad_k != ring_values || first_bad_v != ring_values) {
+        std::cerr << label << ": exact-ring mismatch at k index " << first_bad_k << ", v index "
+                  << first_bad_v << '\n';
+        ++failures;
+    }
+    std::cout << label << ": first=" << first << " width=" << width << " ring_pages=" << ring_pages
+              << " batch=" << batch << " masked=" << masked << " f16=" << f16_ring
+              << (failures == 0 ? "  OK\n" : "  FAIL\n");
+    return failures;
+}
+
+// WP6.3: the tail partial on a chunked, batched launch. `column_begin` and the per-sequence stride
+// put each row's query and statistics at their own offset, each sequence brings its own window, and
+// the launch-wide partition the tail uses is the one the body uses for that sequence -- so this
+// checks the offsets and the partition placement, not only the arithmetic (which WP6.1 covers).
+int run_exact_tail_partial_launch_case(int base0, int base1, int tail_tokens, int launch_capacity,
+                                       const std::string& label) {
+    constexpr int QueryHeads = 24;
+    constexpr int KVHeads    = 4;
+    constexpr int SplitScale = 1;
+    using Geometry           = ops::CausalAttentionGeometry<QueryHeads, KVHeads, SplitScale>;
+    constexpr int kGroupSize = Geometry::GroupSize;
+
+    const int batch        = 2;
+    const int full_width   = 3;
+    const int column_begin = 1;
+    const int width        = 2;
+    const int host_base[2] = {base0, base1};
+    const int longest      = (base0 > base1 ? base0 : base1) + column_begin + width;
+    const int ring_pages   = (longest + 63) / 64;
+    const std::size_t ring_values =
+        static_cast<std::size_t>(kD) * 64 * KVHeads * ring_pages * batch;
+
+    const auto ring_index = [&](int b, int position, int head, int d) {
+        const int ring = b * ring_pages + (position / 64) % ring_pages;
+        return static_cast<std::size_t>(d) +
+               static_cast<std::size_t>(kD) *
+                   (64 * (head + static_cast<std::size_t>(KVHeads) * ring) + position % 64);
+    };
+
+    // Each sequence's live positions are its own: `pos[column_begin + t, b] = base[b] + column_begin
+    // + t`, so sequence 1's window is a different tier from sequence 0's. K and V differ so a
+    // swapped pair cannot hide.
+    std::vector<float> host_ring_k(ring_values, 0.0F);
+    std::vector<float> host_ring_v(ring_values, 0.0F);
+    std::vector<std::int32_t> host_positions(static_cast<std::size_t>(full_width) * batch, 0);
+    for (int b = 0; b < batch; ++b) {
+        for (int column = 0; column < full_width; ++column) {
+            host_positions[static_cast<std::size_t>(column) + static_cast<std::size_t>(full_width) *
+                                                                b] = host_base[b] + column;
+        }
+        const int sequence_window = host_base[b] + column_begin + width;
+        for (int position = 0; position < sequence_window; ++position) {
+            for (int head = 0; head < KVHeads; ++head) {
+                for (int d = 0; d < kD; ++d) {
+                    const std::size_t slot = ring_index(b, position, head, d);
+                    host_ring_k[slot] =
+                        0.4F * std::sin(0.017F * (position + 1) * (d + 1) + head + b);
+                    host_ring_v[slot] =
+                        0.4F * std::cos(0.013F * (position + 1) * (d + 3) - head + b);
+                }
+            }
+        }
+    }
+    round_to_bf16(host_ring_k);
+    round_to_bf16(host_ring_v);
+
+    std::vector<float> host_query(static_cast<std::size_t>(kD) * QueryHeads * full_width * batch,
+                                  0.0F);
+    const auto q_index = [&](int q_head, int d, int column, int b) {
+        return static_cast<std::size_t>(d) +
+               static_cast<std::size_t>(kD) *
+                   (q_head + static_cast<std::size_t>(QueryHeads) *
+                                 (column + static_cast<std::size_t>(full_width) * b));
+    };
+    for (int b = 0; b < batch; ++b) {
+        for (int column = 0; column < full_width; ++column) {
+            for (int q_head = 0; q_head < QueryHeads; ++q_head) {
+                for (int d = 0; d < kD; ++d) {
+                    host_query[q_index(q_head, d, column, b)] =
+                        0.5F * std::sin(0.011F * (q_head + 1) * (d + 5) + 0.25F * (column + 2 * b));
+                }
+            }
+        }
+    }
+    round_to_bf16(host_query);
+
+    const std::size_t acc_values =
+        static_cast<std::size_t>(kD) * QueryHeads * width * launch_capacity * batch;
+    const std::size_t stat_values =
+        static_cast<std::size_t>(QueryHeads) * width * launch_capacity * batch;
+    const float kUnwritten = -12345.0F;
+    DeviceBuffer acc = to_device_f32(std::vector<float>(acc_values, kUnwritten));
+    DeviceBuffer m   = to_device_f32(std::vector<float>(stat_values, kUnwritten));
+    DeviceBuffer l   = to_device_f32(std::vector<float>(stat_values, kUnwritten));
+    // Rotated the way the Op hands it over; the oracle evaluates the kernel's own un-rotation of
+    // these bf16 values (see `unrotate_query_like_kernel`).
+    const std::vector<float> pipeline_query = rotate_query_like_op(host_query);
+    const std::vector<double> oracle_query  = unrotate_query_like_kernel(pipeline_query);
+    DeviceBuffer query    = to_device_bf16(pipeline_query);
+    DeviceBuffer positions = to_device(host_positions);
+    DeviceBuffer ring_k    = to_device_bf16(host_ring_k);
+    DeviceBuffer ring_v    = to_device_bf16(host_ring_v);
+
+    Tensor query_tensor(query.p, DType::BF16, {kD, QueryHeads, full_width, batch});
+    Tensor position_tensor(positions.p, DType::I32, {full_width, batch});
+    Tensor ring_k_tensor(ring_k.p, DType::BF16, {kD, 64, KVHeads, ring_pages * batch});
+    Tensor ring_v_tensor(ring_v.p, DType::BF16, {kD, 64, KVHeads, ring_pages * batch});
+    Tensor acc_tensor(acc.p, DType::FP32, {kD, QueryHeads, width, launch_capacity * batch});
+    Tensor m_tensor(m.p, DType::FP32, {QueryHeads, width, launch_capacity * batch});
+    Tensor l_tensor(l.p, DType::FP32, {QueryHeads, width, launch_capacity * batch});
+
+    ops::kvarn::exact_tail_partial(query_tensor, position_tensor, Tensor{}, ring_k_tensor,
+                                   ring_v_tensor, ring_pages, tail_tokens, launch_capacity,
+                                   column_begin, width, longest + 8, batch, 0.5F, acc_tensor,
+                                   m_tensor, l_tensor, nullptr);
+    cuda_synchronize();
+
+    const auto host_acc = from_device_f32(acc, acc_values);
+    const auto host_m   = from_device_f32(m, stat_values);
+    const auto host_l   = from_device_f32(l, stat_values);
+    const auto stat_at  = [&](int b, int q_head, int token, int split) {
+        return static_cast<std::size_t>(b) * QueryHeads * width * launch_capacity +
+               (static_cast<std::size_t>(split) * width + token) * QueryHeads + q_head;
+    };
+    const auto acc_at = [&](int b, int q_head, int d, int token, int split) {
+        return static_cast<std::size_t>(b) * kD * QueryHeads * width * launch_capacity +
+               static_cast<std::size_t>(kD) *
+                   (q_head + QueryHeads * (token + static_cast<std::size_t>(width) * split)) +
+               d;
+    };
+
+    int failures            = 0;
+    double worst_rel        = 0.0;
+    int rows_checked        = 0;
+    const double kTolerance = 2.0e-3;
+    for (int b = 0; b < batch; ++b) {
+        const int sequence_window = host_base[b] + column_begin + width;
+        const HostTailPartition partition =
+            host_tail_partition(sequence_window, tail_tokens, launch_capacity, SplitScale);
+        const int total_active = partition.body_active + partition.tail_active;
+        for (int token = 0; token < width; ++token) {
+            const int qabs = host_base[b] + column_begin + token;
+            for (int q_head = 0; q_head < QueryHeads; ++q_head) {
+                const int kv_head = q_head / kGroupSize;
+                for (int split = 0; split < launch_capacity; ++split) {
+                    const bool is_tail = split >= partition.body_active && split < total_active;
+                    const bool written = host_m[stat_at(b, q_head, token, split)] != kUnwritten;
+                    if (written != is_tail) {
+                        std::cerr << label << ": batch " << b << " token " << token << " head "
+                                  << q_head << " split " << split << " written=" << written
+                                  << " expected_tail=" << is_tail << '\n';
+                        ++failures;
+                    }
+                }
+                // Merge the tail splits in FP64, un-rotate once, and compare with the exact
+                // attention over the causal tail keys [body_window, qabs].
+                double merged_m = -std::numeric_limits<double>::infinity();
+                for (int split = 0; split < launch_capacity; ++split) {
+                    if (host_m[stat_at(b, q_head, token, split)] == kUnwritten) { continue; }
+                    if (host_l[stat_at(b, q_head, token, split)] > 0.0F) {
+                        merged_m = std::max(
+                            merged_m,
+                            static_cast<double>(host_m[stat_at(b, q_head, token, split)]));
+                    }
+                }
+                std::vector<double> merged_acc(kD, 0.0);
+                double merged_l = 0.0;
+                for (int split = 0; split < launch_capacity; ++split) {
+                    if (host_m[stat_at(b, q_head, token, split)] == kUnwritten) { continue; }
+                    const double ls = host_l[stat_at(b, q_head, token, split)];
+                    if (!(ls > 0.0)) { continue; }
+                    const double w =
+                        std::exp(static_cast<double>(host_m[stat_at(b, q_head, token, split)]) -
+                                 merged_m);
+                    merged_l += ls * w;
+                    for (int d = 0; d < kD; ++d) {
+                        merged_acc[d] +=
+                            static_cast<double>(host_acc[acc_at(b, q_head, d, token, split)]) * w;
+                    }
+                }
+                std::vector<double> merged = merged_acc;
+                host_hadamard_d256(merged);
+                for (int d = 0; d < kD; ++d) {
+                    merged[d] = merged_l > 0.0 ? merged[d] / merged_l : 0.0;
+                }
+
+                std::vector<double> oracle_acc(kD, 0.0);
+                double oracle_m = -std::numeric_limits<double>::infinity();
+                std::vector<double> scores;
+                for (int key = partition.body_window; key <= qabs; ++key) {
+                    double dot = 0.0;
+                    for (int d = 0; d < kD; ++d) {
+                        dot += oracle_query[q_index(q_head, d, column_begin + token, b)] *
+                               static_cast<double>(host_ring_k[ring_index(b, key, kv_head, d)]);
+                    }
+                    scores.push_back(dot * 0.5);
+                    oracle_m = std::max(oracle_m, scores.back());
+                }
+                double oracle_l = 0.0;
+                std::vector<double> oracle(kD, 0.0);
+                for (std::size_t i = 0; i < scores.size(); ++i) {
+                    const double p = std::exp(scores[i] - oracle_m);
+                    oracle_l += p;
+                    const int key = partition.body_window + static_cast<int>(i);
+                    for (int d = 0; d < kD; ++d) {
+                        oracle[d] +=
+                            p * static_cast<double>(host_ring_v[ring_index(b, key, kv_head, d)]);
+                    }
+                }
+                double oracle_scale = 0.0;
+                for (int d = 0; d < kD; ++d) {
+                    oracle[d]    = oracle_l > 0.0 ? oracle[d] / oracle_l : 0.0;
+                    oracle_scale = std::max(oracle_scale, std::fabs(oracle[d]));
+                }
+                for (int d = 0; d < kD; ++d) {
+                    worst_rel = std::max(worst_rel,
+                                         std::fabs(merged[d] - oracle[d]) / (oracle_scale + 1.0e-9));
+                }
+                ++rows_checked;
+            }
+        }
+    }
+    std::cout << label << ": base0=" << base0 << " base1=" << base1 << " tail=" << tail_tokens
+              << " rows=" << rows_checked << " max_rel_vs_fp64=" << std::scientific
+              << std::setprecision(3) << worst_rel
+              << (worst_rel <= kTolerance ? "  OK\n" : "  FAIL\n");
+    if (worst_rel > kTolerance) { ++failures; }
+    return failures;
+}
+
+// WP6.3: the whole wiring at the Op level -- the body, the tail partial and the reducer sharing one
+// partition. The tail covers the entire window here (`tail_tokens >= window`), so the body scores
+// nothing and publishes an empty split and the Op's output must be the exact attention over the ring.
+// A partition the three sides disagreed about would drop or double-count keys and the output would
+// not match; the ring's rows are the same ones the body appended, so no quantization oracle is
+// needed. `first_query_position` puts the window above 1024 (packed columns) or below it (scalar).
+int run_exact_tail_merged_case(int window, int query_width, int first_query_position,
+                               const std::string& label) {
+    constexpr int QueryHeads = 24;
+    constexpr int KVHeads    = 4;
+    constexpr int Pages      = 34;
+    using Geometry           = ops::CausalAttentionGeometry<QueryHeads, KVHeads, 1>;
+    constexpr int kGroupSize = Geometry::GroupSize;
+    const int ring_pages     = (window + 63) / 64;
+
+    CacheFixture<KVHeads, Pages, 4> cache;
+    const std::vector<float> body_k = make_cache_values(window, 0x7101U, KVHeads);
+    const std::vector<float> body_v = make_cache_values(window, 0x7102U, KVHeads);
+    append_cache(cache, body_k, body_v, 0, false);
+
+    const auto kv_index = [&](int d, int head, int token) {
+        return static_cast<std::size_t>(d) +
+               static_cast<std::size_t>(kD) *
+                   (head + static_cast<std::size_t>(KVHeads) * token);
+    };
+    const auto ring_index = [&](int position, int head, int d) {
+        const int ring = (position / 64) % ring_pages;
+        return static_cast<std::size_t>(d) +
+               static_cast<std::size_t>(kD) *
+                   (64 * (head + static_cast<std::size_t>(KVHeads) * ring) + position % 64);
+    };
+
+    std::vector<float> host_ring_k(static_cast<std::size_t>(kD) * 64 * KVHeads * ring_pages, 0.0F);
+    std::vector<float> host_ring_v(host_ring_k.size(), 0.0F);
+    for (int position = 0; position < window; ++position) {
+        for (int head = 0; head < KVHeads; ++head) {
+            for (int d = 0; d < kD; ++d) {
+                host_ring_k[ring_index(position, head, d)] = body_k[kv_index(d, head, position)];
+                host_ring_v[ring_index(position, head, d)] = body_v[kv_index(d, head, position)];
+            }
+        }
+    }
+    round_to_bf16(host_ring_k);
+    round_to_bf16(host_ring_v);
+
+    std::vector<float> host_query = make_cache_values(QueryHeads * query_width, 0x7103U);
+    std::vector<std::int32_t> host_positions(query_width);
+    for (int column = 0; column < query_width; ++column) {
+        host_positions[column] = first_query_position + column;
+    }
+
+    DeviceBuffer device_query = to_device_bf16(host_query);
+    DeviceBuffer positions    = to_device(host_positions);
+    DeviceBuffer rows         = to_device(std::vector<std::int32_t>{0});
+    DeviceBuffer ring_k       = to_device_bf16(host_ring_k);
+    DeviceBuffer ring_v       = to_device_bf16(host_ring_v);
+    DeviceBuffer output(host_query.size() * sizeof(std::uint16_t));
+
+    Tensor query_tensor(device_query.p, DType::BF16, {kD, QueryHeads, query_width, 1});
+    Tensor output_tensor(output.p, DType::BF16, {kD, QueryHeads, query_width, 1});
+    Tensor position_tensor(positions.p, DType::I32, {query_width, 1});
+    Tensor rows_tensor(rows.p, DType::I32, {1});
+
+    ops::KvarnPagedBatchLayerView view = cache.view();
+    view.tail.k_pages                  = Tensor(ring_k.p, DType::BF16, {kD, 64, KVHeads, ring_pages});
+    view.tail.v_pages                  = Tensor(ring_v.p, DType::BF16, {kD, 64, KVHeads, ring_pages});
+    view.tail.page_count               = ring_pages;
+    view.tail.retention                = window; // the tail holds every key of the window
+
+    const ops::CausalAttentionExecutionEnvelope envelope{
+        1, static_cast<std::uint32_t>(first_query_position + query_width)};
+    WorkspaceArena workspace(std::max<std::size_t>(
+        1, ops::kvarn_attention_workspace_capacity_bytes(QueryHeads, envelope, 1, query_width,
+                                                         query_width)));
+    ops::kvarn_attention_cached(query_tensor, position_tensor, rows_tensor, 0.0625F, view, envelope,
+                                workspace, output_tensor, nullptr);
+    cuda_synchronize();
+
+    // Oracle: exact attention over the ring rows [0, pos+1) in the ORIGINAL domain. The Op rotates
+    // the query in place, the tail partial writes W(sum p V_orig), and the reducer applies one
+    // inverse rotation -- W is self-inverse, so it cancels end to end and the observable output is
+    // sum p V_orig / l with NO net Hadamard. The body contributes a neutral split here (the tail
+    // covers the whole window), so the oracle needs no body term.
+    const auto q_at = [&](int q_head, int d, int column) {
+        return static_cast<std::size_t>(d) +
+               static_cast<std::size_t>(kD) *
+                   (q_head + static_cast<std::size_t>(QueryHeads) * column);
+    };
+    std::vector<double> expected(host_query.size());
+    for (int column = 0; column < query_width; ++column) {
+        const int visible = host_positions[column] + 1;
+        for (int q_head = 0; q_head < QueryHeads; ++q_head) {
+            const int kv_head = q_head / kGroupSize;
+            std::vector<double> scores(visible);
+            double maximum = -std::numeric_limits<double>::infinity();
+            for (int key = 0; key < visible; ++key) {
+                double dot = 0.0;
+                for (int d = 0; d < kD; ++d) {
+                    dot += static_cast<double>(host_query[q_at(q_head, d, column)]) *
+                           static_cast<double>(host_ring_k[ring_index(key, kv_head, d)]);
+                }
+                scores[key] = dot * 0.0625;
+                maximum     = std::max(maximum, scores[key]);
+            }
+            double denominator = 0.0;
+            std::vector<double> accumulated(kD, 0.0);
+            for (int key = 0; key < visible; ++key) {
+                const double probability = std::exp(scores[key] - maximum);
+                denominator += probability;
+                for (int d = 0; d < kD; ++d) {
+                    accumulated[d] +=
+                        probability * static_cast<double>(host_ring_v[ring_index(key, kv_head, d)]);
+                }
+            }
+            for (int d = 0; d < kD; ++d) {
+                expected[q_at(q_head, d, column)] =
+                    denominator > 0.0 ? accumulated[d] / denominator : 0.0;
+            }
+        }
+    }
+
+    return compare_profile(label.c_str(), from_device_bf16(output, host_query.size()), expected,
+                           8.0e-3, /*report=*/true);
+}
+
+
+
 } // namespace
 
 int main() {
@@ -1920,6 +2730,33 @@ int main() {
     append_cache(packed_k6, make_cache_values(2128, 0xe001U, 4), make_cache_values(2128, 0xe002U, 4),
                  0, false);
     failures += run_cached_attention_case(packed_k6, 24, 2112, 6, "KVarN k6v6 packed attention");
+    // WP6.1: the rotated-domain exact-tail partial against an independent FP64 oracle.
+    failures += run_exact_tail_partial_case<24, 4, 1>(256, 128, 8, "KVarN exact tail window 256 N128");
+    failures +=
+        run_exact_tail_partial_case<24, 4, 1>(1024, 384, 16, "KVarN exact tail window 1024 N384");
+    failures += run_exact_tail_partial_case<24, 4, 1>(100, 100, 8, "KVarN exact tail whole window");
+    failures += run_exact_tail_partial_case<24, 4, 1>(1024, 0, 16, "KVarN exact tail disabled");
+    failures += run_exact_tail_partial_case<16, 2, 2>(512, 256, 12, "KVarN H16/KV2 exact tail");
+    failures += run_exact_tail_partial_case<24, 4, 1>(1024, 384, 16, "KVarN exact tail f16 ring",
+                                                      true);
+    // WP6.3: the KVarN append's own ring write, and the tail partial on a chunked, batched launch
+    // (per-sequence window, per-row query/statistic offsets).
+    failures += run_exact_tail_stage_case(0, 200, 4, 1, false, false, "KVarN exact tail stage bf16");
+    failures += run_exact_tail_stage_case(0, 200, 4, 1, false, true, "KVarN exact tail stage f16");
+    failures += run_exact_tail_stage_case(0, 640, 4, 1, false, false, "KVarN exact tail stage clipped");
+    failures +=
+        run_exact_tail_stage_case(0, 200, 4, 2, false, true, "KVarN exact tail stage f16 batch");
+    failures +=
+        run_exact_tail_stage_case(1000, 6, 4, 2, true, false, "KVarN exact tail stage masked batch");
+    failures += run_exact_tail_partial_launch_case(1000, 4200, 384, 16,
+                                                   "KVarN exact tail launch batched chunked");
+    failures += run_exact_tail_partial_launch_case(100, 300, 128, 8,
+                                                   "KVarN exact tail launch short window");
+    // WP6.3: the Op-level wiring, with the tail covering the whole window (so the oracle is the
+    // exact attention over the ring and needs no quantization model). One window above 1024 selects
+    // the packed two-column columns route, one below it the scalar route.
+    failures += run_exact_tail_merged_case(1000, 6, 994, "KVarN exact tail merged scalar");
+    failures += run_exact_tail_merged_case(1200, 16, 1184, "KVarN exact tail merged packed");
     std::cout << (failures == 0 ? "OK" : "FAIL") << " kvarn correctness\n";
     return failures == 0 ? 0 : 1;
 }
