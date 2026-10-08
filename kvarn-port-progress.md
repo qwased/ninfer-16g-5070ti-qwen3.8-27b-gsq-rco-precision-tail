@@ -1138,6 +1138,11 @@ WP6.1 的尾核按"旋转域"写的：分数旋转不变（`<Wq,Wk> == <q,k>`）
 - **验证**：`git diff --check` 干净；代码围栏成对（2 个 ` ``` `）；未动其余章节。
 - **⚠ 裁掉又补回的一条规则（如实记录）**：合并门禁②进"否定/穷尽断言"要点时，**丢掉了原门禁②的 "State the query that was run"**（提交 `58b3baf3` 之后经复查发现）⇒ 已用 `5d51c6f6` 补回（"**State the query that was run** whenever the claim is negative or exhaustive"）。⇒ **瘦身的真实风险就是这一条**：规则与依据混在同一段时，裁依据容易连带裁掉规则；本次靠**逐节对照原文**才发现。**再次证明"不裁规则本体"这条纪律必须配"逐节比对"才能落实。**
 
+**(13) `§5` handoff 与 `§4.1` P5 行刷新（用户 08-19 要求；原停在 08-13）**
+- `§5` 的**抬头/任务/先读/当前状态/待办⑤/待办⑦/环境与纪律/建议第一条命令/图谱小节**全部对齐到 08-19：当前状态改为"**工作树干净 + HEAD=`7ea2b0bd` + WP6.3 已通 + 测试余量**"；待办⑤ 改为 **WP6.3 ✅ + ▶ 下一步 = WP6.4**（含三块新码与已登记缺口）；图谱小节改为 **46,009/216,983**、**A1–A9 分层流程**、**`file_pattern` 非正则**、**archive §X**。
+- `§4.1` 的 **P5 行**由"WP6.1–WP6.7 未开工"改为"**WP6.0–WP6.3 ✅ 已完成；WP6.4–WP6.7 未开工**"。
+- **验证**：`git diff --check` 干净。**只动这两节 + 本 §3 条目，未改其它内容。**
+
 **产物**：`include/ninfer/ops/kvarn.h`、`src/models/qwen3_5/state/decoder_state.cpp`、`src/models/qwen3_5/program/planning/startup.cpp`、`src/ops/kvarn/{decode_kernel.cuh,decode.cu,tail_partial.cuh,tail_partial.h,tail_partial.cu,attention.cu}`、`tests/ops/test_kvarn.cpp`；e2e 脚本与日志在 `.deps/kvarn-adm/`（`wp63_e2e.sh`、`wp63/`）。回写计划书 §7-WP6.3、附录 D-24（待写）。
 
 ---
@@ -1176,7 +1181,7 @@ WP6.1 的尾核按"旋转域"写的：分数旋转不变（`<Wq,Wk> == <q,k>`）
 | **P3d — 审计 3 项 LOW 修复** | **完成（08-10）；① 的端到端对照已跑（08-11）** | ① CausalScore 路由补 `reset_kvarn_tail_row(0, …)`（**生产行为变更**；row 0 硬编码、生成路径之外无覆盖、标记运行期只追加）· ② `commit.cpp` 发布失败加 stderr 诊断（不再静默）· ③ `state_image.h` 注释补 KVarN；新增 `ninfer_qwen3_5_kvarn_tail_row_reset_test`（**实跑 PASS**，ctest 262→263）。**① 的执行证据（08-11，§3-08-11）**：`kvarn:k4v4` KLD 臂**逐位复现 `0.002120`**（mean/median/P99/max/same_top/dlogp/PPL 全部相同）⇒ 该协议上为**无害 no-op**、D-11/P3a **无需重测**；**但"必要性"仍无证据**（本协议窗口恒 `context` 长、页号每窗口归零 ⇒ 陈旧标记与当前页号重合；**变长窗口**的冲突未实测）。**不移植** FORK 的 `test_prefill_precision_real.cpp`（用户 08-11 裁决）；P3d 后 GPU 回归 3 项**全绿**（`ninfer_kvarn_test` 余量与 08-04 逐位同 / 续列尾 device 段 / `score_real` —— 后者用 `Fp8E4M3Row256`，**不覆盖**本改动路由） |
 | P4a — WP5 容差形式化 | **完成**（08-03 形式化 / 08-04 实测） | 量化步长判据 + 4/5/6 位穷举往返；`flips` 1/65、`over_step=0` ⇒ 65× 余量、未放宽；口径写入 `op-development.md §6.3` |
 | **P4b — kvarn bench 归属** | **待用户决定** | 需 `-DNINFER_BUILD_BENCHMARKS=ON` 重配，与 AGENTS.md「不要重配」冲突（未决项 3） |
-| **P5 — WP6 旋转域尾部合并** | **路线已裁决 = (a)（08-13，用户确认）；WP6.0 已完成（08-14）；WP6.1–WP6.7 未开工** | 10–15 天、最高风险。计划书 §7-WP6 已拆为 **WP6.0–WP6.7**：**0 前置测量 ✅ 已完成（08-14，§3-08-14）**（0a 本机 prefill 噪声底：短 prompt 相对极差 **26.5%** / 1073-token **3.1%**；0b 外部尾纯 kernel decode 代价 `rk4v4` **−1.61%** / `bf16` **−1.33%** ⇒ A8 的 −5.8% = 纯 kernel ≈ −1.5% + 接受率联动 ≈ −4.3%）→ **1** KVarN tail-partial（W1，**acc 旋一次** + FP64 oracle）→ **2 归并改造（W2，最高风险：`partial_acc` BF16→FP32 + 两段式；接受条件 = A6「`tail=0` 逐位不变」）** → **3** 分区与接线（W2b/W3–W6；解 `startup.cpp:1035-1045` 的 fail-fast；`--kv-tail-type` 禁止静默）→ **4** A6/A7 脚手架（W7）→ **5** 容量/显存 → **6** 质量/速度收口（**显式处理 A4 的 N>384 风险**）→ **7** 回归（含**新增 `--vision` × kvarn 功能门**）。**开工须用户明确授权** |
+| **P5 — WP6 旋转域尾部合并** | **路线已裁决 = (a)（08-13）；WP6.0–WP6.3 ✅ 已完成（08-14/-15/-16/-18/-19）；WP6.4–WP6.7 未开工** | 10–15 天、最高风险。计划书 §7-WP6 已拆为 **WP6.0–WP6.7**：**0 前置测量 ✅**（0a prefill 噪声底 短 prompt **26.5%** / 1073-token **3.1%**；0b 纯 kernel 尾代价 `rk4v4` **−1.61%** / `bf16` **−1.33%** ⇒ A8 的 −5.8% = 纯 kernel ≈ −1.5% + 接受率联动 ≈ −4.3%）→ **1** KVarN tail-partial ✅（**acc 旋一次** + FP64 oracle）→ **2 归并改造 ✅**（`partial_acc` BF16→FP32）→ **3 分区与接线 ✅**（三分区 + 尾环写入接入 append + 解 `startup.cpp` fail-fast；**e2e 全过**）→ **4 A6/A7 脚手架**（W7）→ **5** 容量/显存 → **6** 质量/速度收口（**显式处理 A4 的 N>384 风险**）→ **7** 回归（含**新增 `--vision` × kvarn 功能门**）。**开工须用户明确授权** |
 | 计划书回写 | **已完成**（v11→v13） | §1 A2、§7-WP3②④⑤、§7-WP5、附录 D-12/D-13 均已回写
 
 ### 4.2 已完成项（存档）
@@ -1200,31 +1205,27 @@ WP0.5-A 定案 / WP0.5-B（代理 + 正式）/ WP0.5-C / WP1 / WP2 / **WP3 全�
 ## 5. 下一窗口起手提示（handoff，供直接粘贴）
 
 > 本条为**新窗口冷启动**用。它自包含：权威文档路径、已定案事实（不要重新论证）、当前状态、待办队列、
-> 环境纪律、建议的第一条命令。**最后更新 2026-10-08（本轮 08-13）。**
+> 环境纪律、建议的第一条命令。**最后更新 2026-10-08（本轮 08-19；WP6.3 已完成、其提交已落地、工作树干净）。**
 
-**任务**：在 `D:\ninfer\ninfer-precision-tail` 继续 KVarN 移植 —— **计划内的 kvarn 功能项与收尾项均已完成**；
-**08-12 §6.3 探针已执行**（否证 (b)），**08-13 用户裁决 WP6 = 路线 (a)**，计划书 §7-WP6 已拆为 **WP6.0–WP6.7**（每步给产出/验收/回退）。
-⇒ **本轮之后的唯一主线 = 按 WP6.0 → WP6.7 推进**；**开工须用户明确授权**。
-其余：**A1 邻域的视觉功能门**与**两项前置测量**已入队；**覆盖残留**（低优先，非交付面）。
-**仓外项已闭环**：子代理图谱「须重启」已证实、重启充分，且**已于 08-12 首次实战成功**（两个 Tier-2/3 探针）。
+**任务**：在 `D:\ninfer\ninfer-precision-tail` 继续 KVarN 移植 —— **WP6.0–WP6.3 已完成**（§3-08-14/-15/-16/-18/-19），
+**下一步 = WP6.4（A6/A7 脚手架）**，其后 **WP6.5 容量/显存 → WP6.6 质量/速度收口 → WP6.7 回归**（每步在计划书 §7-WP6 有产出/验收/回退）。
+⇒ **唯一主线 = 按 WP6.4 → WP6.7 推进**；**开工须用户明确授权**。
+其余：**A1 邻域的视觉功能门**（并入 WP6.7）与**覆盖残留**（低优先，非交付面）。
+**仓外项已闭环**：子代理图谱「须重启」已证实、重启充分并已多次实战。
 
-**先读（顺序）**：本文件 `kvarn-port-progress.md`（**§0 快照 / §3-2026-10-08-13（最新）/ §3-08-12 / §4.1 / §5**）
-→ `kvarn-port-into-precision-tail-plan.md`（**版本头 v20**、§1 A2/A3/A8 + **A1 邻域的视觉口径**、§6.1/6.2/6.3、**§7-WP6（WP6.0–WP6.7 分步计划）**、§7-WP7、附录 D-11…**D-19**）。
+**先读（顺序）**：本文件 `kvarn-port-progress.md`（**§0 快照 / §3-2026-10-08-19（最新）/ §4.1 / §5**）
+→ `kvarn-port-into-precision-tail-plan.md`（**版本头 v21**、§1 A1–A8、§6.1/6.2/6.3、**§7-WP6（WP6.0–WP6.7 分步计划）**、§7-WP7、附录 D-11…**D-24**）
+→ `AGENTS.md`（**「Codebase memory」小节的 Change flow A1–A9**；其历史与依据见 `docs/port-records/AGENTS-ARCHIVE-2026-10.md`，正文引用为 "archive §X"）。
 二者是唯一权威；**冲突时以本文件的实测为准并回写计划书**（计划书 §0.5 规则）。
 
 **当前状态（务必先核验，勿臆断）**
-1. **GPU 空闲**（显存 0 MiB）；`ninfer_tests/ninfer/ninfer-serve/ninfer-perplexity` 均**最新构建绿**
-   （08-10 构建：前者 234 步、后两者 7 步，均 exit 0；08-11 未改源码）。
-2. 工作树：**08-07…08-10 的源码/测试/文档改动已全部提交**（`git log -1` = `78f183d2`）。
-   **唯一未提交项**是 `AGENTS.md` 的**表格重排**（+ 一行中文汇报要求）—— **非本轮产生**，冷启动时会看到 `M AGENTS.md`，属预期。
-3. **P3d ① 的端到端对照已完成（08-11）**：`kvarn:k4v4` KLD 臂 mean **0.002120**、全部质量指标与 D-11/P3a **逐位相同**
-   ⇒ **无害 no-op**、**D-11/P3a 无需重测**；**但"必要性"无证据**（本协议窗口恒 `context` 长、页号每窗口归零 ⇒ 标记重合；
-   变长窗口冲突未测，见 §3-08-11）。
-4. **P3d 后 GPU 回归 3 项全绿**：`ninfer_kvarn_test`（余量与 08-04 逐位同）、`ninfer_qwen3_5_kvarn_continuation_image_test`（device 段）、
-   `ninfer_qwen3_5_score_real_test`（**注**：该测试用 `Fp8E4M3Row256`，**非 KVarN** ⇒ **不覆盖**被改动的路由）。
-5. **子代理图谱：已闭环**（4 份 `~/.qoder/agents/codebase-memory*.md` 的 MCP 名连字符→下划线；**重启后探针通过**，
-   `list_projects` 返回 6 个图谱工程、`trace_path` 与主会话结果一致）⇒ 后续结构性/否定性结论**可正式交 `codebase-memory*` 子代理**；
-   **但此前几轮子代理的此类结论一律按 grep-only 看待**（§0 未决项 11）。
+1. **GPU 空闲**（显存 0 MiB）；`ninfer_tests` 等目标**可构建**（08-19 构建 `ninfer_tests` exit 0）。
+2. 工作树**干净**：WP6.3 及本轮的文档/纪律改动**已全部提交**，`HEAD = 7ea2b0bd`
+   （`f0fc7696` feat / `bac98467` test / `7a934782` docs(kvarn) / `58b3baf3`+`5d51c6f6` docs(agents) / `7ea2b0bd` docs(kvarn)）。
+   `AGENTS.md` 的旧未提交改动**已随 `58b3baf3` 入库**。
+3. **WP6.3 已通**：`kvarn:k4v4 + --kv-tail-tokens 1024` 端到端可跑；`ninfer_kvarn_test` **exit 0**（直测 6 例 8.0e-7…1.42e-6 / 启动 2 例 1.33e-6、2.14e-6 / op 级合并 2 例 **3.161e-3、3.229e-3**，判据 8e-3）；同族 `..._continuation_image_test`、`..._tail_row_reset_test` OK（§3-08-19）。
+4. **P3d 后 GPU 回归 3 项全绿**（§3-08-11）；`ninfer_qwen3_5_score_real_test` 用 `Fp8E4M3Row256`，**非 KVarN** ⇒ **不覆盖** kvarn 路由。
+5. **子代理图谱：已闭环并多次实战**（MCP 名连字符→下划线已修；重启后 `list_projects` 正常、`trace_path` 与主会话一致；08-19 门禁① sweep 亦成功）⇒ 结构性/否定性结论**可交 `codebase-memory*` 子代理**。
 
 **待办队列（按依赖序）**
 1. **【已关闭】P3d ① 的端到端对照**（08-11）：KLD 逐位 `0.002120` ⇒ 无害 no-op；P3d 后 GPU 回归 3 项全绿。详见 §3-08-11。
@@ -1243,12 +1244,13 @@ WP0.5-A 定案 / WP0.5-B（代理 + 正式）/ WP0.5-C / WP1 / WP2 / **WP3 全�
      ⇒ **A8 的 −5.8% 分解为「纯 kernel ≈ −1.5%」+「接受率联动 ≈ −4.3%」**。**未做严格配对 A/B**（用 `rk4v4` 而非 `rk4v4-e8`、关 MTP）。
    - **WP6.1 ✅ 已完成（08-15，§3-08-15）**：`src/ops/kvarn/tail_partial.{cuh,h,cu}` 旋转域 tail-partial（**acc 旋一次**）+ FP64 oracle，6 用例全过、余量 ~2000×。**08-16 另修先存竞态**（`reduce_output_hadamard_kernel` 补 2 个 `__syncthreads()`，§3-08-16）。
    - **WP6.2 ✅ 已完成（08-18，§3-08-18）**：`partial_acc` **BF16→FP32** + 删除 BF16 tile 暂存改 `float2` 直存；`reduce_output_hadamard_kernel` 的 `const float*` 读。**验收全过**：`ninfer_kvarn_test` 3 连跑逐位确定 + **codec 余量与 08-04 逐字相同** + 6 个 FP64 尾 oracle；**续列尾 e2e `RESULT: PASS`**（`cached_tokens=851`、message 逐字节同 r1）。decode 路线 vs FP64 oracle 余量**降 6.7–10.9%**，prompt 路线用例**逐位不变**。**⚠ A6 口径**：tail=0 输出**不再与改前二进制逐字节相同**（= BF16→FP32 的意图；A6 点名载体均为同版本内比较）。
-   - **下一步 = WP6.3** 分区与接线（W2b/W3–W6；**op 内做 `body_window = window − N` 分区**、3 个 op 入口加尾视图、6 个调用点、尾环写入接入 append、解 `startup.cpp:1035-1045` 的 fail-fast；**`--kv-tail-type` 须显式支持或拒绝、不得静默**）
-     → **WP6.4** A6/A7 脚手架（W7）→ **WP6.5** 容量/显存 → **WP6.6** 质量/速度收口（**显式处理 A4 的 N>384 风险：至少测 `N ∈ {384,1024}`**）→ **WP6.7** 回归（含 **`--vision` × kvarn 功能门**）。
+   - **WP6.3 ✅ 已完成（08-19，§3-08-19）**：op 内三分区（`body_window = window − min(N, window)` / `body_active` / `tail_active`）+ 尾视图经 `KvarnPagedBatchLayerView.tail` 携带（**envelope 与调用点均未改**）+ `stage_exact_tail` 接入 append（`rotate_kv` **之前**，环存原始行）+ 解 `startup.cpp` 的 KVarN+tail fail-fast。**验收全过**（e2e 四臂 / 尾环 f16≡bf16 逐字节 / workspace **990.0/990.0 MiB** 无溢出 / 环增长 **+68.0 MiB** / MTP+尾 / 续列尾 `851` PASS）。**并修 3 个潜伏缺陷**（2 个 WP6.1 batch 偏移 + 1 个查询域缺陷）。产出：源码 10 文件 + 测试 +837 行；提交 `f0fc7696` / `bac98467`。
+   - **▶ 下一步 = WP6.4 A6/A7 脚手架（W7）**：FP32 oracle 覆盖「KVarN body × 旋进 bf16/f16 尾」的**合并路径**；跨 **group(128)/ring(64)** 边界的 **needle 检索**；边界用例（`N ≤ ring`、`N ≥ width`、`N = 0`、跨 checkpoint 恢复），新测试 **~300–500 行**（照 `tests/ops/softmax_attention/causal_cache.cpp`，先 `get_file_outline`）。**必须在矩阵里补的已登记缺口**：① **`window > 8198` 的 KVarN split 分支带尾**（现**无任何 host oracle 覆盖**）；② **跨二进制 `tail=0` 逐位比对**（A6 字面口径）。**验收**：oracle 精确、needle 精确命中、无丢键/重复计数。
+     → **WP6.5** 容量/显存（**既有参照 `tests/models/qwen3_5/test_exact_tail_capacity.cpp`**）→ **WP6.6** 质量/速度收口（**显式处理 A4 的 N>384 风险：至少测 `N ∈ {384,1024}`**）→ **WP6.7** 回归（含 **`--vision` × kvarn 功能门**）。
    - **✅ 尾 dtype 已裁决（08-18）= 维持默认 f16**（零 diff；理由见 §3-08-18 与计划书 D-22(7)）。
 6. **已关闭 / 已裁决（勿再问）**：P3d ① 端到端对照（08-11）· 待裁决 3 项（08-11：不移植 FORK 测试 / 不补 tag / bench 暂不纳入）·
    **视觉只作功能判据**（08-12）· **接受"若采 bf16 尾则本机复核"**（08-12）· **WP6 路线 = (a)**（08-13）。
-7. **计划书侧**：**v20 已回写**（本轮：**版本头 v20**、§6.3 裁决行、**§7-WP6 整段改写为分步计划 WP6.0–WP6.7**、§7-WP7 范围订正注、**D-19 ⑧/⑨**、归档索引 D-19 行）。
+7. **计划书侧**：**v21 已回写**（本轮：**版本头 v21**、**§7-WP6.3 行已完成 + 测试尾留行**、**§7-WP6.4 行已点名"必须补的格子"**、**附录 D-24**、归档索引 D-24 行、§1-A6 口径注）。
 
 **08-03 的两个非显然发现（勿丢）**
 - **`reset_kvarn_tail_row` 移植缺口**：TAIL **零调用者**；FORK 有 **2 处**，都在
@@ -1277,27 +1279,21 @@ WP0.5-A 定案 / WP0.5-B（代理 + 正式）/ WP0.5-C / WP1 / WP2 / **WP3 全�
 - 每次推进**追加**本文件 §3、WP 边界更新 §0 快照、把影响验收/未决项/风险的结论**回写计划书**。
 - 结构性/否定性问题（"是否漏了调用点""是否未被使用"）**必须**走图谱 —— **主会话**的 `trace_path` inbound，或**修好之后的**
   `codebase-memory*` 子代理；**不要**交给通用 Explore 类子代理（无 MCP）。
-- **⚠ 子代理图谱**尚未确认可用（§0 未决项 11）：4 份 `~/.qoder/agents/codebase-memory*.md` 的 MCP 工具名曾被写成**连字符**
-  （运行时实为**下划线**）⇒ 子代理**只拿到 `Read/Grep/Glob`、图谱调用恒为 0**（含**上一会话**）。定义**已改**（备份 `/tmp/agents-backup-20261008/`），
-  但 `[AgentListingDelta] isInitial=true` **只在会话启动装载一次** ⇒ **须重启 Qoder**。**重启确认之前，任何子代理的结构性结论一律按 grep-only 处理。**
+- **子代理图谱：已闭环**（4 份 `~/.qoder/agents/codebase-memory*.md` 的 MCP 名连字符→下划线已修；重启后探针通过，08-12 起多次实战成功）⇒ 结构性/否定性结论**可交 `codebase-memory*` 子代理**；**不要**交给通用 Explore 类子代理（无 MCP）。
+- **改共享契约 / 做否定性断言时按 `AGENTS.md` 的 Change flow（A1–A9）走**（Tier A 全流程 / Tier B 只 A7–A9）；**`search_graph` 的 `file_pattern` 需精确全路径**（`.*x.*` 不命中；`name_pattern`/`qn_pattern` 才是正则）。
 
 **建议第一条命令**
 ```bash
 cd /d/ninfer/ninfer-precision-tail && git status --short && git log --oneline -1 && nvidia-smi --query-gpu=memory.used --format=csv,noheader
 ```
-若 GPU 0 MiB ⇒ 可直接跑。**待办 1–3 均已关闭**（① 的端到端对照已跑；3 项待裁决已由用户定；子代理图谱已闭环并**已于 08-12 实战成功**），
-**08-12 已完成 §6.3 探针**，**08-13 已裁决 WP6 = (a) 且计划书已拆出 WP6.0–WP6.7**，**08-14 已完成 WP6.0 两项前置测量**，
-**08-15 已完成 WP6.1**，**08-16 已定位并修复先存偶发（width=16 非确定性）**，**08-18 已裁决尾环 dtype 并完成 WP6.2** ⇒ 起步建议：
-① **WP6.0 ✅ 已完成（08-14，§3-08-14）**：0a prefill 噪声底（短 prompt 26.5% / 1073-token 3.1%）、0b 纯 kernel 尾代价（`rk4v4` −1.61% / `bf16` −1.33%）。
-② **WP6.1 ✅ 已完成（08-15，§3-08-15）**：`src/ops/kvarn/tail_partial.{cuh,h,cu}` 旋转域 tail-partial（**acc 旋一次**）+ FP64 oracle，6 用例全过、余量 ~2000×。**08-16 另修复先存竞态**（`reduce_output_hadamard_kernel` 补 2 个 `__syncthreads()`，§3-08-16）⇒ **A2/A6 逐位判据已恢复单次可判**。
-③ **WP6.2 ✅ 已完成（08-18，§3-08-18）**：`partial_acc` **BF16→FP32**（3 文件 / 源码 5 处 + 删除 BF16 tile 暂存改 `float2` 直存）。**验收全过**：`ninfer_kvarn_test` **3 连跑逐位确定** + **codec 余量与 08-04 逐字相同** + 6 个 FP64 尾 oracle + `limit=0` 路线间逐位比对；**续列尾 e2e `RESULT: PASS`**（`cached_tokens=851`、message 逐字节同 r1）。**量化**：decode 路线 vs FP64 oracle 余量**降 6.7–10.9%**（random packed 0.0045771→0.0042581），prompt 路线用例 **`tiled`×2 / `slab-boundary` 逐位不变**（改动面恰限于 decode 路线）。**两个屏障原样保留。**
-④ **下一步 = WP6.3 分区与接线（W2b/W3–W6）**：op 内 `body_window = window − N` 分区（照 `small_t.cuh:147-170`，**不必改 `text.cpp` 的 envelope**）；3 个 op 入口加尾视图；6 个调用点；尾环写入接入 KVarN append；解 `startup.cpp:1035-1045` 的 fail-fast；**`--kv-tail-type` 须显式支持或拒绝、不得静默**。
-⑤ 若要**先做低风险增量**：可给「KVarN + 打分路由」补一个直接门禁测试（`score_real` 用的是 `Fp8E4M3Row256`、**非** KVarN；可顺带构造**变长窗口**以证明 P3d 修复的必要性，§3-08-11 不利面）。
-**WP6.3 及其后仍需用户明确授权后推进。** ✅ **尾环 dtype 已裁决（08-18）= 维持默认 f16**（零 diff；理由与量化见 §3-08-18 / 计划书 D-22(7)；**不再待决**）。⚠ **A6 的口径已澄清并写回计划书**：WP6.2 **按计划要求**使 tail=0 输出不再与改前二进制逐字节相同（= `BF16→FP32` 的意图）；A6 点名的两个载体都是**同版本内**比较 ⇒ 按"同版本内逐位判据成立"理解。**若用户坚持 A6 的字面读法（跨版本字节同一）**，唯一出路是把 dtype 收窄为**条件化**（尾不活跃时保持 BF16）或回退到"独立 merge 核"，须用户裁决 —— **当前未采**。
+若 GPU 0 MiB ⇒ 可直接跑。**历史进度（勿重新论证）**：08-12 §6.3 探针（否证 (b)）→ 08-13 裁决 WP6 = (a)、计划书拆出 WP6.0–WP6.7 → 08-14 WP6.0 → 08-15 WP6.1 → 08-16 修先存竞态（`reduce_output_hadamard_kernel` 补 2 个 `__syncthreads()`）→ 08-18 裁决尾 dtype + WP6.2 → **08-19 WP6.3 并全部提交**。**起步 = WP6.4**：
+① **先按 `AGENTS.md` 的 Change flow A1–A9**（本任务 = **Tier A**）：A1 索引新鲜度 → A2 `search_graph` 枚举同类实现 → A3 grep 穷尽启动点 → A4 覆盖度 + `get_file_outline` → **A5 改动清单写进计划（逐项 可行/存疑/否决 + 风险 + 回退）** → **A6 状态迁移矩阵** → A7 实施 → **A8 按目标构建 + oracle/`racecheck`/FP64/跨路线一致性** → **A9 §3 + §0 + 回写计划 + `index_repository` + `git diff --check`**。
+② **WP6.4 的三块新码**：`window > 8198` 的 split 分支带尾、跨 **group(128)/ring(64)** 边界的 needle、跨二进制 `tail=0` 逐位；用例形状照 `tests/ops/softmax_attention/causal_cache.cpp`（**先 `get_file_outline`**）。
+③ **已知坑（省一轮）**：tail-only 的 op 级输出 = **`acc_orig/l`（无净 Hadamard）**；直测/启动用例的 oracle 须**反旋同一旋转后 bf16 查询**（`unrotate_query_like_kernel`）；**不要回退** `reduce_output_hadamard_kernel` 的 2 个 `__syncthreads()`；`exact_tail` 与 `linear_pair/q8` 的 `launch_exact_tail` **同名不同物**。
+**WP6.4 及其后仍需用户明确授权后推进。** ✅ **尾环 dtype 已裁决（08-18）= 维持默认 f16**（零 diff；见 §3-08-18 / 计划书 D-22(7)；**不再待决**）。⚠ **A6 口径**：自 WP6.2 起 tail=0 输出**不再与改前二进制逐字节相同**（= `BF16→FP32` 的意图）；A6 点名的载体都是**同版本内**比较 ⇒ 按"同版本内逐位判据成立"理解；**跨二进制逐位比对已登记为 WP6.4 的待补项**。
 
 **codebase-memory 图谱（2026-10-08 起可用，勿再被 SessionStart hook 误导）**：本仓已被索引
-（`D-ninfer-ninfer-precision-tail`，**45,944 节点 / 216,668 边**；**08-11 重跑 `index_repository(mode=full)`，已含 P3b/P3c/P3d**；
-08-08 时为 45,923 / 216,539）。注意：**SessionStart hook 仍报 "no indexed graph project
+（`D-ninfer-ninfer-precision-tail`，**46,009 节点 / 216,983 边**；**08-19 WP6.3 边界重跑 `index_repository`，已含 WP6.1–WP6.3 与本次文档/纪律改动**）。注意：**SessionStart hook 仍报 "no indexed graph project
 matched this working directory"（陈旧的误报）**——直接 `list_projects` 即可看到本仓。使用纪律：
 依赖某文件前先 `check_index_coverage`（`index_status` 报 `parse_partial 253` / `not_indexed 79` /
 `parse_unusable 7`（多为 `third_party/`），CUDA `.cu/.cuh` 可能在 partial 列表内 ⇒ **miss 的行直接读源码**）；
@@ -1310,7 +1306,8 @@ matched this working directory"（陈旧的误报）**——直接 `list_project
 （0 个图谱独有文件）**；`activate_sequence_kvarn_tail` 的 direct 调用者 1 个（`prefill.cpp:661`，其余为 hop≥2 的传递祖先，切勿当调用点）。
 **08-11 更新**：`reset_kvarn_tail_row` 现为 **`callers_total=4`**（**1 个生产调用点** `ProgramImpl::causal_score` + 3 个测试 hop）；
 08-08 记的 `callers_total=0` 是**索引陈旧**（索引 04:35 早于 P3d 提交 05:12），**已失效**。⇒ 引用图谱前**先看 `indexed_at` 与工作树 `HEAD` 的关系**。
-**08-16 更新（用户授权后已写入 `AGENTS.md`）**：图谱使用纪律升级为**三条硬门禁**（① 改共享契约 kernel 前先 `search_graph` 枚举同类实现 + grep 定位启动点；② 否定/穷尽断言必须图查询 + `check_index_coverage` 并写明所用查询；③ 陌生文件先 `get_file_outline`），并明确**图谱不覆盖 kernel 内部**（局部 `__shared__` 非节点、`<<<>>>` 非 `CALLS` 边、kernel 入度恒 0 ⇒ 同步/暂存复用/无竞态这类正面断言只能来自源码 + `racecheck`）。**每个 WP 边界跑 `index_repository`**。**实战印证（08-16）**：`search_graph name_pattern=".*reduce_output.*"` 一次给出全仓**恰好 4 个** reduce-output kernel，据此才敢断言「只有 KVarN 这个带缺陷」——这正是 grep 给不了的穷尽性证据。
+**08-19 更新（已写入 `AGENTS.md`）**：图谱纪律升级为**分层变更流程 A1–A9**（原三条硬门禁**并入其中**；**Tier A** 共享契约/共享类型/跨文件行为走全流程，**Tier B** 单点局部改动只走 A7–A9），并明确**图谱不覆盖 kernel 内部**（局部 `__shared__` 非节点、`<<<>>>` 非 `CALLS` 边、kernel 入度恒 0 ⇒ 同步/暂存复用/无竞态只能来自源码 + `racecheck`）。**`AGENTS.md` 的历史与依据已搬到 `docs/port-records/AGENTS-ARCHIVE-2026-10.md`（正文引用为 "archive §X"）**。**每个 WP 边界跑 `index_repository`**。
+**实战印证**：08-16 `search_graph name_pattern=".*reduce_output.*"` 给出全仓**恰好 4 个** reduce-output kernel；**08-19 门禁① sweep** 同法给出 `kvarn_exact_tail_partition` **in=2**（body + 尾两个调用者，与"共用一分区"的设计一致）、`exact_tail` 与 q8 **命名撞车**、**既有 `test_exact_tail_capacity.cpp`**，以及 **`search_graph.file_pattern` 需精确全路径而非正则**（`.*x.*` 返回 0）——这些正是 grep 给不了的穷尽性证据。
 ---
 
 ## 6. 已归档信息索引（2026-10-08）
