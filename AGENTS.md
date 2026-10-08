@@ -1,6 +1,7 @@
 # AGENTS.md
 
-These rules apply to the whole repository.
+These rules apply to the whole repository. Removed history, rationale and measured evidence are
+archived verbatim in `docs/port-records/AGENTS-ARCHIVE-2026-10.md`, referenced below as **archive §X**.
 
 ## Objective and scope
 
@@ -33,12 +34,11 @@ optional layer pipeline across several GPUs on Linux. It implements `Qwen3_5ForC
 binding and execution path. This fork is the **RTX 50-series Windows 16 GB "precision-tail" port**:
 Qwen3.8-27B GSQ-RCO plus the `--kv-tail-tokens` precision-tail work. It targets **`sm_120a`** and is
 tuned on **NVIDIA GeForce RTX 5070 Ti (16 GB)**, built with CUDA 13.3; `CMakeLists.txt` also admits
-`sm_80`/`sm_86`/`sm_89` as compatibility targets. On a `120a` build the `mma.sync` compatibility
-route is the tested one, while upstream's native routes (`NINFER_SM120_NATIVE=ON`) are a separate,
-unqualified code path. Upstream (`Neroued/ninfer`) targets `sm_120a` on RTX 5090; its schedules,
-route tables and published measurements come from that card, so treat an upstream tuning constant as
-a hypothesis until measured on this one. The build environment is in "Windows build environment
-(RTX 5070 Ti / sm_120a port host)" below.
+`sm_80`/`sm_86`/`sm_89` as compatibility targets. On a `120a` build the `mma.sync` compatibility route
+is the tested one; upstream's native routes (`NINFER_SM120_NATIVE=ON`) are a separate, unqualified code
+path, and upstream's schedules, route tables and published measurements come from a different card —
+treat an upstream tuning constant as a hypothesis until measured on this one (provenance: archive §C).
+The build environment is in "Windows build environment (RTX 5070 Ti / sm_120a port host)" below.
 
 Generation uses one resident model on one GPU, or split into pipeline stages over up to eight
 (`--devices`, Linux only; each stage owns whole layers with their KV and state, and the head,
@@ -113,16 +113,16 @@ applicable evidence and stop collecting once the relevant alternatives can be di
 
 Choose the affected checks, rather than running this table as a checklist:
 
-| Change | Typical evidence |
-|---|---|
-| Documentation | affected links/references and `git diff --check` |
-| C++ runtime/API | affected build targets and behavioral tests |
-| Python tooling | `py_compile` with the selected interpreter and affected tests |
-| Artifact framing/binding/conversion | affected contract tests; real artifact when semantics require it |
-| CUDA mathematics | independent oracle at relevant shapes and route boundaries |
-| Memory or lifetime | affected execution; sanitizer for a concrete lifetime question |
-| Performance | measurement at the claimed scope; profiling only for unresolved attribution |
-| Serving | affected schema tests and observable request/stream behavior |
+| Change                              | Typical evidence                                                            |
+| ----------------------------------- | --------------------------------------------------------------------------- |
+| Documentation                       | affected links/references and `git diff --check`                            |
+| C++ runtime/API                     | affected build targets and behavioral tests                                 |
+| Python tooling                      | `py_compile` with the selected interpreter and affected tests               |
+| Artifact framing/binding/conversion | affected contract tests; real artifact when semantics require it            |
+| CUDA mathematics                    | independent oracle at relevant shapes and route boundaries                  |
+| Memory or lifetime                  | affected execution; sanitizer for a concrete lifetime question              |
+| Performance                         | measurement at the claimed scope; profiling only for unresolved attribution |
+| Serving                             | affected schema tests and observable request/stream behavior                |
 
 Record the target, relevant hardware/toolchain, workload or command, and summarized result needed
 to interpret a material claim. Hashes, clean worktrees, full command transcripts, raw report
@@ -137,7 +137,7 @@ issue blocks use. Supporting work is not an independent completion objective.
 ## Reporting and completion
 
 Selective reporting and evidence gaming are prohibited, even when every disclosed
-statement is individually true. For every implementation task:
+statement is individually true.最终向用户汇报时必须使用中文. For every implementation task:
 
 1. Cover the entire agreed deliverable, its completion status, and all affected or
    evaluated dimensions: behavior, numerical semantics, interfaces, architecture,
@@ -201,17 +201,17 @@ The current instance is the KVarN port: `kvarn-port-progress.md` is the record, 
 
 Read the authority relevant to the current decision; this is not a mandatory reading list.
 
-| Decision | Entry point |
-|---|---|
-| Product capabilities and exact commands | `README.md`, executable `--help`; `docs/cli.md`, `docs/serving.md`, `docs/perplexity.md` |
-| Execution, model/runtime ownership, scheduling, transactions, graphs | `docs/maintainer/engine-architecture.md` |
-| Context resources, checkpoints, replicas; physical KV | `docs/maintainer/resource-scheduling-and-context-cache.md`; `docs/maintainer/paged-kv-cache.md` |
-| Artifact, layout, codec, conversion, or model mathematics | model/artifact references and conversion guide linked from `docs/README.md` |
-| Op contracts, implementation ownership, numerical/performance qualification | `docs/maintainer/op-development.md` |
-| Test/benchmark commands and published performance | `tests/README.md`, `bench/README.md`, `docs/performance.md` |
-| Build system, toolchain and configuration options | `docs/maintainer/build-system.md`; host details in "Windows build environment" below |
-| KVarN port plan, progress record and precision-tail records | `kvarn-port-into-precision-tail-plan.md` (active plan; §0.5 record protocol), `kvarn-port-progress.md` (active progress record); archived records in `docs/port-records/` (`PORT-BEELLAMA-SPEC.md`, `PORT-MEMORY.md`, `PORT-DOD.md`) |
-| In-tree C++ interface | `include/ninfer/engine.h`, `include/ninfer/types.h` |
+| Decision                                                                    | Entry point                                                                                                                                                                                                                          |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Product capabilities and exact commands                                     | `README.md`, executable `--help`; `docs/cli.md`, `docs/serving.md`, `docs/perplexity.md`                                                                                                                                             |
+| Execution, model/runtime ownership, scheduling, transactions, graphs        | `docs/maintainer/engine-architecture.md`                                                                                                                                                                                             |
+| Context resources, checkpoints, replicas; physical KV                       | `docs/maintainer/resource-scheduling-and-context-cache.md`; `docs/maintainer/paged-kv-cache.md`                                                                                                                                      |
+| Artifact, layout, codec, conversion, or model mathematics                   | model/artifact references and conversion guide linked from `docs/README.md`                                                                                                                                                          |
+| Op contracts, implementation ownership, numerical/performance qualification | `docs/maintainer/op-development.md`                                                                                                                                                                                                  |
+| Test/benchmark commands and published performance                           | `tests/README.md`, `bench/README.md`, `docs/performance.md`                                                                                                                                                                          |
+| Build system, toolchain and configuration options                           | `docs/maintainer/build-system.md`; host details in "Windows build environment" below                                                                                                                                                 |
+| KVarN port plan, progress record and precision-tail records                 | `kvarn-port-into-precision-tail-plan.md` (active plan; §0.5 record protocol), `kvarn-port-progress.md` (active progress record); archived records in `docs/port-records/` (`PORT-BEELLAMA-SPEC.md`, `PORT-MEMORY.md`, `PORT-DOD.md`) |
+| In-tree C++ interface                                                       | `include/ninfer/engine.h`, `include/ninfer/types.h`                                                                                                                                                                                  |
 
 [Documentation map](docs/README.md) routes to narrower authorities when needed.
 
@@ -226,24 +226,17 @@ configured for this host: Ninja, Release, `CMAKE_CUDA_ARCHITECTURES=120a`,
 there is nothing to gain by redoing it. The tree registers 259 tests
 (`ctest --test-dir build-port -N`).
 
-Toolchain (all put on `PATH` by `.deps/env-port.bat`):
-
-| | version | path |
-|---|---|---|
-| MSVC (VS 2022 BuildTools) | `14.44.35207` | `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools` |
-| CUDA | `13.3` | `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3` |
-| CMake | `3.31.6-msvc6` | bundled with the VS 2022 BuildTools CMake directory |
-| Ninja | (bundled) | bundled with the VS 2022 BuildTools CMake directory |
-
-Only VS 2022 BuildTools is installed; there is no VS 2026 on this host, so the older "two MSVC
-toolchains, the wrong one first on `PATH`" trap no longer applies. Importing the vcvars environment
-is still required before building — `nvcc` needs `INCLUDE`/`LIB` from vcvars, and adding only the
-compiler's `bin` to `PATH` leaves the standard-library headers missing
-(`fatal error C1083: Cannot open include file: 'cstdint'`).
+Toolchain (all on `PATH` by `.deps/env-port.bat`): MSVC `14.44.35207` (VS 2022 BuildTools), CUDA
+`13.3`, and the VS-bundled CMake `3.31.6-msvc6` + Ninja. Only VS 2022 BuildTools is installed, so the
+older "two MSVC toolchains, the wrong one first on `PATH`" trap no longer applies. Importing the
+vcvars environment is still required before building — `nvcc` needs `INCLUDE`/`LIB` from vcvars, and
+adding only the compiler's `bin` to `PATH` leaves the standard-library headers missing
+(`fatal error C1083: Cannot open include file: 'cstdint'`). Versions, paths and the retired trap:
+archive §A.
 
 Build from any shell by sourcing the port environment first. `.deps/env-port.bat` is the supported
 entry point; do not inline vcvars from Git Bash (MSYS rewrites `>nul` into a path and breaks the
-`&&` chain):
+`&&` chain). Its full setting list is in archive §A.
 
 ```bat
 call D:\ninfer\ninfer-precision-tail\.deps\env-port.bat
@@ -253,16 +246,9 @@ ctest --test-dir D:\ninfer\ninfer-precision-tail\build-port -j2 --output-on-fail
 ctest --test-dir D:\ninfer\ninfer-precision-tail\build-port -R <regex> --output-on-failure
 ```
 
-`env-port.bat` sets the VS 2022 vcvars (`-vcvars_ver=14.44`), the CUDA 13.3 `bin`, the VS
-CMake/Ninja `bin`, `VCPKG_ROOT=.deps/vcpkg-root` (`x64-windows`), `CUDACXX`, and
-`CL=/D_USE_MATH_DEFINES`. It builds cleanly and is the supported path.
-
 For a standalone `.cu` probe outside the build tree, use `cmd`/PowerShell rather than Git Bash
-(which mangles MSVC-style flags, e.g. `/wd4819` becomes a path), and pass the port architecture:
-
-```bat
-nvcc -O3 -arch=sm_120a probe.cu -o probe.exe
-```
+(which mangles MSVC-style flags, e.g. `/wd4819` becomes a path) with the port architecture:
+`nvcc -O3 -arch=sm_120a probe.cu -o probe.exe` (why: archive §A).
 
 Other host facts:
 
@@ -290,19 +276,60 @@ This repository is indexed as graph project `D-ninfer-ninfer-precision-tail`; th
   directly and qualify the conclusion.
 - **Structural, negative and exhaustive claims must come from the graph**, not grep alone: "who
   calls X", "X is unused", "no other caller", "nothing else reads this field", "the only place".
-  Use `trace_path` inbound (plus coverage); a grep-only result is labelled as grep-only.
-  **`trace_path` resolves callables only**: an inbound trace on a *field* qualified name returns
-  `callers_total: 0` even when readers exist. Field consumers need `query_graph` Cypher over the
-  `USAGE`/`WRITES` edge types, and those edges are **name-resolved** — they conflate same-named
-  fields across classes (a `kvarn_bits` read comes back against whichever declaring class the
-  resolver picked) and carry no access-site line, only the enclosing symbol. Treat a field-level
-  negative claim as *indicative* and reconcile it with grep before recording it.
+  Use `trace_path` inbound for callables (plus coverage). **`trace_path` resolves callables only** —
+  a *field* needs `query_graph` Cypher over `USAGE`/`WRITES`, whose edges are **name-resolved** (they
+  conflate same-named fields across classes and carry no access-site line), so treat a field-level
+  negative claim as *indicative* and reconcile it with `grep` before recording it.
 - **Changing a shared type is a graph task.** Before editing a struct or enum in
-  `include/ninfer/types.h` or another shared header, enumerate its consumers. The graph *can* find
-  readers grep misses (visitors, serialisers, macros), but on the one measured C++ field case
-  (`KvarnBits`, 2026-10-08) its consumer set was exactly grep's — so use it to *check* the sweep,
-  not to replace it.
+  `include/ninfer/types.h` or another shared header, enumerate its consumers, and use the result to
+  *check* a `grep` sweep rather than to replace it.
 - Literal lookups (one flag, one string, one config value) stay with `grep`.
+
+**Measured cases and tool boundaries** (the `reduce_output` uniqueness evidence, the `KvarnBits`
+consumer comparison, the `exact_tail` name collision, and the fact that `file_pattern` is not a
+regex): archive §B.
+
+**The graph does not cover kernel interiors.** A local `__shared__` array inside a kernel body is not
+a graph node, and a `<<<>>>` launch is not a `CALLS` edge (the kernel's inbound degree stays 0 with a
+caller present). Positive claims about synchronization, scratch reuse and race freedom come from the
+source plus `compute-sanitizer --tool racecheck`.
+
+**Change flow (checklist; the graph gates above are its static half).** **Tier A** — a shared
+cross-kernel contract, a shared type, or cross-file behavior — runs the whole flow. **Tier B** — a
+single-site local change (one function body, a literal, a config value, docs) — runs only A7–A9. Make
+the tier explicit: running the full ceremony on Tier B work is what caused gate ① to be skipped on
+2026-10-08.
+
+- **A1 index freshness.** `index_status`: reindex only when `indexed_at` predates the working tree's
+  latest change; otherwise reuse the previous package's boundary index (`metadata_changed` /
+  `parse_partial` on a dirty tree are why a stale index looks untrustworthy).
+- **A2 contract enumeration (graph).** `search_graph` (`name_pattern`) for every sibling
+  implementation of the contract; narrow a same-named family with `qn_pattern` or an **exact
+  full-path** `file_pattern`. Distinguish same-named different things by prefix.
+- **A3 launch-site sweep (grep).** Enumerate every `<<<...>>>` launch of each sibling by kernel name;
+  the graph does not model launches.
+- **A4 coverage.** `check_index_coverage` on every file relied on; read the flagged `parse_partial` /
+  `not_indexed` ranges directly and qualify the conclusion. Open an unfamiliar file with
+  `get_file_outline`, not a whole-file read.
+- **A5 plan with the change manifest.** Write the goal and acceptance criteria, then the per-file
+  change points (symbol, lines) with, per item, **feasible / doubtful / rejected** + risk + rollback.
+  Keep "quasi-code" at the interface-and-invariant level — do not paste implementation bodies into a
+  durable document. Iterate every *doubtful* item back through A2–A4 until it is resolved or rejected.
+- **A6 state-transition matrix (before implementing).** Cross the state dimensions (e.g. `N=0`,
+  `N≤ring`, `N≥width`, cross-group(128)/ring(64) boundary, checkpoint recovery) with the observation
+  faces (numeric oracle, bit-exact, capacity, observable text). A blank cell is **uncovered**: record
+  it as a declared gap, never as satisfied.
+- **A7 implement** the manifest item by item.
+- **A8 build + dynamic verification.** Build by target (never the whole tree): the registered
+  oracle/gate tests, `compute-sanitizer --tool racecheck` for synchronization and scratch reuse, an
+  independent FP64 oracle for numeric changes, and a cross-route consistency check (a change confined
+  to one route must move only that route's margins).
+- **A9 close the boundary.** Append the progress §3 entry (command, raw output, verdict), refresh the
+  §0 snapshot, write conclusions back to the plan, run **`index_repository`**, and `git diff --check`.
+
+**What the graph cannot give.** It is a static structure tool: it supplies *structure and
+completeness*, never feasibility, risk or correctness. Those come from reading the source and from
+domain reasoning.
 
 ### Build, run and resources
 
