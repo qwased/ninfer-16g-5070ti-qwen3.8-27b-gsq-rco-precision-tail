@@ -1136,6 +1136,7 @@ WP6.1 的尾核按"旋转域"写的：分数旋转不变（`<Wq,Wk> == <q,k>`）
 - **`AGENTS.md` 改动**：① 顶部定义一次"**archive §X**"指针；② 构建环境节 **toolchain 表 + 陷阱史 + `env-port.bat` 枚举 + 探针段**改为压缩版 + 指针；③ 图谱节把**三条门禁并入 A1–A9**（原两处讲同一件事，去重）、三处实测案例外移为一行指针；④ 产品节的**上游 provenance** 压缩 + 指针。
 - **量化**：**388 → 354 行（−34）/ 29,613 → 26,964 B（−9%）**。**⚠ 低于我自估的 −34%（约 −130 行）**——因为**规则本体一律保留**（尤其 A1–A9 流程、`Reporting` 5 条、`Durable progress record` 5 条、"否则会踩的坑"清单），只裁了**历史/依据/证据/重复**。若要更深：唯一剩下的手段是把 **A1–A9 移到独立文档**（再省 ~34 行），**代价是它不再随会话加载、也就更容易被跳过** —— **未采**，故 §6×2 节仍是最大两块（45 + 69 行）。
 - **验证**：`git diff --check` 干净；代码围栏成对（2 个 ` ``` `）；未动其余章节。
+- **⚠ 裁掉又补回的一条规则（如实记录）**：合并门禁②进"否定/穷尽断言"要点时，**丢掉了原门禁②的 "State the query that was run"**（提交 `58b3baf3` 之后经复查发现）⇒ 已用 `5d51c6f6` 补回（"**State the query that was run** whenever the claim is negative or exhaustive"）。⇒ **瘦身的真实风险就是这一条**：规则与依据混在同一段时，裁依据容易连带裁掉规则；本次靠**逐节对照原文**才发现。**再次证明"不裁规则本体"这条纪律必须配"逐节比对"才能落实。**
 
 **产物**：`include/ninfer/ops/kvarn.h`、`src/models/qwen3_5/state/decoder_state.cpp`、`src/models/qwen3_5/program/planning/startup.cpp`、`src/ops/kvarn/{decode_kernel.cuh,decode.cu,tail_partial.cuh,tail_partial.h,tail_partial.cu,attention.cu}`、`tests/ops/test_kvarn.cpp`；e2e 脚本与日志在 `.deps/kvarn-adm/`（`wp63_e2e.sh`、`wp63/`）。回写计划书 §7-WP6.3、附录 D-24（待写）。
 
