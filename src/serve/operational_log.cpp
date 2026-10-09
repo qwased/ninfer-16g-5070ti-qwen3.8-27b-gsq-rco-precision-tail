@@ -285,6 +285,7 @@ OperationalRecord render_request_done(const RequestLogContext& context,
         << product::format_pretty_percent(cache_ratio);
     if (metrics.prefix_reuse_path != ninfer::PrefixReusePath::Root) {
         out << ", " << prefix_reuse_path_name(metrics.prefix_reuse_path);
+        if (metrics.exact_tail_reuse_unverified) { out << ", exact-tail reuse unverified"; }
     }
     out << ") | TTFT " << product::format_pretty_duration(metrics.ttft_seconds) << " | total "
         << product::format_pretty_duration(metrics.total_seconds);

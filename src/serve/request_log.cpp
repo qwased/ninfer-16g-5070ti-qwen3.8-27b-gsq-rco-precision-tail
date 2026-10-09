@@ -592,7 +592,9 @@ std::string format_request_done(const RequestLogContext& context,
     if (!outcome.tool_calls.empty()) { out << " tool_calls=" << outcome.tool_calls.size(); }
     out << " prompt=" << outcome.prompt_tokens << " gen=" << outcome.completion_tokens
         << " cache=" << metrics.prefix_cache_hit_tokens
-        << " reuse=" << prefix_reuse_path_name(metrics.prefix_reuse_path) << " ttft=" << std::fixed
+        << " reuse=" << prefix_reuse_path_name(metrics.prefix_reuse_path)
+        << (metrics.exact_tail_reuse_unverified ? " tail_reuse=unverified" : "") << " ttft="
+        << std::fixed
         << std::setprecision(0) << ttft_ms << "ms"
         << " prefill=" << rate(computed_prefill_tokens, metrics.prefill_seconds)
         << " decode=" << rate(decode_tokens, metrics.decode_seconds)

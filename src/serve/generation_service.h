@@ -58,6 +58,9 @@ struct GenerationMetrics {
     NgramArchiveStats ngram_archive;
     std::uint32_t prefix_cache_hit_tokens     = 0;
     ninfer::PrefixReusePath prefix_reuse_path = ninfer::PrefixReusePath::Root;
+    // Prefix came from a checkpoint while the exact KV tail was enabled: byte-identity of the
+    // continuation with a fresh prefill is not established (KVARN-TAIL-REUSE-DIVERGENCE.md).
+    bool exact_tail_reuse_unverified = false;
     ninfer::MaterializationDiagnostics materialization;
 };
 
