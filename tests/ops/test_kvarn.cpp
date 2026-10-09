@@ -1881,6 +1881,39 @@ HostTailPartition host_tail_partition(int window, int tail_tokens, int launch_ca
     return HostTailPartition{body_window, body_active, total - body_active};
 }
 
+// WP6.4: the KVarN body's own split policy is not the small-T default tier above 8198 keys. Mirror of
+// `detail::kvarn_decode_active_splits` (decode_kernel.cuh) at 24 query heads, which is the geometry
+// this suite runs: above 8198 it takes div_up(window, 192) splits, capped at 41 up to 122880 keys and
+// at 82 beyond it; at or below 8198 it is `causal_small_t_default_splits` at split scale 1, which
+// `host_small_t_default_splits` already models. The host mirror of the partition below used to cover
+// only the small-T tier, so no case here could exercise the long branch at all.
+int host_kvarn_active_splits(int window, int launch_capacity) {
+    if (window > 8198) {
+        int splits    = (window + 191) / 192;
+        const int cap = window <= 122880 ? 41 : 82;
+        splits        = std::min(splits, cap);
+        return std::min(splits, launch_capacity);
+    }
+    return std::min(host_small_t_default_splits(window, 1), launch_capacity);
+}
+
+HostTailPartition host_kvarn_tail_partition(int window, int tail_tokens, int launch_capacity) {
+    const auto active = [&](int w) {
+        if (w <= 0) { return launch_capacity; }
+        return host_kvarn_active_splits(w, launch_capacity);
+    };
+    const int total       = active(window);
+    const int tail_keys   = tail_tokens > 0 ? std::min(tail_tokens, window) : 0;
+    const int body_window = window - tail_keys;
+    int body_active       = body_window > 0 ? active(body_window) : 0;
+    if (body_window > 0 || tail_keys > 0) {
+        const int limit = tail_keys > 0 ? total - 1 : total;
+        if (body_active > limit) { body_active = limit; }
+        if (body_active < 1) { body_active = 1; }
+    }
+    return HostTailPartition{body_window, body_active, total - body_active};
+}
+
 // f16 bits -> float, so the F16-ring oracle reads exactly the values the kernel's `__half` reads.
 inline float f16_bits_to_f32(std::uint16_t h) {
     const std::uint32_t sign = static_cast<std::uint32_t>(h & 0x8000U) << 16;
@@ -1963,13 +1996,21 @@ std::vector<double> unrotate_query_like_kernel(const std::vector<float>& rotated
 
 template <int QueryHeads, int KVHeads, int SplitScale>
 int run_exact_tail_partial_case(int window, int tail_tokens, int launch_capacity,
-                                const std::string& label, bool f16_tail = false) {
+                                const std::string& label, bool f16_tail = false,
+                                bool kvarn_long_tier = false, int ring_pages_override = 0) {
     using Geometry = ops::CausalAttentionGeometry<QueryHeads, KVHeads, SplitScale>;
     constexpr int kGroupSize = Geometry::GroupSize;
-    const int ring_pages     = (window + 63) / 64;
+    // The production ring's page count follows the retention, not the window: the allocator hands the
+    // tail ceil(N / 64) + 1 pages, so the ring holds the newest N keys and the tail interval cannot
+    // alias two positions onto one slot. The default keeps the whole window in the ring, which is
+    // what the small-window cases want; `ring_pages_override` sets the production geometry so a
+    // window far above `N` still exercises the real page walk (and, for N a multiple of the wrap, a
+    // full turn of the ring).
+    const int ring_pages = ring_pages_override > 0 ? ring_pages_override : (window + 63) / 64;
 
     const HostTailPartition partition =
-        host_tail_partition(window, tail_tokens, launch_capacity, SplitScale);
+        kvarn_long_tier ? host_kvarn_tail_partition(window, tail_tokens, launch_capacity)
+                        : host_tail_partition(window, tail_tokens, launch_capacity, SplitScale);
 
     // Exact ring: one sequence, positions [0, window) written at their ring slot. The rows are
     // BF16 and are the ONLY source both the kernel and the oracle read, so input rounding cancels.
@@ -1981,7 +2022,9 @@ int run_exact_tail_partial_case(int window, int tail_tokens, int launch_capacity
         const int off  = position % 64;
         return static_cast<std::size_t>(kD) * (64 * (kv_head + KVHeads * page) + off) + d;
     };
-    for (int position = 0; position < window; ++position) {
+    const int ring_capacity = 64 * ring_pages;
+    const int ring_begin    = std::max(0, window - ring_capacity);
+    for (int position = ring_begin; position < window; ++position) {
         for (int kv_head = 0; kv_head < KVHeads; ++kv_head) {
             for (int d = 0; d < kD; ++d) {
                 const float k = 0.5F * std::sin(0.017F * (position + 1) * (d + 1) + kv_head);
@@ -2176,7 +2219,15 @@ int run_exact_tail_partial_case(int window, int tail_tokens, int launch_capacity
     }
 
     const double kTailTolerance = 2.0e-3;
+    // Every key the tail reads has to be inside the ring the oracle filled; a shorter ring is a
+    // fixture error, not a kernel result.
+    if (partition.body_window < ring_begin) {
+        std::cout << label << ": tail starts at " << partition.body_window
+                  << " but the ring only holds [" << ring_begin << ", " << window << ")\n";
+        ++failures;
+    }
     std::cout << label << ": window=" << window << " tail=" << tail_tokens
+              << " ring_pages=" << ring_pages
               << " body_active=" << partition.body_active
               << " tail_active=" << partition.tail_active
               << " neutral_tail_splits=" << neutral_splits_written
@@ -2636,6 +2687,264 @@ int run_exact_tail_merged_case(int window, int query_width, int first_query_posi
                            8.0e-3, /*report=*/true);
 }
 
+// WP6.4 (A6/A7 scaffolding). Three additions, all host-side:
+//   * the KVarN long tier above 8198 keys *with a tail* (see `host_kvarn_active_splits` and the
+//     `kvarn_long_tier` cases below) -- no host oracle covered it before;
+//   * the needle instrument, which pins "the tail counted every key exactly once" at the
+//     boundaries where the tail interval, the 128-token body group and the 64-token ring page
+//     disagree;
+//   * the `tail = 0` no-op regression.
+
+constexpr int kNeedlePages = 80; // 128-token body pages, enough for the ~8.7k-token windows below
+
+// A window's body rows are appended in 1024-token chunks. 1024 is a multiple of the 128-token KVarN
+// record, so every record is still encoded from its own complete group of rows and the records are
+// exactly what one wide append would have produced.
+template <int Heads, int Pages, int Bits>
+void append_cache_window(CacheFixture<Heads, Pages, Bits>& cache, std::uint32_t seed, int window) {
+    constexpr int kChunk     = 1024;
+    const std::size_t stride = static_cast<std::size_t>(kD) * Heads;
+    const std::vector<float> key   = make_cache_values(window, seed, Heads);
+    const std::vector<float> value = make_cache_values(window, seed + 1U, Heads);
+    for (int begin = 0; begin < window; begin += kChunk) {
+        const int count = std::min(kChunk, window - begin);
+        std::vector<float> key_chunk(stride * count);
+        std::vector<float> value_chunk(stride * count);
+        std::memcpy(key_chunk.data(), key.data() + stride * begin, stride * count * sizeof(float));
+        std::memcpy(value_chunk.data(), value.data() + stride * begin,
+                    stride * count * sizeof(float));
+        append_cache(cache, key_chunk, value_chunk, begin, false);
+    }
+}
+
+// WP6.4: the A7 needle instrument, at the Op level.
+//
+// The ring carries two "needle" rows whose key projects to 1000 on the query axis and whose values
+// are large and different; every other row in the window projects to ~0 on that axis. The query is
+// one axis (`q = e_0`), so the two needles score ~62 nats above every other key and the softmax is
+// (1/2, 1/2, ~0, ~0, ...): the observable output must be exactly (V_a + V_b) / 2, with no body term
+// and no split arithmetic in the oracle. The neighbouring outcomes are all distinct, so the
+// instrument pins "counted exactly once" rather than "approximately right":
+//   * a dropped needle gives V_b (or V_a);
+//   * a double-counted needle gives (2 V_a + V_b) / 3 (or (V_a + 2 V_b) / 3);
+//   * a needle read from the wrong ring slot gives some other value entirely.
+// Because 62 nats of margin leave the ~9k non-needle keys with a total weight under 1e-14, the body
+// needs no quantization model here: whatever the body reads only has to be *small*, which the
+// appended rows are. `needle_a` / `needle_b` are absolute positions, chosen so the tail interval's
+// ends disagree with the 128-token body group and the 64-token ring page boundaries.
+int run_exact_tail_needle_case(int window, int tail_tokens, int needle_a, int needle_b,
+                               int ring_pages, const std::string& label) {
+    constexpr int QueryHeads = 24;
+    constexpr int KVHeads    = 4;
+
+    const int ring_capacity = 64 * ring_pages;
+    const int ring_begin    = std::max(0, window - ring_capacity);
+    const int tail_keys     = std::min(tail_tokens, window);
+    const int body_window   = window - tail_keys;
+    const HostTailPartition partition = host_kvarn_tail_partition(window, tail_tokens, 82);
+
+    if (ring_begin > body_window || needle_a < body_window || needle_a >= window ||
+        needle_b < body_window || needle_b >= window || needle_a == needle_b) {
+        std::cerr << label << ": needle case preconditions not met (window=" << window
+                  << " tail=" << tail_tokens << " body_window=" << body_window << " ring=["
+                  << ring_begin << ", " << window << ") needles=" << needle_a << "," << needle_b
+                  << ")\n";
+        return 1;
+    }
+
+    CacheFixture<KVHeads, kNeedlePages, kBits> cache;
+    append_cache_window(cache, 0x7a01U, window);
+
+    const auto ring_index = [&](int position, int head, int d) {
+        const int page = (position / 64) % ring_pages;
+        return static_cast<std::size_t>(d) +
+               static_cast<std::size_t>(kD) *
+                   (64 * (head + static_cast<std::size_t>(KVHeads) * page) + position % 64);
+    };
+    // `first` is the needle at `needle_a`; the two value profiles differ in both the low and the
+    // high dims, so a drop, a double count and a swap are three different observable outputs. The
+    // magnitudes are deliberately not BF16-exact, so the result is a real rounded average rather
+    // than a value that happens to land on the grid.
+    const auto needle_value = [](bool first, int d) {
+        const bool low = (d % 4) == 0;
+        if (first) { return low ? 8.3F : -4.1F; }
+        return low ? -2.1F : 6.3F;
+    };
+    // What the kernel reads out of the ring is the BF16 image of those values.
+    const auto needle_read = [&](bool first, int d) {
+        return static_cast<double>(bf16_to_f32(f32_to_bf16(needle_value(first, d))));
+    };
+
+    std::vector<float> host_ring_k(static_cast<std::size_t>(kD) * 64 * KVHeads * ring_pages, 0.0F);
+    std::vector<float> host_ring_v(host_ring_k.size(), 0.0F);
+    for (int position = ring_begin; position < window; ++position) {
+        const bool is_needle = position == needle_a || position == needle_b;
+        for (int head = 0; head < KVHeads; ++head) {
+            for (int d = 0; d < kD; ++d) {
+                const std::size_t slot = ring_index(position, head, d);
+                if (is_needle) {
+                    host_ring_k[slot] = d == 0 ? 1000.0F : 0.0F;
+                    host_ring_v[slot] = needle_value(position == needle_a, d);
+                } else {
+                    host_ring_k[slot] = 0.0F;
+                    host_ring_v[slot] = 0.5F * std::sin(0.01F * (position + 1) * (d + 1) + head);
+                }
+            }
+        }
+    }
+    round_to_bf16(host_ring_k);
+    round_to_bf16(host_ring_v);
+
+    // q = e_0: one axis, so `q . k` is `k[0]` and the two needles' score is 1000 * 0.0625 = 62.5.
+    std::vector<float> host_query(static_cast<std::size_t>(kD) * QueryHeads, 0.0F);
+    for (int head = 0; head < QueryHeads; ++head) { host_query[static_cast<std::size_t>(head) * kD] = 1.0F; }
+    const std::vector<std::int32_t> host_positions{window - 1};
+
+    DeviceBuffer device_query = to_device_bf16(host_query);
+    DeviceBuffer positions    = to_device(host_positions);
+    DeviceBuffer rows         = to_device(std::vector<std::int32_t>{0});
+    DeviceBuffer ring_k       = to_device_bf16(host_ring_k);
+    DeviceBuffer ring_v       = to_device_bf16(host_ring_v);
+    DeviceBuffer output(host_query.size() * sizeof(std::uint16_t));
+
+    Tensor query_tensor(device_query.p, DType::BF16, {kD, QueryHeads, 1, 1});
+    Tensor output_tensor(output.p, DType::BF16, {kD, QueryHeads, 1, 1});
+    Tensor position_tensor(positions.p, DType::I32, {1, 1});
+    Tensor rows_tensor(rows.p, DType::I32, {1});
+
+    ops::KvarnPagedBatchLayerView view = cache.view();
+    view.tail.k_pages    = Tensor(ring_k.p, DType::BF16, {kD, 64, KVHeads, ring_pages});
+    view.tail.v_pages    = Tensor(ring_v.p, DType::BF16, {kD, 64, KVHeads, ring_pages});
+    view.tail.page_count = ring_pages;
+    view.tail.retention  = tail_tokens;
+
+    const ops::CausalAttentionExecutionEnvelope envelope{1, static_cast<std::uint32_t>(window)};
+    WorkspaceArena workspace(std::max<std::size_t>(
+        1, ops::kvarn_attention_workspace_capacity_bytes(QueryHeads, envelope, 1, 1, 1)));
+    ops::kvarn_attention_cached(query_tensor, position_tensor, rows_tensor, 0.0625F, view, envelope,
+                                workspace, output_tensor, nullptr);
+    cuda_synchronize();
+
+    const auto at = [](int head, int d) {
+        return static_cast<std::size_t>(d) + static_cast<std::size_t>(kD) * head;
+    };
+    std::vector<double> expected(host_query.size());
+    std::vector<double> dropped_a(host_query.size());
+    std::vector<double> dropped_b(host_query.size());
+    std::vector<double> doubled_a(host_query.size());
+    std::vector<double> doubled_b(host_query.size());
+    for (int head = 0; head < QueryHeads; ++head) {
+        for (int d = 0; d < kD; ++d) {
+            const double a = needle_read(true, d);
+            const double b = needle_read(false, d);
+            // The merge is `sum p V / l` with p_a == p_b and l == 2 p, so the two weights cancel and
+            // the only rounding left between the needle values and the BF16 output is the output's
+            // own quantization -- which the oracle applies too.
+            const double mean = static_cast<double>(bf16_to_f32(f32_to_bf16(
+                static_cast<float>((a + b) / 2.0))));
+            expected[at(head, d)]  = mean;
+            dropped_a[at(head, d)] = b;
+            dropped_b[at(head, d)] = a;
+            doubled_a[at(head, d)] = (2.0 * a + b) / 3.0;
+            doubled_b[at(head, d)] = (a + 2.0 * b) / 3.0;
+        }
+    }
+    const std::vector<double> got = from_device_bf16(output, host_query.size());
+    const auto distance = [&](const std::vector<double>& reference) {
+        double error = 0.0;
+        for (std::size_t i = 0; i < got.size(); ++i) { error += std::fabs(got[i] - reference[i]); }
+        return error;
+    };
+    const double miss      = distance(dropped_a) + distance(dropped_b);
+    const double duplicate = distance(doubled_a) + distance(doubled_b);
+    const double nearest_alternative = std::min(miss, duplicate);
+    std::cout << label << ": window=" << window << " tail=" << tail_tokens
+              << " needle_a=" << needle_a << " needle_b=" << needle_b
+              << " body_window=" << body_window << " body_active=" << partition.body_active
+              << " tail_active=" << partition.tail_active << '\n';
+    int failures = compare_profile(label.c_str(), got, expected, 2.0e-2, true);
+    // The instrument is only worth its tolerance if the wrong answers are far outside it. A dropped
+    // needle misses by |V_a - V_b| / 2 per element and a double count by a third of that, so the
+    // nearest wrong profile has to be orders of magnitude further than the rounding the oracle
+    // absorbs; a shrinking margin means the needles stopped carrying the softmax.
+    const double kMinDiscrimination = 1.0e2;
+    std::cout << label << ": nearest_wrong_profile_l1=" << std::scientific << std::setprecision(3)
+              << nearest_alternative << (nearest_alternative >= kMinDiscrimination ? "  OK\n"
+                                                                                  : "  FAIL\n");
+    if (nearest_alternative < kMinDiscrimination) { ++failures; }
+    if (failures != 0) {
+        std::cerr << label << ": |got-mean|=" << distance(expected)
+                  << " |got-drop_a|=" << distance(dropped_a)
+                  << " |got-drop_b|=" << distance(dropped_b)
+                  << " |got-double_a|=" << distance(doubled_a)
+                  << " |got-double_b|=" << distance(doubled_b) << '\n';
+    }
+    return failures;
+}
+
+// WP6.4: the A6 "tail = 0 leaves the output unchanged" regression, in the form a test can pin.
+//
+// D-23 settled that byte identity *across binaries* is unattainable by construction: the WP6.2
+// BFloat16 -> FP32 per-split accumulator is a required deliverable, so a tail-free output must move
+// relative to the pre-WP6.2 build, and no reference binary exists in the tree. What is still
+// observable, and what this case pins, is the same-binary form of the invariant: a cache view that
+// carries an *allocated* ring at `retention == 0` must produce the very same bytes as a view with no
+// ring at all -- the tail has to be inert, not merely equal in value -- and the same launch must be
+// self-deterministic, which is what makes the bitwise criterion single-shot decidable (the 08-16
+// synchronisation fix removed the only known source of run-to-run drift).
+int run_tail_zero_regression_case(int window, int first_query_position, const std::string& label) {
+    constexpr int QueryHeads = 24;
+    constexpr int KVHeads    = 4;
+    constexpr int ring_pages = 4;
+
+    CacheFixture<KVHeads, kNeedlePages, kBits> cache;
+    append_cache_window(cache, 0x7b01U, window);
+
+    const std::vector<std::int32_t> host_positions{first_query_position};
+    const std::vector<float> host_query = make_cache_values(QueryHeads, 0x7b02U);
+    DeviceBuffer positions = to_device(host_positions);
+    DeviceBuffer rows      = to_device(std::vector<std::int32_t>{0});
+    DeviceBuffer ring_k(static_cast<std::size_t>(kD) * 64 * KVHeads * ring_pages *
+                        sizeof(std::uint16_t));
+    DeviceBuffer ring_v(ring_k.bytes);
+    ring_k.fill();
+    ring_v.fill();
+
+    const ops::CausalAttentionExecutionEnvelope envelope{
+        1, static_cast<std::uint32_t>(first_query_position + 1)};
+
+    const auto run = [&](bool with_ring) {
+        DeviceBuffer query = to_device_bf16(host_query);
+        DeviceBuffer output(host_query.size() * sizeof(std::uint16_t));
+        Tensor query_tensor(query.p, DType::BF16, {kD, QueryHeads, 1, 1});
+        Tensor output_tensor(output.p, DType::BF16, {kD, QueryHeads, 1, 1});
+        Tensor position_tensor(positions.p, DType::I32, {1, 1});
+        Tensor rows_tensor(rows.p, DType::I32, {1});
+        ops::KvarnPagedBatchLayerView view = cache.view();
+        if (with_ring) {
+            view.tail.k_pages    = Tensor(ring_k.p, DType::BF16, {kD, 64, KVHeads, ring_pages});
+            view.tail.v_pages    = Tensor(ring_v.p, DType::BF16, {kD, 64, KVHeads, ring_pages});
+            view.tail.page_count = ring_pages;
+            view.tail.retention  = 0; // allocated, but the feature is off
+        }
+        WorkspaceArena workspace(std::max<std::size_t>(
+            1, ops::kvarn_attention_workspace_capacity_bytes(QueryHeads, envelope, 1, 1, 1)));
+        ops::kvarn_attention_cached(query_tensor, position_tensor, rows_tensor, 0.0625F, view,
+                                    envelope, workspace, output_tensor, nullptr);
+        cuda_synchronize();
+        return from_device<std::uint16_t>(output, host_query.size());
+    };
+
+    const std::vector<std::uint16_t> bare     = run(false);
+    const std::vector<std::uint16_t> ringed   = run(true);
+    const std::vector<std::uint16_t> repeated = run(false);
+    const bool inert      = bare == ringed;
+    const bool repeatable = bare == repeated;
+    std::cout << label << ": window=" << window << " position=" << first_query_position
+              << " ring-at-retention-zero-identical=" << (inert ? "yes" : "NO")
+              << " self-deterministic=" << (repeatable ? "yes" : "NO") << '\n';
+    return (inert && repeatable) ? 0 : 1;
+}
 
 
 } // namespace
@@ -2757,6 +3066,31 @@ int main() {
     // the packed two-column columns route, one below it the scalar route.
     failures += run_exact_tail_merged_case(1000, 6, 994, "KVarN exact tail merged scalar");
     failures += run_exact_tail_merged_case(1200, 16, 1184, "KVarN exact tail merged packed");
+    // WP6.4 (A6/A7 scaffolding): the KVarN long tier above 8198 keys with a tail -- no host oracle
+    // covered it before -- plus the retention boundaries and a full turn of the ring.
+    failures += run_exact_tail_partial_case<24, 4, 1>(8200, 384, 82,
+                                                      "KVarN exact tail crossing 8198", false, true);
+    failures += run_exact_tail_partial_case<24, 4, 1>(8700, 384, 82,
+                                                      "KVarN exact tail long body", false, true, 7);
+    failures += run_exact_tail_partial_case<24, 4, 1>(122881, 384, 82,
+                                                      "KVarN exact tail long-split cap", false, true, 7);
+    failures += run_exact_tail_partial_case<24, 4, 1>(8703, 400, 82,
+                                                      "KVarN exact tail ring wrap N400", false, true,
+                                                      8);
+    failures += run_exact_tail_partial_case<24, 4, 1>(200, 1000, 8,
+                                                      "KVarN exact tail N above window");
+    // The needle instrument at the boundaries the tail interval disagrees with: a body-group edge
+    // mid-page, the exact group/page boundary, and two needles inside one ring page.
+    failures += run_exact_tail_needle_case(8700, 384, 8316, 8699, 7, "KVarN tail needle mid-page");
+    failures += run_exact_tail_needle_case(8576, 384, 8192, 8384, 7,
+                                           "KVarN tail needle on the group boundary");
+    failures += run_exact_tail_needle_case(8600, 384, 8332, 8333, 7,
+                                           "KVarN tail needle same ring page");
+    // The whole window inside the tail (N above the window), where the body scores nothing at all.
+    failures += run_exact_tail_needle_case(1000, 2000, 500, 999, 17,
+                                           "KVarN tail needle whole window");
+    // The tail = 0 no-op regression (same-binary form; see the case's comment and D-23).
+    failures += run_tail_zero_regression_case(8400, 8399, "KVarN tail=0 regression");
     std::cout << (failures == 0 ? "OK" : "FAIL") << " kvarn correctness\n";
     return failures == 0 ? 0 : 1;
 }
